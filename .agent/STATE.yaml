@@ -1,0 +1,41 @@
+schema_version: 1
+
+project_phase: phase-0-research-and-architecture
+
+head_commit: bootstrap
+
+current_objective: null
+
+completed: []
+
+in_progress: []
+
+blocked: []
+
+next_candidates:
+  - BOOT-001
+  - BOOT-002
+  - BOOT-003
+  - BOOT-004
+  - RES-001
+  - RES-002
+  - RES-003
+  - RES-004
+  - RES-005
+  - RES-006
+  - RES-007
+  - ARCH-001
+  - ARCH-002
+  - ARCH-006
+  - ARCH-007
+
+decisions: []
+
+verification:
+  cargo_fmt: pending
+  cargo_clippy: pending
+  cargo_test: pending
+
+last_agent:
+  model: kimi
+  session: bootstrap

@@ -1,0 +1,192 @@
+schema_version: 1
+
+# Priority: lower number = earlier. Status: ready | blocked | in_progress | done.
+tasks:
+  # --- Research (Phase 0) ---
+  - id: RES-001
+    title: OBS feature inventory
+    priority: 10
+    depends_on: []
+    status: ready
+  - id: RES-002
+    title: OBS architecture research
+    priority: 10
+    depends_on: []
+    status: ready
+  - id: RES-003
+    title: GStreamer capability research
+    priority: 10
+    depends_on: []
+    status: ready
+  - id: RES-004
+    title: Linux capture research (PipeWire, portal, V4L2)
+    priority: 10
+    depends_on: []
+    status: ready
+  - id: RES-005
+    title: Encoder capability matrix
+    priority: 20
+    depends_on: []
+    status: ready
+  - id: RES-006
+    title: Browser-source research (WebKitGTK 6)
+    priority: 20
+    depends_on: []
+    status: ready
+  - id: RES-007
+    title: obs-websocket protocol analysis
+    priority: 20
+    depends_on: []
+    status: ready
+
+  # --- Architecture (Phase 0) ---
+  - id: ARCH-000
+    title: Author ADR-0001..0010
+    priority: 5
+    depends_on: []
+    status: ready
+  - id: ARCH-001
+    title: Domain model in prismcast-core
+    priority: 15
+    depends_on: [BOOT-001]
+    status: blocked
+  - id: ARCH-002
+    title: Command/Event API in prismcast-core
+    priority: 15
+    depends_on: [BOOT-001]
+    status: blocked
+  - id: ARCH-003
+    title: Scene graph design
+    priority: 25
+    depends_on: [ARCH-001]
+    status: blocked
+  - id: ARCH-004
+    title: Media abstraction traits
+    priority: 25
+    depends_on: [ARCH-001, RES-003]
+    status: blocked
+  - id: ARCH-005
+    title: Output graph design
+    priority: 25
+    depends_on: [ARCH-001]
+    status: blocked
+  - id: ARCH-006
+    title: Persistence model
+    priority: 25
+    depends_on: [ARCH-001]
+    status: blocked
+  - id: ARCH-007
+    title: Remote protocol design
+    priority: 25
+    depends_on: [ARCH-002, RES-007]
+    status: blocked
+
+  # --- Bootstrap (Phase 1) ---
+  - id: BOOT-001
+    title: Cargo workspace + crate skeletons
+    priority: 1
+    depends_on: []
+    status: ready
+  - id: BOOT-002
+    title: Quality tooling (fmt/clippy/deny/just/CI)
+    priority: 2
+    depends_on: [BOOT-001]
+    status: blocked
+  - id: BOOT-003
+    title: Tracing + error model
+    priority: 3
+    depends_on: [BOOT-001]
+    status: blocked
+  - id: BOOT-004
+    title: Agent state infrastructure
+    priority: 0
+    depends_on: []
+    status: done
+
+  # --- Core (Phase 1) ---
+  - id: CORE-001
+    title: Application actor
+    priority: 30
+    depends_on: [ARCH-001, ARCH-002]
+    status: blocked
+  - id: CORE-002
+    title: Command dispatcher
+    priority: 30
+    depends_on: [CORE-001]
+    status: blocked
+  - id: CORE-003
+    title: Event broadcaster
+    priority: 30
+    depends_on: [CORE-001]
+    status: blocked
+  - id: CORE-004
+    title: Persistence
+    priority: 35
+    depends_on: [ARCH-006]
+    status: blocked
+  - id: CORE-005
+    title: Undo/redo
+    priority: 40
+    depends_on: [CORE-002]
+    status: blocked
+
+  # --- Media prototype (Phase 2) ---
+  - id: MEDIA-001
+    title: Initialize GStreamer
+    priority: 50
+    depends_on: [BOOT-001, RES-003]
+    status: blocked
+  - id: MEDIA-002
+    title: Test-pattern source
+    priority: 51
+    depends_on: [MEDIA-001, ARCH-004]
+    status: blocked
+  - id: MEDIA-003
+    title: Compositor
+    priority: 52
+    depends_on: [MEDIA-002]
+    status: blocked
+  - id: MEDIA-004
+    title: GTK preview bridge (gtk4paintablesink)
+    priority: 53
+    depends_on: [MEDIA-003, UI-001]
+    status: blocked
+  - id: MEDIA-005
+    title: Transform support in compositor
+    priority: 54
+    depends_on: [MEDIA-003, ARCH-003]
+    status: blocked
+
+  # --- UI shell (Phase 1/2) ---
+  - id: UI-001
+    title: Relm4 application shell
+    priority: 45
+    depends_on: [BOOT-001, CORE-001]
+    status: blocked
+  - id: UI-002
+    title: Preview panel
+    priority: 55
+    depends_on: [UI-001, MEDIA-004]
+    status: blocked
+  - id: UI-003
+    title: Scene list panel
+    priority: 56
+    depends_on: [UI-001]
+    status: blocked
+  - id: UI-004
+    title: Source list panel
+    priority: 57
+    depends_on: [UI-001]
+    status: blocked
+
+  # --- IPC (Phase 1) ---
+  - id: IPC-001
+    title: Unix socket server
+    priority: 32
+    depends_on: [CORE-001, ARCH-007]
+    status: blocked
+  - id: IPC-002
+    title: prismcast-cli ping/status
+    priority: 33
+    depends_on: [IPC-001]
+    status: blocked
