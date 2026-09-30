@@ -1,0 +1,17 @@
+id: ARCH-006
+title: Persistence model design
+goal: >
+  Write docs/architecture/persistence-model.md per PLAN §19 and ADR-0008:
+  file layout under ~/.config/prismcast/, profile TOML vs collection JSON,
+  schemaVersion + stepwise migrations, unknown-field preservation, atomic
+  writes (temp+rename), crash resilience, persistence actor ownership.
+  Design doc only — implementation is CORE-004.
+depends_on: [ARCH-001]
+allowed_scope:
+  - docs/architecture/persistence-model.md
+acceptance:
+  - document covers layout, versioning, migrations, atomicity, corruption
+    recovery, and maps every prismcast-core aggregate to its file
+validation:
+  - document reviewed against ADR-0008 and PLAN §19
+status: in_progress

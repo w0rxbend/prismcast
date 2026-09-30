@@ -1,0 +1,17 @@
+id: ARCH-003
+title: Scene graph design doc
+goal: >
+  Write docs/architecture/scene-graph.md: how the prismcast-core Scene/
+  SceneItem model maps onto the GStreamer compositor (zorder/xpos/ypos/
+  width/height/alpha pad properties per RES-003), transform/crop math,
+  group handling, and how scene mutations become compositor pad updates
+  via commands/events. Design doc only — implementation is MEDIA-003/005.
+depends_on: [ARCH-001, RES-003]
+allowed_scope:
+  - docs/architecture/scene-graph.md
+acceptance:
+  - document maps every SceneItem field to compositor behavior
+  - covers z-order, crop, rotation limitations of compositor element
+validation:
+  - document reviewed against RES-003 findings
+status: in_progress

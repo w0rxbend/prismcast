@@ -1,0 +1,20 @@
+id: ARCH-005
+title: Output graph design + types
+goal: >
+  Design and implement the OutputGraph runtime model in prismcast-output
+  per PLAN §10-11 and ADR-0007: N independent outputs, encoder sharing
+  analysis (identical EncoderSettings -> shared encoder + packet tee),
+  per-output state/queue/reconnect/stats, failure isolation. Domain-level
+  only (no GStreamer). Plus docs/architecture/output-graph.md.
+depends_on: [ARCH-001]
+allowed_scope:
+  - crates/prismcast-output/
+  - docs/architecture/output-graph.md
+acceptance:
+  - OutputGraph computes encoder sharing plan from output set
+  - per-output independent state machine (no shared failure)
+  - unit tests: sharing plan, isolation, reconnect backoff calculation
+validation:
+  - cargo test -p prismcast-output
+  - cargo clippy -p prismcast-output --all-targets -- -D warnings
+status: in_progress

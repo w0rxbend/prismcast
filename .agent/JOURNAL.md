@@ -128,3 +128,122 @@ Key decisions:
 Validation: `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`,
 `cargo test -p prismcast-core` (100 passed) and `cargo test --workspace` all green. Not committed
 (per orchestrator instructions).
+
+## 2026-10-01 — ARCH-006 (Persistence model design)
+
+Wrote `docs/architecture/persistence-model.md` per PLAN §19 / ADR-0008.
+
+Key decisions:
+
+- **Envelope structs in the persistence layer, not core:** `CollectionFileV1` / profile
+  equivalents wrap domain aggregates with `schemaVersion` + a `#[serde(flatten)]` unknown-key
+  map (JSON) or a retained `toml` document tree (TOML, so hand edits and comments survive).
+  Domain structs stay pure; no persisted struct is reused as a domain struct.
+- **Outputs/encoders/services persist into `profile.toml`** per PLAN §19, although `AppState`
+  currently holds outputs top-level — flagged for CORE-004 to nest/index by `ProfileId`.
+  `Output.state` is runtime-only and never persisted; `SessionState` (current scene, studio
+  mode) lives inside `collection.json` OBS-style.
+- **Atomic write = buffer → temp (same dir, 0600 profiles) → fsync → rename → dir fsync**;
+  `.bak` is refreshed only from verified-good loads, so the §61 corrupted-config fallback is
+  trustworthy. Newer-schema files error typed, never guessed.
+- **Persistence actor owns the whole config tree**; saves are triggered by core classifying
+  applied commands (dirty marking + debounced coalescing over bounded channel, snapshots not
+  references), per PLAN §57 — UI never touches files.
+
+Validation: design doc cross-checked against ADR-0008 decisions/consequences, PLAN §19/§27/
+§48/§57/§61/§63/§67, and every prismcast-core aggregate (aggregate→file table in §3).
+Doc-only task; no code to compile. Not committed (orchestrator integrates).
+
+## 2026-10-01 — ARCH-003 — Scene graph design doc
+
+Wrote `docs/architecture/scene-graph.md`: the contract mapping `prismcast-core`'s
+`Scene`/`SceneItem` model onto GStreamer compositor pad properties.
+
+Key decisions:
+
+- **Shared pad vocabulary as the contract:** everything is expressed in the
+  `xpos/ypos/width/height/alpha/zorder/operator` vocabulary that `compositor`,
+  `glvideomixer` and `vacompositor` all expose (RES-003 §2), so the backend can swap
+  elements without touching the domain. `compositor` stays the correctness-first default.
+- **Crop = per-item `videocrop` branch; scale/position = pad props; anchor and bounds are
+  pure math** producing derived integers (fixed rounding rules). Every `SceneItem` field
+  has a defined compositor behavior, including `locked` (explicitly none).
+- **Rotation is the hard limit:** no stock element rotates pads; v1 supports cardinal
+  angles via `videoflip` (and flips as negative scale), quantizes arbitrary angles with a
+  warning, and defers true rotation — plus `Multiply`/`Screen` blends — to a custom
+  GL/Vulkan element. Capability bits on `CompositorBackend` let UI render honest
+  affordances.
+- **z-order maps via dense ranks** (0..n over the sorted item list), never raw `z_index`;
+  visibility hides via pad `alpha=0` to avoid live relinks.
+- **Groups flagged as a domain gap** (PLAN §8 requires Group/Ungroup, ARCH-001 has no
+  group type); nesting via `SourceKind::Scene` maps to recursive sub-compositor bins with
+  a max depth of 8 and a flagged follow-up for a domain-side cycle check.
+
+Validation: pad property types verified locally with `gst-inspect-1.0 compositor`
+(GStreamer 1.28.2); every design claim cross-checked against RES-003 §2/§7; ASCII
+diagrams and Markdown tables machine-checked for alignment. Doc-only; no code. Not
+committed (orchestrator integrates).
+
+## 2026-10-01 — ARCH-005 (Output graph design + types in prismcast-output)
+
+Implemented the domain-level `OutputGraph` runtime model in `crates/prismcast-output`
+(error, spec, plan, runtime, graph modules) plus `docs/architecture/output-graph.md`.
+
+Key decisions:
+
+- **`EncoderSpec` as the sole share-identity** (codec, bitrate, GOP, JSON settings,
+  resolution/FPS/color format from `VideoConfig`); encoder IDs play no role, so
+  value-identical settings share one instance. Groups pick the smallest member
+  `EncoderId` as the deterministic tee instance; plans are order-independent (tested).
+- **Replan-from-scratch** on every output/encoder/video-config change — no incremental
+  bookkeeping; output sets are tens of entries.
+- **Failure isolation is structural**: per-output `OutputRuntime` (state machine +
+  policy + stats), no shared mutable state; a dead output doesn't even re-plan.
+- **Two state-machine extensions** beyond the minimal PLAN §61 table (documented):
+  `Running → Failed` for hard failures, `Reconnecting → Reconnecting` for retries.
+- **Backoff**: saturating exponential doubling capped at `max_backoff_ms`, jitter-free
+  for testability (jitter deferred to the media layer's timer); `None` = give up.
+
+Validation: `cargo test -p prismcast-output` 30/30 pass, clippy `-D warnings` clean,
+`cargo fmt` clean. Not committed (orchestrator integrates). Follow-ups noted in the
+doc: encoder unregistration, NVENC session-budget check, jitter, stats gauges.
+
+
+## 2026-10-01 — ARCH-004 (Media abstraction traits in prismcast-media)
+
+Defined the PLAN §4 backend trait surface in `prismcast-media`: `SourceBackend`,
+`VideoFilterBackend`/`AudioFilterBackend` (over a shared `FilterBackend`), `CompositorBackend`,
+`EncoderBackend` + `EncoderRegistry`, `OutputBackend`, `StreamingServiceBackend`, plus mocks and
+tests. Key decisions:
+
+- **Async-agnostic = synchronous, actor-called**: traits are blocking-capable sync fns invoked only
+  on the media control actor thread (never Tokio/GTK); async happenings surface via a poll-based
+  `BackendComponent::drain_events()` instead of callbacks/channels, keeping backends runtime-free.
+- **Control seam only, no media frames cross traits**: PLAN §16's `Filter.process` is deliberately
+  absent — processing stays inside the engine graph, so no `gst::Buffer`-like types leak (ADR-0004).
+- **Observed vs persisted state split**: media-level `ComponentState` (PLAN §61: Stopped/Running/
+  Degraded/Recovering/Failed) is separate from persisted `OutputState`; the actor maps between them.
+- **Runtime probing**: `EncoderRegistry::probe()` returns `EncoderCapability` (hardware kind, rate
+  controls, force-keyframe support) per RES-003 §5 — availability is never assumed.
+- Errors reuse the workspace-wide `prismcast_core::Error`; all wire-adjacent support types are serde.
+
+Validation: `cargo test -p prismcast-media` 19/19 pass (9 unit + 10 trait/mock integration),
+`cargo clippy -p prismcast-media --all-targets -- -D warnings` clean, `cargo fmt --check` clean,
+`cargo check --workspace` clean. Not committed (orchestrator integrates). Follow-up: the media
+control actor itself is a later task; mocks are `pub` so other crates can reuse them in tests.
+
+---
+
+2026-10-01 ARCH-007
+
+Designed docs/protocols/native-protocol.md and implemented prismcast-protocol (10 modules,
+47 tests). Key decisions: string-tagged envelopes (`{type, data}`) instead of obs-websocket
+numeric ops; UUID addressing; wire types in `data.rs` mirror domain types but stay distinct
+(per-class typed IDs are a domain concern — wire uses plain Uuid, boundary converts via
+From<Uuid>). Structured errors keep obs's grouped integer code space + typed kind/field/details.
+Subscription model: typed SubscriptionSet with per-entity filters and explicit throttle_ms
+(meter default 50 ms), no Reidentify — `update_subscriptions` is a request. Batches serial
+best-effort + `halt_on_failure`; atomicity via the `transaction` request. Events carry per-session
+`seq` for drop detection (resync via get_snapshot). JSON-only for v1; `prismcast.msgpack` reserved.
+Command↔request mirror enforced by tests/command_coverage.rs (49 variants, dev-dep on core).
+Validation: fmt/clippy(-D warnings)/test all green. Not committed (orchestrator integrates).

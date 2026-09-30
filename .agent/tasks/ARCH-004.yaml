@@ -1,0 +1,19 @@
+id: ARCH-004
+title: Media abstraction traits in prismcast-media
+goal: >
+  Define the backend trait surface per PLAN §4 in prismcast-media:
+  SourceBackend, VideoFilterBackend, AudioFilterBackend, CompositorBackend,
+  EncoderBackend, OutputBackend, StreamingServiceBackend — async-agnostic,
+  object-safe where sensible, using prismcast-core domain types. No GStreamer
+  dependency yet (Gst backends land in a later MEDIA task).
+depends_on: [ARCH-001, RES-003]
+allowed_scope:
+  - crates/prismcast-media/
+acceptance:
+  - traits compile against prismcast-core types
+  - mock/in-memory implementations for tests
+  - unit tests exercising the traits via mocks
+validation:
+  - cargo test -p prismcast-media
+  - cargo clippy -p prismcast-media --all-targets -- -D warnings
+status: in_progress

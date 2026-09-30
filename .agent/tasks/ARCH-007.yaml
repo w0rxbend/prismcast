@@ -1,0 +1,24 @@
+id: ARCH-007
+title: Remote protocol design + prismcast-protocol types
+goal: >
+  Design the native remote protocol (docs/protocols/native-protocol.md) and
+  implement versioned wire types in prismcast-protocol: Hello/Identify/
+  Identified handshake, Request/Response envelope with correlation IDs,
+  RequestBatch, Event subscription model (typed, per-entity filters, rate
+  limits), structured error payloads, protocol version negotiation.
+  Informed by RES-007 (obs-websocket analysis) but NOT identical to it
+  (ADR-0010). Maps to prismcast-core Command/Event without reusing domain
+  structs on the wire.
+depends_on: [ARCH-002, RES-007]
+allowed_scope:
+  - crates/prismcast-protocol/
+  - docs/protocols/native-protocol.md
+acceptance:
+  - wire types serde roundtrip (JSON)
+  - every core Command representable as a Request
+  - subscription model with per-entity filters and throttle semantics
+  - golden message tests
+validation:
+  - cargo test -p prismcast-protocol
+  - cargo clippy -p prismcast-protocol --all-targets -- -D warnings
+status: in_progress
