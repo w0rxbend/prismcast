@@ -1,0 +1,9 @@
+[package]
+name = "prismcast-media"
+description = "Media engine abstraction traits and control actor"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]

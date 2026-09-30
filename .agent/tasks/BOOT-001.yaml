@@ -1,0 +1,25 @@
+id: BOOT-001
+title: Cargo workspace + crate skeletons
+goal: >
+  Create the Cargo workspace with all prismcast-* crates as compiling skeletons
+  (lib targets with crate-level docs and minimal placeholder modules), plus
+  BOOT-002 tooling (rust-toolchain.toml, deny.toml, justfile, CI workflow) and
+  BOOT-003 (shared error model + tracing conventions in prismcast-core).
+depends_on: []
+allowed_scope:
+  - Cargo.toml
+  - crates/
+  - rust-toolchain.toml
+  - deny.toml
+  - justfile
+  - .github/
+acceptance:
+  - cargo build --workspace succeeds
+  - cargo clippy --workspace --all-targets -- -D warnings succeeds
+  - cargo test --workspace succeeds
+  - justfile exposes fmt/lint/test/deny/ci
+validation:
+  - cargo fmt --check
+  - cargo clippy --workspace --all-targets -- -D warnings
+  - cargo test --workspace
+status: in_progress

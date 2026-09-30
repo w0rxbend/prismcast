@@ -1,0 +1,9 @@
+[package]
+name = "prismcast-cli"
+description = "studioctl-style command-line controller (binary: prismcast-cli)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]

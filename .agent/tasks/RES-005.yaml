@@ -1,0 +1,12 @@
+id: RES-005
+title: Encoder capability matrix
+goal: >
+  Produce docs/research/encoder-matrix.md: H.264/HEVC/AV1/VP9 and AAC/Opus
+  encoder availability on Linux via GStreamer — NVENC, VA-API, Intel QSV,
+  software (x264/x265/svt-av1), element names, zero-copy/DMABUF paths, latency
+  characteristics, recommended defaults per GPU vendor (PLAN §12).
+research_required:
+  - GStreamer va/nvcodec plugin docs
+validation:
+  - docs/research/encoder-matrix.md exists with sources cited
+status: in_progress

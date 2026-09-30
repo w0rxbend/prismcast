@@ -1,0 +1,201 @@
+{
+  "schema_version": 1,
+  "skill_name": "ffmpeg",
+  "evals": [
+    {
+      "id": "inspect-before-remux",
+      "prompt": "I have an MKV with several tracks and need an MP4 without re-encoding. Give me a safe approach.",
+      "expected_output": "Explain that this is a remux/stream-copy operation, probe the input first, make stream selection explicit, use no-overwrite behavior during exploration, and probe the output because container compatibility is not guaranteed.",
+      "assertions": [
+        "distinguishes remuxing from transcoding",
+        "uses ffprobe before the operation",
+        "includes explicit mapping or explains why mapping is needed",
+        "mentions container and stream compatibility",
+        "includes post-run output verification"
+      ],
+      "case_set": "dev"
+    },
+    {
+      "id": "build-aware-filter",
+      "prompt": "This command fails with No such filter: drawtext. Replace it with something that will work everywhere.",
+      "expected_output": "Do not claim a universal replacement. Explain that filter availability is build-dependent, show how to inspect the installed filter inventory or use the skill's ffmpeg-preflight named checks (--filter NAME), and offer a conditional path: use an available equivalent, install a build containing the filter, or omit the transformation.",
+      "assertions": [
+        "does not fabricate universal filter availability",
+        "checks ffmpeg filter capabilities",
+        "treats the error as a build boundary",
+        "offers conditional next steps rather than silently substituting",
+        "preserves the need to rerun and verify the output"
+      ],
+      "case_set": "regression"
+    },
+    {
+      "id": "explicit-complex-mapping",
+      "prompt": "Overlay a logo image on the first video stream while keeping the first input's audio. Show the important FFmpeg structure.",
+      "expected_output": "Use a complex filtergraph with two labeled video inputs, label the overlay output, map that label exactly once, map the selected audio explicitly, and explain that filtering requires decoding and video re-encoding while audio may be copied.",
+      "assertions": [
+        "uses filter_complex with two inputs",
+        "labels and maps the filtered video output",
+        "maps the intended audio stream explicitly",
+        "explains filter and stream-copy boundaries",
+        "does not imply automatic mapping is safe here"
+      ],
+      "case_set": "dev"
+    },
+    {
+      "id": "timestamp-concat-diagnosis",
+      "prompt": "Two clips have matching extensions but concatenation produces a jump and audio drift. What should I inspect and which concat mechanism should I choose?",
+      "expected_output": "Treat the issue as a stream-compatibility and timestamp problem. Compare codecs, dimensions, rates, channel layouts, start times, durations, time bases, and packet/frame behavior; distinguish concat demuxer, concat filter, and concat protocol; normalize timestamps and formats when using the filter.",
+      "assertions": [
+        "does not use file extension as the compatibility test",
+        "lists relevant audio/video stream properties",
+        "distinguishes concat demuxer from concat filter and protocol",
+        "identifies timestamps as a diagnosis surface",
+        "recommends probing inputs and output"
+      ],
+      "case_set": "regression"
+    },
+    {
+      "id": "safe-batch-network",
+      "prompt": "Write a shell-loop recipe that converts every file in a directory and sends results to a network endpoint.",
+      "expected_output": "Before giving a recipe, set safe boundaries: use arrays or null-delimited discovery, avoid shell concatenation of untrusted filenames, refuse overwrites by default, record command/version/exit status, probe each output, and treat network protocol, timeout, authentication, and destination validation as explicit requirements.",
+      "assertions": [
+        "addresses shell quoting and untrusted filenames",
+        "uses a deliberate overwrite policy",
+        "requires per-output verification and logging",
+        "calls out network protocol and timeout assumptions",
+        "does not expose credentials in command arguments"
+      ],
+      "case_set": "release"
+    },
+    {
+      "id": "named-capability-check",
+      "prompt": "Before I script a transcode, check whether my local ffmpeg build can scale with libx264 and videotoolbox, and whether drawtext exists. Just tell me what is available.",
+      "expected_output": "Run bounded capability checks rather than assuming from memory: the ffmpeg-preflight script with --filter/--encoder/--hwaccel named checks or the corresponding inventory commands. Report each requested capability as present or absent separately, distinguish absence from probe failure, and state a next step for any absent capability without claiming universal availability.",
+      "assertions": [
+        "uses named capability checks or inventories instead of assumptions",
+        "reports each requested capability individually",
+        "distinguishes absent capabilities from probe or tool failures",
+        "does not claim a capability is present without local evidence",
+        "offers a conditional next step for absent capabilities"
+      ],
+      "case_set": "dev"
+    },
+    {
+      "id": "hardware-pipeline-caveat",
+      "prompt": "NVENC is enabled. Does that prove hardware acceleration will make this workflow faster on my Mac?",
+      "expected_output": "No. Explain that decoding, filtering, memory transfers, and encoding are separate pipeline decisions, that NVIDIA-specific NVENC guidance does not transfer to macOS, and that the exact local build/device/pixel-format path must be inspected and benchmarked end to end.",
+      "assertions": [
+        "rejects encoder-only speed conclusions",
+        "separates decode/filter/encode and memory-transfer decisions",
+        "recognizes platform-specific hardware guidance",
+        "requires local capability inspection",
+        "requires reproducible end-to-end benchmarking"
+      ],
+      "case_set": "release"
+    },
+    {
+      "id": "synthetic-end-to-end-proof",
+      "prompt": "Prove that the FFmpeg media workflow composes end to end without using any personal media. I need reproducible evidence, not just a list of commands.",
+      "expected_output": "Run the bounded synthetic editorial workflow in a new task-local directory, retain the intake, source/output probes, evidence packet, EDL, exact command log, sampled frames, audio-path check, and criterion-level acceptance report, and report semantic, listening, and downstream compatibility as unverified rather than passing them.",
+      "assertions": [
+        "uses generated synthetic audio and video rather than personal media",
+        "preserves source and renders to a new output path",
+        "cross-references stable workflow, asset, and event identities",
+        "retains exact tool versions, commands, probes, and digest evidence",
+        "distinguishes integration success from semantic, listening, and downstream acceptance"
+      ],
+      "case_set": "release"
+    },
+    {
+      "id": "real-media-fixture-boundaries",
+      "prompt": "Add regression fixtures for FFmpeg cuts, concat, silence, subtitles, and visual boundary sampling without publishing any personal media.",
+      "expected_output": "Generate the bounded synthetic fixture battery in a task-local directory, retain its versioned manifest and exact generators, assert the intended success or rejection boundary for each selected fixture, and separate portable workflow assertions from build-specific observations and editorial review.",
+      "assertions": [
+        "uses deterministic synthetic generators or committed non-personal text",
+        "records exact FFmpeg and FFprobe builds, commands, probes, and limitations",
+        "distinguishes stream-copy boundaries from decoded frame-accurate cuts",
+        "tests concat compatibility from stream properties rather than extensions",
+        "does not turn silence, clipping, subtitle presence, or sparse frames into editorial truth"
+      ],
+      "case_set": "release"
+    },
+    {
+      "id": "multi-source-edl-plan",
+      "prompt": "Plan a montage from three reviewed ranges across two local files. Two ranges need frame-accurate cuts and the inputs have different dimensions and audio rates. Do not execute FFmpeg.",
+      "expected_output": "Validate explicit sources, streams, decimal-second ranges, destination order, duration math, and output normalization, then emit a concat-filter plan with correct reused input indexes, trim/atrim timestamp resets, deliberate video/audio normalization, and exactly-once output mapping. Reject stream-copy concat because probe-derived signatures do not match and distinguish the concat protocol as inapplicable.",
+      "assertions": [
+        "uses one input index per source and maps every event to the correct input",
+        "uses trim or atrim with timestamp reset before concat",
+        "normalizes declared video and audio properties before decoded concat",
+        "derives expected duration and rejects invalid or overlapping destination intervals",
+        "distinguishes concat filter, concat demuxer, and concat protocol without executing"
+      ],
+      "case_set": "release"
+    },
+    {
+      "id": "podcast-audio-evidence-plan",
+      "prompt": "Analyze this supplied podcast WAV for long pauses, loudness, true peak, clipping, and transcript-aligned edit candidates. Save a plan, but do not alter the recording or make editorial cuts.",
+      "expected_output": "Probe the source, inventory required filters, run explicitly bounded silence, EBU R128, and peak measurements with recorded build/commands/thresholds, validate transcript timing quality, and create a no-overwrite plan whose ranges retain reasons, evidence, confidence, handles, fades, output contract, and needs-listening-review status.",
+      "assertions": [
+        "records exact measurement commands, build, window, thresholds, and limitations",
+        "reports missing filters or measurements as unavailable rather than inventing values",
+        "keeps silence, clipping, and transcript-derived ranges as candidates pending listening review",
+        "preserves the raw recording and refuses report overwrite",
+        "records source ranges, actions, reasons, evidence, confidence, handles, fades, and output contract"
+      ],
+      "case_set": "release"
+    },
+    {
+      "id": "criterion-level-media-acceptance",
+      "prompt": "Verify this rendered MP4 against the attached delivery contract. The probe is present, but the listening review and destination-player result are missing. Tell me whether it passes.",
+      "expected_output": "Evaluate each declared stream, format, timing, subtitle, metadata, decode, signal, review, and downstream criterion independently. Report missing listening and destination evidence as UNVERIFIED, keep local probe/decode evidence at its own boundary, and return an overall UNVERIFIED result rather than a pass.",
+      "assertions": [
+        "reports criterion, expected and observed values, evidence, boundary, and verdict separately",
+        "uses explicit tolerances for duration, timestamps, rates, and measured values",
+        "marks absent required evidence unverified or blocked rather than passing it",
+        "tests streams, subtitles, timing, audio, video, and downstream evidence independently",
+        "does not generalize local probe or decode success into destination compatibility"
+      ],
+      "case_set": "release"
+    },
+    {
+      "id": "bounded-vision-review-handoff",
+      "prompt": "Prepare frames around two proposed cut boundaries for a vision reviewer, then link any reviewed findings to my EDL without exposing the private source path or treating the reviewer as an automatic editor.",
+      "expected_output": "Create a bounded packet with opaque asset and stream IDs, explicit and neighboring timestamps, extraction/build/transform provenance, hashes, byte and range limits, and a sparse-coverage warning. Require attributed observations with evidence class, confidence, blind spots, artifact references, and editorial consequences before writing a new EDL whose visual evidence remains subject to editorial approval.",
+      "assertions": [
+        "records opaque identity, stream, timestamps, build, extraction parameters, transforms, hashes, and coverage",
+        "enforces frame-count, timestamp-range, and output-size limits",
+        "does not expose the private source path in the shareable manifest",
+        "rejects missing attribution and whole-video conclusions from sparse samples",
+        "links reviewed observations to named EDL events as evidence rather than automatic truth"
+      ],
+      "case_set": "release"
+    },
+    {
+      "id": "named-target-compatibility",
+      "prompt": "Will this MP4 work everywhere? I have its FFprobe output and a successful local decode, and I need it accepted by a named editor whose documented limits are attached.",
+      "expected_output": "Build a versioned manifest for that one editor from official or explicitly observed requirements, evaluate probe-visible codec/profile, dimensions/rates, mapping, subtitles/metadata, duration, and size separately, and require evidence from importing or playing the exact artifact in the named editor. Report missing access or evidence as BLOCKED or UNVERIFIED and do not generalize the result.",
+      "assertions": [
+        "links each target requirement to official documentation or labeled observed behavior with an access date",
+        "checks codec profile, dimensions, rates, stream order, subtitles, metadata, duration, and size",
+        "separates local probe and decode evidence from the named target result",
+        "uses PASS, FAIL, BLOCKED, or UNVERIFIED for the exact target lane",
+        "does not claim compatibility with every platform and leaves upload operations to the owning platform skill"
+      ],
+      "case_set": "release"
+    },
+    {
+      "id": "media-research-routing-boundary",
+      "prompt": "Build a defensible research record for an FFmpeg behavior claim and a sparse-frame editorial claim. I need source-to-claim traceability, not another command recipe.",
+      "expected_output": "Route research scope, source/access-date evaluation, exclusions, claim closure, and durable preservation to research-methodology while retaining FFmpeg build, command, probe, fixture, sample, and target evidence in this skill. Keep documented semantics, reproduced behavior, observed artifacts, heuristics, and human review separate, and refuse editorial or whole-asset conclusions beyond sampled evidence.",
+      "assertions": [
+        "routes general research method to research-methodology and operational media evidence to ffmpeg",
+        "records official source URLs and access dates plus exact local build and experiment conditions",
+        "preserves rejected, inaccessible, redundant, and untested sources with reasons",
+        "audits sampling coverage against the scope of each claim",
+        "keeps technical findings separate from attributed editorial approval"
+      ],
+      "case_set": "release"
+    }
+  ]
+}

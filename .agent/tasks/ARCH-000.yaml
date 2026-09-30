@@ -1,0 +1,17 @@
+id: ARCH-000
+title: Author ADR-0001..0010
+goal: >
+  Write the ten foundational ADRs listed in PLAN §37 into docs/adr/, using the
+  format Context/Decision/Alternatives/Consequences/Evidence/Status. Content is
+  dictated by PLAN.md; ADRs formalize it. Update .agent/DECISIONS.md statuses.
+depends_on: []
+allowed_scope:
+  - docs/adr/
+  - .agent/DECISIONS.md
+acceptance:
+  - docs/adr/ADR-0001-linux-only.md through ADR-0010-obs-websocket-compat.md exist
+  - each ADR has all six required sections
+  - DECISIONS.md marks them accepted
+validation:
+  - files render as valid markdown
+status: in_progress

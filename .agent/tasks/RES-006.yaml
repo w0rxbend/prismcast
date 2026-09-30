@@ -1,0 +1,14 @@
+id: RES-006
+title: Browser-source research (WebKitGTK 6)
+goal: >
+  Produce docs/research/browser-source.md answering the PLAN §15 research
+  milestone: can WebKitGTK 6 efficiently export rendered frames into
+  DMABUF/GStreamer? Evaluate webkit6 Rust bindings, offscreen rendering,
+  WebKitWebProcess isolation, alternatives (CEF Linux, isolated renderer
+  process). Concrete recommendation with evidence.
+research_required:
+  - WebKitGTK 6 API docs
+  - webkit6 gtk-rs bindings status
+validation:
+  - docs/research/browser-source.md exists with sources cited
+status: in_progress

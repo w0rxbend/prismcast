@@ -1,0 +1,99 @@
+# Media Verification and Acceptance
+
+Accept a media artifact from recorded evidence against a declared contract. A zero exit status proves only that one command completed without reporting a fatal error; it does not prove correct streams, complete decode, editorial quality, or destination compatibility.
+
+## Layered acceptance
+
+### 1. Artifact and provenance
+
+Record the output asset ID, digest, size, producing command, source/EDL versions, FFmpeg build, completion status, warning log, and whether the path was new or pre-existing. Confirm the accepted file is the file that was reviewed.
+
+### 2. Structural conformance
+
+Probe the output and compare every required field with the contract:
+
+```sh
+ffprobe -v error -show_format -show_streams -show_chapters -of json OUTPUT
+```
+
+Check container, stream count/order, codecs, dispositions, language, dimensions, aspect ratios, pixel format, color metadata, cadence, start times, durations, audio sample rate/layout, subtitles, chapters, and metadata policy. Treat absent or ambiguous fields explicitly.
+
+### 3. Processing-path check
+
+Exercise all expected audio/video streams through FFmpeg and preserve errors:
+
+```sh
+ffmpeg -v error -i OUTPUT -map '0:v?' -map '0:a?' -f null -
+```
+
+This can expose decode or timeline faults in FFmpeg’s processing path. It does not exercise every player, subtitle/data stream, hardware decoder, display pipeline, or network/service ingest path.
+
+### 4. Signal and timing checks
+
+Use only metrics tied to criteria: frame/packet counts, start/end timestamps, cadence, A/V offset at declared points, black/freeze candidates, audio statistics, loudness, peaks, or silence events. Record filters, thresholds, intervals, and tolerances. Re-measure the rendered artifact rather than assuming encoder/filter targets were met.
+
+### 5. Content review
+
+Review the opening and closing, every cut/join/transition/treatment, titles/subtitles, high-risk regions, representative motion and detail, loud/quiet passages, and declared sync points. Use full-resolution frames or short clips where contact sheets are insufficient. Attribute reviewer and time.
+
+### 6. Editorial and downstream acceptance
+
+An accountable reviewer decides whether meaning, pacing, continuity, intelligibility, accessibility, and the brief are satisfied. Then import, play, upload, or validate the exact artifact in the intended destination. Record destination identity/version, settings, result, warnings, and any transformed derivative.
+
+## Acceptance record
+
+For every criterion, capture:
+
+- criterion and tolerance;
+- evidence method and exact artifact/interval;
+- observed value or attributed observation;
+- status: `pass`, `fail`, `blocked`, or `not_applicable`;
+- reviewer and date;
+- exception owner and rationale, if any.
+
+The final verdict is `accepted`, `rejected`, or `blocked`. Do not convert an untested criterion into a pass. Any post-review change invalidates affected evidence and requires re-verification.
+
+For machine-readable verification, copy `templates/media-acceptance-contract.json` and evaluate it with:
+
+```sh
+scripts/media-verify CONTRACT.json OUTPUT-PROBE.json --evidence EVIDENCE.json --json
+```
+
+The contract can require exact stream order/counts, codecs, dimensions, pixel format, rational frame rate with tolerance, sample rate/channels/layout, forbidden stream types, format duration/start tolerances, chapters, and metadata. Its separate evidence requirements cover decode, visual review, audio review, measured loudness/true peak, and a named downstream target.
+
+The verifier emits one record per criterion with expected and observed values, evidence locator, boundary, reason, and one of `PASS`, `FAIL`, `BLOCKED`, `UNVERIFIED`, or `NOT_APPLICABLE`. A required stream that is absent fails; a required field or review artifact that cannot be observed remains unverified. The overall verdict follows the strongest unresolved state: `FAIL`, then `BLOCKED`, then `UNVERIFIED`, otherwise `PASS`.
+
+## Named-target compatibility
+
+For a real player, editor, host, archive, or service, copy `templates/target-compatibility-manifest.json` and retain requirements provenance separately from the output probe. Every requirement source needs an official URL or an observed-behavior locator, access date, and the exact claim it supports. Run:
+
+```sh
+scripts/target-compatibility TARGET.json OUTPUT-PROBE.json \
+  --target-evidence TARGET-EVIDENCE.json --json
+```
+
+The helper evaluates codec/profile, dimensions, pixel format, rates, audio layout, stream order, subtitles, chapters, metadata, duration, and size at the technical boundary. It reports import/playback/ingest evidence for exactly one named target in a separate result. Missing target evidence is `UNVERIFIED`; an explicitly unavailable authorized environment is `BLOCKED`; neither local decoding nor a pass in one consumer is generalized to another consumer.
+
+A concrete FFplay lane may use the [official FFplay documentation](https://ffmpeg.org/ffplay.html) and record the installed version, exact artifact digest, invocation, interactive audio/video/subtitle checks, warnings, and result. The repository's automated tests are headless and do not exercise an authorized display/audio session, so that real playback lane remains explicitly unavailable in CI. Tests instead verify the contract mechanics against a recorded named-target evidence fixture. Platform upload/API actions remain in the owning platform skill.
+
+Minimize reports before sharing: remove private paths, personal names, account identifiers, unnecessary transcript excerpts, and embedded metadata.
+
+## Evidence and heuristic boundary
+
+| Classification | Boundary |
+|---|---|
+| Direct evidence | Probe/decode output, measurements, samples, destination result, and attributed review for the exact accepted artifact. |
+| Derived evidence | Contract comparisons and timing calculations with a stated method and tolerance. |
+| Heuristic | Sparse sampling, automated quality scores, detector events, or compatibility inferred from a similar file. Label as supporting evidence only. |
+| Human judgment | Editorial quality, intelligibility, context, and visual acceptability require attributed review. |
+| Not established | Universal playback, rights, long-term preservation, accessibility, or unsampled-content correctness unless separately tested. |
+
+## Official FFmpeg sources
+
+- [ffprobe Documentation](https://ffmpeg.org/ffprobe.html) — machine-readable structural, packet, and frame inspection.
+- [ffmpeg Documentation](https://ffmpeg.org/ffmpeg.html) — stream mapping, decoding/transcoding, progress, logging, and exit behavior context.
+- [FFmpeg Filters Documentation](https://ffmpeg.org/ffmpeg-filters.html) — measurable video/audio analysis filters and their parameters.
+- [FFmpeg Formats Documentation](https://ffmpeg.org/ffmpeg-formats.html) — muxer/demuxer behavior and container-specific options.
+- [FFmpeg Codecs Documentation](https://ffmpeg.org/ffmpeg-codecs.html) — decoder/encoder options and capabilities.
+
+Official documentation supports the mechanics of checks. It does not define the project’s acceptance criteria or guarantee behavior outside the recorded build and destination.

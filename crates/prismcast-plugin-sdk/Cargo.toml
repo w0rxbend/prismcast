@@ -1,0 +1,9 @@
+[package]
+name = "prismcast-plugin-sdk"
+description = "Extension traits and plugin manifests"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]

@@ -1,0 +1,13 @@
+id: RES-007
+title: obs-websocket protocol analysis
+goal: >
+  Produce docs/research/obs-websocket-protocol.md: obs-websocket 5.x message
+  model (Hello/Identify/Identified/Request/RequestResponse/RequestBatch/Event),
+  RPC versioning, subscription model, serialization (JSON/MessagePack), auth.
+  Inform the native protocol design and the future compatibility adapter
+  (PLAN §22). Note: internal protocol must NOT be identical.
+research_required:
+  - obs-websocket 5.x protocol specification
+validation:
+  - docs/research/obs-websocket-protocol.md exists with sources cited
+status: in_progress

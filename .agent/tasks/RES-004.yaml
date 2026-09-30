@@ -1,0 +1,14 @@
+id: RES-004
+title: Linux capture research (PipeWire, portal, V4L2)
+goal: >
+  Produce docs/research/linux-capture.md: xdg-desktop-portal ScreenCast API
+  (current version), restore tokens, pipewire-serial vs node IDs, cursor modes,
+  window vs monitor capture, persistence, V4L2 camera capture via
+  v4l2src/pipewiresrc, audio capture via PipeWire, hotplug handling, X11
+  fallback options. Target: GNOME + KDE Wayland (PLAN §6).
+research_required:
+  - xdg-desktop-portal ScreenCast documentation
+  - PipeWire documentation
+validation:
+  - docs/research/linux-capture.md exists with sources cited
+status: in_progress

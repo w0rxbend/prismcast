@@ -1,0 +1,9 @@
+[package]
+name = "prismcast-output"
+description = "Output graph: recording, streaming, multistream"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]

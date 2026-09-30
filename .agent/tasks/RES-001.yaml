@@ -1,0 +1,11 @@
+id: RES-001
+title: OBS feature inventory
+goal: >
+  Produce docs/research/obs-feature-matrix.md per PLAN §29: OBS Studio 32.2.2
+  released feature inventory across all domains, with columns OBS behavior,
+  our desired behavior, status, dependencies, tests, known differences.
+research_required:
+  - OBS Studio 32.x released documentation and release notes
+validation:
+  - docs/research/obs-feature-matrix.md exists with sources cited
+status: in_progress

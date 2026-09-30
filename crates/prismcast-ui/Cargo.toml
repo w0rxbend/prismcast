@@ -1,0 +1,18 @@
+[package]
+name = "prismcast-ui"
+description = "GTK4/Relm4/libadwaita desktop application (binary: prismcast)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "prismcast"
+path = "src/main.rs"
+
+[dependencies]
+# GTK stack — commented out until system libraries are available on build
+# machines. The crate must compile as a skeleton without them.
+# gtk4 = { workspace = true }
+# relm4 = { workspace = true }
+# libadwaita = { workspace = true, features = ["v1_5"] }

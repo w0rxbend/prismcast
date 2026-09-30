@@ -1,0 +1,13 @@
+id: RES-002
+title: OBS architecture research
+goal: >
+  Produce docs/research/obs-architecture.md: how libobs structures sources,
+  scenes, scene items, outputs, encoders, services, audio pipeline, and the
+  obs-frontend boundary. What to keep conceptually, what to redesign for
+  Linux/Rust/remote-first (PLAN §79).
+research_required:
+  - obsproject/obs-studio source (libobs)
+  - OBS developer documentation
+validation:
+  - docs/research/obs-architecture.md exists with sources cited
+status: in_progress

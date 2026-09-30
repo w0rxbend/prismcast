@@ -1,0 +1,13 @@
+id: RES-003
+title: GStreamer capability research
+goal: >
+  Produce docs/research/gstreamer-capabilities.md: gstreamer-rs binding status,
+  compositor/glvideomixer/vacompositor capabilities, gtk4paintablesink DMABUF
+  path, pipewiresrc, hardware encoder elements (NVENC, VA-API), muxers
+  (matroska, fmp4), RTMP/SRT/WHIP sinks. Map each to prismcast needs (PLAN §4-5).
+research_required:
+  - gstreamer-rs repository and docs
+  - GStreamer plugin documentation
+validation:
+  - docs/research/gstreamer-capabilities.md exists with sources cited
+status: in_progress

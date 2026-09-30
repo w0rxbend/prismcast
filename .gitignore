@@ -1,0 +1,7 @@
+/target
+.worktrees/
+*.swp
+*~
+.DS_Store
+.idea/
+.vscode/
