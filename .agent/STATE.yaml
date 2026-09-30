@@ -2,22 +2,19 @@ schema_version: 1
 
 project_phase: phase-0-research-and-architecture
 
-head_commit: bootstrap
+head_commit: f416e64
 
-current_objective: null
+current_objective:
+  id: ARCH-001
+  title: Domain model in prismcast-core
 
 completed:
   - SKILL-001
-
-in_progress: []
-
-blocked: []
-
-next_candidates:
   - BOOT-001
   - BOOT-002
   - BOOT-003
   - BOOT-004
+  - ARCH-000
   - RES-001
   - RES-002
   - RES-003
@@ -25,18 +22,45 @@ next_candidates:
   - RES-005
   - RES-006
   - RES-007
+
+in_progress:
   - ARCH-001
   - ARCH-002
+
+blocked: []
+
+next_candidates:
+  - ARCH-003
+  - ARCH-004
+  - ARCH-005
   - ARCH-006
   - ARCH-007
+  - CORE-001
 
-decisions: []
+decisions:
+  - ADR-0001
+  - ADR-0002
+  - ADR-0003
+  - ADR-0004
+  - ADR-0005
+  - ADR-0006
+  - ADR-0007
+  - ADR-0008
+  - ADR-0009
+  - ADR-0010
 
 verification:
-  cargo_fmt: pending
-  cargo_clippy: pending
-  cargo_test: pending
+  cargo_fmt: pass
+  cargo_clippy: pass
+  cargo_test: pass
 
 last_agent:
   model: kimi
-  session: bootstrap
+  session: orchestrated-wave-1
+
+open_questions:
+  - Audio graph shape: typed AudioBusId bus matrix vs OBS 6 fixed mixes (RES-002) — resolve in ARCH-001/ARCH-002
+  - Reserve CanvasId in domain model for future per-canvas resolution (RES-001/RES-002)
+  - Minimum GStreamer floor 1.26 vs target 1.28 (RES-003/RES-005) — ADR when media work starts
+  - gst-plugins-rs vendoring strategy: isobmff/wpe2/gopbuffer not packaged by distros (RES-003)
+  - Browser source audio gap in wpe2 (RES-006) — revisit at Phase 11

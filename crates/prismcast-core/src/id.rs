@@ -105,6 +105,13 @@ define_id!(
     /// Identifies a scene collection.
     SceneCollectionId
 );
+define_id!(
+    /// Identifies a canvas (render target with its own resolution).
+    ///
+    /// Reserved up front (RES-002 open question) so per-canvas resolution can be
+    /// added later without a persisted-schema break.
+    CanvasId
+);
 
 #[cfg(test)]
 mod tests {
@@ -157,4 +164,5 @@ mod tests {
     id_tests!(audio_bus_id_tests, AudioBusId);
     id_tests!(profile_id_tests, ProfileId);
     id_tests!(scene_collection_id_tests, SceneCollectionId);
+    id_tests!(canvas_id_tests, CanvasId);
 }

@@ -1,0 +1,22 @@
+id: ARCH-002
+title: Command/Event API in prismcast-core
+goal: >
+  Implement the Command and Event enums in prismcast-core per PLAN §20/§58/§76:
+  every user-visible operation a Command, every state change a strongly-typed
+  Event (Scene/Source/Audio/Output/System sub-enums). Commands carry the data
+  needed for undo (PLAN §59 transaction groups). Include a pure in-memory
+  domain store apply() function: (state, command) -> (new state, events),
+  enabling headless testing of all domain logic.
+depends_on: [BOOT-001]
+allowed_scope:
+  - crates/prismcast-core/
+acceptance:
+  - Command/Event enums cover scenes, scene items, sources, audio mixer,
+    outputs, studio mode, profiles
+  - apply() is pure and unit-tested (scene ops, item transforms, output
+    lifecycle, undo payloads)
+  - serde roundtrip for all commands and events
+validation:
+  - cargo test -p prismcast-core
+  - cargo clippy -p prismcast-core --all-targets -- -D warnings
+status: in_progress

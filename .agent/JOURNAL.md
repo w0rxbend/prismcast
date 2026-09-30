@@ -90,3 +90,41 @@ surfaces) — browser frames must come from WPE, not the GTK widget. Decision: b
 GL RGBA / raw BGRA caps, no DMABuf caps, no audio yet, no Rust WPE bindings). Legacy wpesrc sits on
 WPEBackend-FDO which WPE 2.54 declared legacy — avoid. CEF rejected (EOL Chromium 127 in released OBS
 32.2.2, vendored-binary tax, no GstBuffer integration). Flagged ADR: browser-source engine + audio strategy.
+
+## 2026-10-01 — ARCH-001/ARCH-002 (Domain model + Command/Event API in prismcast-core)
+
+Implemented the full domain model and the pure Command/Event core in `crates/prismcast-core/`:
+modules `source`, `scene` (with `Canvas` stub + new `CanvasId` newtype), `audio`, `output`,
+`transition`, `project`, `command`, `event`, `state`. `AppState` is IndexMap-backed; `apply()`
+validates preconditions, mutates, and returns strongly-typed `Event`s (Scene/Source/Audio/Output/
+System sub-enums per PLAN §58). Everything serde-roundtrips; no GTK/GStreamer/Tokio deps.
+100 unit tests, incl. a PLAN §67 milestone scenario and inverse-roundtrip tests.
+
+Key decisions:
+
+- **Audio bus matrix (RES-002 open question, resolved):** OBS's 6 fixed global mixes are NOT
+  copied. Unbounded set of named `AudioBus`es; `AudioRoute { source_id, bus_id, tracks }` with
+  `TrackMask` = bitset over u32 for per-bus output-track assignment; tracks are a muxer-level
+  mapping, not a global mix mask. Documented in `audio.rs` module docs.
+- **Delete policy: reject-by-default, cascade only where obvious.** Removing a source referenced
+  by scene items or audio routes, a scene used by studio mode or a scene source, the active
+  profile/collection, the last scene/bus, or a non-Stopped output is rejected with typed errors.
+  Only cascades: `RemoveAudioBus` drops its routes (explicit `RouteRemoved` events) and
+  `RemoveSource` drops its orphaned mixer entry (`MixerChanged` with defaults).
+- **Undo approach:** `AppState::inverse(&cmd) -> Option<Command>` reconstructs inverses from the
+  pre-application state (snapshot-free). Mutations invert exactly; creations/destructions/duplicates
+  return `None` (irreversible — a later undo service may snapshot for those). `Command::Transaction`
+  is the PLAN §59 transaction group: atomic apply via scratch-copy, inverse = reversed member
+  inverses. Raise/lower invert to absolute z-index restores.
+- **Output lifecycle:** `StartOutput` legal only from `Stopped`/`Failed` (→ `Starting`);
+  `StopOutput` from `Starting`/`Running`/`Degraded`/`Reconnecting` (→ `Stopping`). Mid-lifecycle
+  transitions (Running, Reconnecting, Failed, ...) will come from media-layer commands/events in
+  later tasks; the domain store is their pure anchor.
+- `TransitionToProgram` emits `SystemEvent::TransitionStarted` for non-Cut transitions; names are
+  unique-ified OBS-style (`"cam (2)"`); visibility toggles are allowed on locked items (OBS
+  behavior), transforms/crop/z-order are not.
+- `SecretString` newtype: serializes for persistence, Displays/Debugs as `[REDACTED]`.
+
+Validation: `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`,
+`cargo test -p prismcast-core` (100 passed) and `cargo test --workspace` all green. Not committed
+(per orchestrator instructions).

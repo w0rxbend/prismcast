@@ -1,0 +1,20 @@
+id: ARCH-001
+title: Domain model in prismcast-core
+goal: >
+  Implement the core domain model in prismcast-core: Source, Scene, SceneItem
+  (with Transform/Crop/Bounds/BlendMode), audio domain (AudioBus, AudioRoute,
+  mixer state), Output + OutputGraph, Encoder/Service descriptors, Transition,
+  Profile, SceneCollection, StudioMode state. Pure domain, serde-serializable,
+  no GTK/GStreamer/Tokio.
+depends_on: [BOOT-001]
+allowed_scope:
+  - crates/prismcast-core/
+acceptance:
+  - same Source usable from multiple scenes via SceneItem references
+  - OutputGraph supports N outputs with independent state
+  - all types serde roundtrip
+  - unit tests for model invariants
+validation:
+  - cargo test -p prismcast-core
+  - cargo clippy -p prismcast-core --all-targets -- -D warnings
+status: in_progress
