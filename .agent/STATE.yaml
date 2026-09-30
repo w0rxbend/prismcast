@@ -6,7 +6,8 @@ head_commit: bootstrap
 
 current_objective: null
 
-completed: []
+completed:
+  - SKILL-001
 
 in_progress: []
 

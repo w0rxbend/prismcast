@@ -1,0 +1,18 @@
+id: SKILL-001
+title: Install relevant Rust desktop and media skills for Claude, Codex and Kimi
+status: done
+depends_on: []
+allowed_scope:
+  - .agents/
+  - .claude/skills
+  - .codex/skills
+  - .kimi/skills
+  - .kimi-code/skills
+  - .agent/STATE.yaml
+  - .agent/HANDOFF.md
+  - .agent/JOURNAL.md
+acceptance_criteria:
+  - Relevant skills selected using PLAN.md
+  - Shared project-local installation exposes identical skills to all requested agents
+  - Upstream revisions and licenses retained
+  - Skill metadata and resource links validated

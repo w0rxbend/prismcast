@@ -10,10 +10,13 @@ description: >-
   circumvention, professional broadcast/color certification, or HyperFrames-authored
   compositions; route those tasks to their owning capabilities.
 license: MIT
-compatibility: Requires ffmpeg and ffprobe for execution; exact filters, codecs, protocols, and hardware backends vary by build and version.
+metadata:
+  compatibility: Requires ffmpeg and ffprobe for execution; exact filters, codecs, protocols, and hardware backends vary by build and version.
 ---
 
 # FFmpeg Expert
+
+Local adaptation (2026-09-30): moved compatibility into metadata for the Codex validator; upstream guidance is otherwise unchanged.
 
 Treat FFmpeg as a typed media pipeline and media editing as an evidence-driven workflow. Inspect the actual source, separate measurements from interpretations, make decisions reviewable, render to a new path, and verify at the intended boundary.
 

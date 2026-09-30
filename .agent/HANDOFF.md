@@ -4,6 +4,8 @@ Fresh repository. Only PLAN.md (the master plan), AGENTS.md (project rules), and
 
 ## Completed
 
+- SKILL-001: 30 shared project-local development skills installed; see `.agents/SKILLS.md`. Metadata/resource validation and `just ci` passed.
+
 - Git repository initialized on `main`.
 - AGENTS.md written (architecture, code standards, workflow, DoD).
 - `.agent/` infrastructure created (STATE.yaml, BACKLOG.yaml, JOURNAL.md, DECISIONS.md, tasks/).

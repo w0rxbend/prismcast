@@ -1,0 +1,216 @@
+{
+  "installed_on": "2026-09-30",
+  "scope": "project",
+  "canonical_directory": ".agents/skills",
+  "skills": [
+    {
+      "name": "ffmpeg",
+      "repository": "https://github.com/magnus919/agent-skills",
+      "revision": "54d81f7e02051df2f31130a136dc68f8add42130",
+      "path": "ffmpeg",
+      "license": "MIT",
+      "local_changes": [
+        "Moved compatibility frontmatter into metadata for Codex validation; added adaptation notice."
+      ]
+    },
+    {
+      "name": "ffmpeg-rust-integration",
+      "source": "project-authored",
+      "references": "Official documentation linked in SKILL.md; project constraints from AGENTS.md and PLAN.md"
+    },
+    {
+      "name": "gstreamer-rust",
+      "source": "project-authored",
+      "references": "Official documentation linked in SKILL.md; project constraints from AGENTS.md and PLAN.md"
+    },
+    {
+      "name": "gtk4-libadwaita",
+      "source": "project-authored",
+      "references": "Official documentation linked in SKILL.md; project constraints from AGENTS.md and PLAN.md"
+    },
+    {
+      "name": "linux-desktop-packaging",
+      "source": "project-authored",
+      "references": "Official documentation linked in SKILL.md; project constraints from AGENTS.md and PLAN.md"
+    },
+    {
+      "name": "linux-media-capture",
+      "source": "project-authored",
+      "references": "Official documentation linked in SKILL.md; project constraints from AGENTS.md and PLAN.md"
+    },
+    {
+      "name": "relm4-desktop",
+      "source": "project-authored",
+      "references": "Official documentation linked in SKILL.md; project constraints from AGENTS.md and PLAN.md"
+    },
+    {
+      "name": "rust-api-design",
+      "repository": "https://github.com/full-stack-skills/rust-skills",
+      "revision": "b8a6af74af28ee86b8cbbbc3075cde0b31a5155e",
+      "path": "skills/rust-api-design",
+      "license": "Apache-2.0"
+    },
+    {
+      "name": "rust-by-example",
+      "repository": "https://github.com/full-stack-skills/rust-skills",
+      "revision": "b8a6af74af28ee86b8cbbbc3075cde0b31a5155e",
+      "path": "skills/rust-by-example",
+      "license": "Apache-2.0"
+    },
+    {
+      "name": "rust-cargo-build",
+      "repository": "https://github.com/full-stack-skills/rust-skills",
+      "revision": "b8a6af74af28ee86b8cbbbc3075cde0b31a5155e",
+      "path": "skills/rust-cargo-build",
+      "license": "Apache-2.0"
+    },
+    {
+      "name": "rust-cli",
+      "repository": "https://github.com/full-stack-skills/rust-skills",
+      "revision": "b8a6af74af28ee86b8cbbbc3075cde0b31a5155e",
+      "path": "skills/rust-cli",
+      "license": "Apache-2.0"
+    },
+    {
+      "name": "rust-code-review",
+      "repository": "https://github.com/full-stack-skills/rust-skills",
+      "revision": "b8a6af74af28ee86b8cbbbc3075cde0b31a5155e",
+      "path": "skills/rust-code-review",
+      "license": "Apache-2.0"
+    },
+    {
+      "name": "rust-concurrency",
+      "repository": "https://github.com/full-stack-skills/rust-skills",
+      "revision": "b8a6af74af28ee86b8cbbbc3075cde0b31a5155e",
+      "path": "skills/rust-concurrency",
+      "license": "Apache-2.0"
+    },
+    {
+      "name": "rust-crate-discovery",
+      "repository": "https://github.com/full-stack-skills/rust-skills",
+      "revision": "b8a6af74af28ee86b8cbbbc3075cde0b31a5155e",
+      "path": "skills/rust-crate-discovery",
+      "license": "Apache-2.0"
+    },
+    {
+      "name": "rust-dependencies",
+      "repository": "https://github.com/full-stack-skills/rust-skills",
+      "revision": "b8a6af74af28ee86b8cbbbc3075cde0b31a5155e",
+      "path": "skills/rust-dependencies",
+      "license": "Apache-2.0"
+    },
+    {
+      "name": "rust-documentation",
+      "repository": "https://github.com/full-stack-skills/rust-skills",
+      "revision": "b8a6af74af28ee86b8cbbbc3075cde0b31a5155e",
+      "path": "skills/rust-documentation",
+      "license": "Apache-2.0"
+    },
+    {
+      "name": "rust-http-client",
+      "repository": "https://github.com/full-stack-skills/rust-skills",
+      "revision": "b8a6af74af28ee86b8cbbbc3075cde0b31a5155e",
+      "path": "skills/rust-http-client",
+      "license": "Apache-2.0"
+    },
+    {
+      "name": "rust-macros",
+      "repository": "https://github.com/full-stack-skills/rust-skills",
+      "revision": "b8a6af74af28ee86b8cbbbc3075cde0b31a5155e",
+      "path": "skills/rust-macros",
+      "license": "Apache-2.0"
+    },
+    {
+      "name": "rust-module-layout",
+      "repository": "https://github.com/full-stack-skills/rust-skills",
+      "revision": "b8a6af74af28ee86b8cbbbc3075cde0b31a5155e",
+      "path": "skills/rust-module-layout",
+      "license": "Apache-2.0"
+    },
+    {
+      "name": "rust-observability",
+      "repository": "https://github.com/full-stack-skills/rust-skills",
+      "revision": "b8a6af74af28ee86b8cbbbc3075cde0b31a5155e",
+      "path": "skills/rust-observability",
+      "license": "Apache-2.0"
+    },
+    {
+      "name": "rust-performance",
+      "repository": "https://github.com/full-stack-skills/rust-skills",
+      "revision": "b8a6af74af28ee86b8cbbbc3075cde0b31a5155e",
+      "path": "skills/rust-performance",
+      "license": "Apache-2.0"
+    },
+    {
+      "name": "rust-semver",
+      "repository": "https://github.com/full-stack-skills/rust-skills",
+      "revision": "b8a6af74af28ee86b8cbbbc3075cde0b31a5155e",
+      "path": "skills/rust-semver",
+      "license": "Apache-2.0"
+    },
+    {
+      "name": "rust-stable",
+      "repository": "https://github.com/full-stack-skills/rust-skills",
+      "revision": "b8a6af74af28ee86b8cbbbc3075cde0b31a5155e",
+      "path": "skills/rust-stable",
+      "license": "Apache-2.0"
+    },
+    {
+      "name": "rust-stdlib",
+      "repository": "https://github.com/full-stack-skills/rust-skills",
+      "revision": "b8a6af74af28ee86b8cbbbc3075cde0b31a5155e",
+      "path": "skills/rust-stdlib",
+      "license": "Apache-2.0"
+    },
+    {
+      "name": "rust-style-clippy",
+      "repository": "https://github.com/full-stack-skills/rust-skills",
+      "revision": "b8a6af74af28ee86b8cbbbc3075cde0b31a5155e",
+      "path": "skills/rust-style-clippy",
+      "license": "Apache-2.0"
+    },
+    {
+      "name": "rust-testing",
+      "repository": "https://github.com/full-stack-skills/rust-skills",
+      "revision": "b8a6af74af28ee86b8cbbbc3075cde0b31a5155e",
+      "path": "skills/rust-testing",
+      "license": "Apache-2.0"
+    },
+    {
+      "name": "rust-unsafe-ffi",
+      "repository": "https://github.com/full-stack-skills/rust-skills",
+      "revision": "b8a6af74af28ee86b8cbbbc3075cde0b31a5155e",
+      "path": "skills/rust-unsafe-ffi",
+      "license": "Apache-2.0"
+    },
+    {
+      "name": "rust-web",
+      "repository": "https://github.com/full-stack-skills/rust-skills",
+      "revision": "b8a6af74af28ee86b8cbbbc3075cde0b31a5155e",
+      "path": "skills/rust-web",
+      "license": "Apache-2.0"
+    },
+    {
+      "name": "rust-web-security",
+      "repository": "https://github.com/full-stack-skills/rust-skills",
+      "revision": "b8a6af74af28ee86b8cbbbc3075cde0b31a5155e",
+      "path": "skills/rust-web-security",
+      "license": "Apache-2.0"
+    },
+    {
+      "name": "rust-workspace",
+      "repository": "https://github.com/full-stack-skills/rust-skills",
+      "revision": "b8a6af74af28ee86b8cbbbc3075cde0b31a5155e",
+      "path": "skills/rust-workspace",
+      "license": "Apache-2.0"
+    }
+  ],
+  "excluded_rust_skills": [
+    "rust-database",
+    "rust-embedded",
+    "rust-java-migration",
+    "rust-java-migration-testing",
+    "rust-lombok-macros",
+    "rust-uniffi-building"
+  ]
+}
