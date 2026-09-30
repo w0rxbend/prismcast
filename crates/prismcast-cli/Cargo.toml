@@ -7,3 +7,13 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+clap.workspace = true
+prismcast-protocol.workspace = true
+prismcast-remote.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+prismcast-app.workspace = true

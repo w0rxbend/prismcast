@@ -38,7 +38,8 @@ Every user-visible operation is a Core Command. Every state change produces a Co
 
 ```
 crates/
-  prismcast-core        domain model, IDs, commands, events, errors
+  prismcast-core        domain model, IDs, commands, events, errors (no tokio/GTK/GStreamer)
+  prismcast-app         application core services: actor, dispatcher, broadcaster, undo, persistence (tokio allowed)
   prismcast-media       media engine abstraction traits + control actor
   prismcast-compositor  scene graph composition
   prismcast-audio       audio graph, mixer, meters

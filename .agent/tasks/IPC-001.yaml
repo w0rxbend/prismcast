@@ -1,0 +1,22 @@
+id: IPC-001
+title: Unix socket server
+goal: >
+  Implement the Unix domain socket IPC server in prismcast-remote per
+  ADR-0006 and docs/protocols/native-protocol.md: $XDG_RUNTIME_DIR/prismcast/
+  control.sock, length-prefixed framing, protocol-version handshake, mapping
+  wire Request -> prismcast-app AppHandle dispatch, wire events via
+  subscription. Includes IPC-002: prismcast-cli ping/status talking to a
+  running server (never initializing GTK/GStreamer).
+depends_on: [CORE-001, ARCH-007]
+allowed_scope:
+  - crates/prismcast-remote/
+  - crates/prismcast-cli/
+acceptance:
+  - server binds socket, serves handshake + requests + event subscription
+  - prismcast-cli ping returns status from a running server
+  - integration test: spawn CoreActor + server in-process, client ping/status/
+    scene command roundtrip
+validation:
+  - cargo test --workspace
+  - cargo clippy --workspace --all-targets -- -D warnings
+status: in_progress

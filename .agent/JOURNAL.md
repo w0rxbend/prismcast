@@ -301,3 +301,98 @@ multi-thread runtime) proves snapshot reads never block the queue. `cargo fmt --
 and `cargo test --workspace` all green. Not committed (orchestrator integrates).
 Follow-ups: meter coalescing/throttle (PLAN §56) once core emits meter events;
 snapshot-restore undo for destructive cascades; per-domain undo authz (CORE-005).
+
+---
+
+2026-10-01 IPC-001/IPC-002
+
+First real controller of the core, proving the layered architecture end-to-end: a
+`CoreActor` behind a Unix-socket `IpcServer`, driven by the shared `IpcClient` and the
+new `prismcast-cli` binary — no GTK/GStreamer anywhere in the client path.
+
+Layout:
+- `crates/prismcast-remote/src/{lib,auth,paths,codec,map,session,server,client}.rs`,
+  integration proof in `crates/prismcast-remote/tests/ipc.rs`.
+- `crates/prismcast-cli/src/{lib,main}.rs` (clap derive; thin `main` → `run`),
+  subprocess tests in `crates/prismcast-cli/tests/cli.rs` (`CARGO_BIN_EXE`).
+- Root `Cargo.toml` workspace deps: added `rmp-serde = "1"`, `clap = "4"` (derive),
+  `prismcast-app` path entry; tokio features extended with `net`, `io-util`, `time`.
+
+Key decisions:
+- **Codec**: 4-byte BE length prefix + MessagePack in rmp-serde's *human-readable* mode
+  with `with_struct_map()` (the `to_vec_named` shape). Human-readable matters: `Uuid`'s
+  serde switches to a 16-byte blob otherwise, which `serde_json::Value` cannot represent.
+  Decode goes through a `serde_json::Value` intermediate so the `type` tag can be
+  classified before typed decode — that powers the protocol's unknown-tag semantics (202
+  `unknown_request_type` error with recovered `request_id`, `UnknownMessageType` close)
+  and the IPC-only terminal `{"type":"closing","data":{code,reason,message}}` frame (the
+  Unix-socket substitute for WS close codes, protocol doc §8). Max frame 4 MiB,
+  oversize rejected before allocation.
+- **Auth**: filesystem permissions are primary (dir 0700, socket 0600; stale-socket
+  probe: connect → `AlreadyInUse` error, else remove). Default policy `allow-local`
+  grants full `Admin` (documented in `auth.rs`). Optional bearer token from
+  `$XDG_CONFIG_HOME/prismcast/remote.toml` (`token`, `permissions` keys) or injected
+  `AuthConfig::token`; parsed with a small built-in subset parser (no TOML crate allowed
+  in scope) — interim until the workspace adopts one. Challenge-response is not offered
+  by this server yet (no `AuthChallenge` in `Hello`).
+- **Sessions**: one task per connection; `Hello` → `Identify` (version negotiation via
+  `protocol::version::negotiate`, auth) → `Identified` → steady-state `select!` over
+  inbound frames / session event receiver / throttle-flush timer / server shutdown.
+  Writes go through a bounded outbound mpsc queue + writer task. Invalid *initial*
+  subscription sets (no request id to answer) refuse the session with a closing notice
+  instead of silently clamping; invalid `update_subscriptions` gets a 901
+  `invalid_subscription` error naming the problem in `details`.
+- **Event fan-out**: one upstream `EventStream` per *server*, re-broadcast over a bounded
+  `tokio::sync::broadcast` channel; sessions subscribe to that. Rationale: the app
+  broadcaster has no unsubscribe API, so per-session upstream subscriptions would leak a
+  registration on every disconnect/resubscribe; the broadcast channel's bounded Lagged
+  semantics also match the drop-oldest policy. Category/entity filtering happens
+  in-session, which also enables per-category entity filters `EventFilter` can't express.
+- **Throttle/coalescing**: per `(category, entity)` key; first event in a window delivers
+  immediately, later ones replace a single pending slot flushed at window end (fixed
+  cadence: flush restarts the window). Safe because events carry full snapshots.
+- **Backpressure**: per-session `seq` starts at 0 after `identified`. Broadcaster lag and
+  outbound-queue overflow drops both *consume* sequence numbers, so clients always see
+  loss as a gap and re-sync via `get_snapshot` (protocol §7). Responses that can't be
+  enqueued within `send_timeout` (1 s) or 8 consecutive event overflows shed the session
+  with `SlowConsumer` (4013). Fixed-window inbound rate limiter (200 req/s burst) answers
+  excess with 900 `rate_limited`; sustained-abuse close is a follow-up.
+- **Error mapping** follows the protocol doc table exactly: `NotFound`→600,
+  `InvalidInput`→400, `Unauthorized`→800, `Protocol`→200, `Media`/`Io`/`Persistence`→700;
+  actor shutdown → 204 `not_ready`; unknown request tag → 202; missing entity on
+  `get_scene`/`get_source`/`get_output` → 600 with `field` set.
+- **`AVAILABLE_REQUESTS`** (62 tags) lives in `prismcast-remote::map` for `get_version`
+  capability discovery and unknown-tag classification; a drift test validates every entry
+  against `RequestKind`'s serde tags without constructing instances.
+- **Wire `Permission` → `dispatch::Permissions`** mapped 1:1 at the boundary; sessions
+  dispatch via `AppHandle::dispatch_with_permissions` (authz checked by the actor before
+  state access), queries via `AppHandle::query` — read paths never touch the command
+  queue. `add_output`/`add_profile`/`add_scene_collection` ignore client-supplied
+  ids/state (server-assigned, per protocol §5).
+- **CLI** (`prismcast-cli`): `ping`, `status`, `scene list`, `scene switch
+  <uuid-or-name>` (UUID parse first, else exact-name lookup via `list_scenes`), `--json`
+  global flag, `--socket` override. Exit codes: 0 ok, 1 transport, 2 rejected (unknown
+  scene name = 2/600). Talks only through the socket via `IpcClient`, current-thread
+  runtime, subscriptions disabled (`SubscriptionSet::none`).
+
+Workarounds (no core/app/protocol internals modified, per scope):
+- Wire `StateSnapshot` has no `revision` field → `status` cannot report one; adding it is
+  a protocol schema change (needs its own task per PLAN §74).
+- Core `TrackMask` has no `from_bits` constructor → rebuilt via `with(track)` loop in
+  `map.rs`.
+- `prismcast-app` broadcaster lacks unsubscribe → server-wide fan-out (above).
+
+Tests: 27 remote unit (auth parser, codec framing/closing-notice, map coverage incl.
+error table, throttle windows, rate limiter, stale-socket/mode handling) + 9 remote
+integration (ping/snapshot, scene command roundtrip, two-client event delivery,
+subscription filtering incl. entity filter + 901 rejection, throttle coalescing with
+latest-wins assertion, token auth: wrong/missing token → 4009 close, read-only token →
+800 on mutation, unknown request → 202, oversized frame → 4002 close, pre-identify
+request → 4007 close) + 4 CLI subprocess tests (ping text+JSON, status, scene
+list/switch by name and UUID with server-state verification, missing server → exit 1).
+Validation: `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`,
+`cargo test --workspace` (all green; 273 tests workspace-wide), `cargo deny check` clean.
+Not committed (orchestrator integrates).
+Follow-ups: broadcaster unsubscribe API (app-level); WS transport (same session
+machinery); client-side batches; sustained-abuse rate-limit close; TOML crate for
+remote.toml; `revision` on wire snapshot; meter events once the domain emits them.
