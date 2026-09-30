@@ -1,0 +1,24 @@
+id: CORE-001
+title: Application actor
+goal: >
+  Create crates/prismcast-app (application core services layer; tokio allowed
+  here, unlike prismcast-core): the core actor owning AppState, receiving
+  Commands over a bounded channel, applying them via prismcast_core::apply,
+  broadcasting resulting Events. Immutable Arc<AppSnapshot> reads (PLAN §57).
+  Includes CORE-002 (command dispatcher: routing, authz permission hook,
+  error mapping) and CORE-003 (event broadcaster: multi-subscriber fan-out
+  with bounded per-subscriber queues and slow-consumer policy).
+depends_on: [ARCH-001, ARCH-002]
+allowed_scope:
+  - crates/prismcast-app/
+  - Cargo.toml (workspace members)
+acceptance:
+  - actor processes commands sequentially, emits events in order
+  - subscribers receive events via bounded queues; slow consumer policy
+    documented and tested
+  - snapshot queries do not block command processing
+  - integration test: command in -> events out -> snapshot reflects state
+validation:
+  - cargo test -p prismcast-app
+  - cargo clippy -p prismcast-app --all-targets -- -D warnings
+status: in_progress

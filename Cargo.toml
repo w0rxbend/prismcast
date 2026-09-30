@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/prismcast-core",
+    "crates/prismcast-app",
     "crates/prismcast-media",
     "crates/prismcast-compositor",
     "crates/prismcast-audio",

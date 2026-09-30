@@ -247,3 +247,57 @@ best-effort + `halt_on_failure`; atomicity via the `transaction` request. Events
 `seq` for drop detection (resync via get_snapshot). JSON-only for v1; `prismcast.msgpack` reserved.
 Command↔request mirror enforced by tests/command_coverage.rs (49 variants, dev-dep on core).
 Validation: fmt/clippy(-D warnings)/test all green. Not committed (orchestrator integrates).
+
+## 2026-10-01 — CORE-001/002/003 (Application core services in prismcast-app)
+
+Created `crates/prismcast-app` (new workspace member; tokio allowed here, unlike the pure
+domain crate): the core actor owning `AppState`, the command dispatcher's authorization
+hook, the event broadcaster, immutable snapshots, and the undo service. Modules:
+`actor.rs` (CoreActor + cloneable `AppHandle`, the only way in), `dispatch.rs`
+(`Permission`/`Permissions`, `required_permission`, read-only `Query`), `broadcaster.rs`
+(multi-subscriber fan-out), `snapshot.rs` (`AppSnapshot`), `undo.rs` (undo/redo stacks +
+transaction grouping).
+
+Key decisions:
+
+- **Snapshot strategy: clone-on-publish.** The actor clones the (small, domain-only)
+  `AppState` into `Arc<AppSnapshot>` after every applied command and publishes it over a
+  `watch` channel. Reads (`AppHandle::snapshot()`, `query()`, subscriptions) never touch
+  the command queue — an Arc swap is the only synchronization (PLAN §57). Revision counter
+  on each snapshot; `subscribe_snapshots()` for reactive UIs. No persistent-data-structure
+  dependency; internals can switch later without API change.
+- **Slow-consumer policy: drop-oldest + pinned coalesced `Lagged` notice.** Each
+  subscriber has a bounded queue (default 256, clamped ≥2). On overflow the oldest events
+  are dropped and a front-pinned `StreamEvent::Lagged { dropped }` counts the loss (drops
+  coalesce into one notice); the publisher never blocks and other subscribers are
+  unaffected. Matches the protocol's seq-gap → re-sync-from-snapshot contract.
+  `EventFilter` supports per-category + per-entity filtering with the same semantics as
+  `prismcast_protocol::Subscription`, but the types live in prismcast-app (`EventCategory`
+  minus `Meter`) — no dependency on prismcast-protocol (direction is app <- remote).
+- **Permission mapping (PLAN §24):** scenes/items/sources/studio/transitions →
+  `ControlScenes`; mixer/routes/buses → `ControlAudio`; outputs → `ControlOutputs`;
+  profiles/collections → `ModifyConfiguration`; `Admin` supersedes. Checked via
+  `Permissions::check` in the actor *before* any state access; rejected with
+  `Error::Unauthorized` (no mutation, no snapshot publish, no events — tested).
+  Transactions are checked per member (union of scopes required), not by a folded scope.
+  Queries require `Read`.
+- **Undo:** actor computes `state.inverse()` pre-apply and records `(label, inverse)`;
+  undo/redo are actor messages whose inverse commands flow through the same apply →
+  events → snapshot pipeline (redo = inverse-of-inverse recomputed at undo time).
+  `begin_transaction(label)`/`end_transaction()` group a drag gesture into one undo entry
+  (distinct from `Command::Transaction`'s atomicity). Failed undo/redo restores the entry.
+  Known limitation (ARCH-002, unchanged): `Add*`/`Remove*` inverses return `None` → not
+  undoable; undoing across them can fail at apply time. Interim undo authz: any
+  non-read-only caller (`Permissions::can_control()`); fine-grained undo authz is CORE-005
+  follow-up.
+- **Graceful shutdown** is a FIFO queue message: queued commands complete, then streams
+  close (subscribers drain, then see `None`). Dropping all handles also stops the actor.
+
+Validation: 39 prismcast-app tests pass (30 unit + 8 integration + 1 doctest) including
+PLAN §67 steps 2–8 domain-side with three `AppHandle` clones ("GTK"/"CLI"/"WS") all seeing
+identical ordered event streams; concurrency test (4 readers × 200 + 2 writers × 50,
+multi-thread runtime) proves snapshot reads never block the queue. `cargo fmt --check`,
+`cargo clippy -p prismcast-app --all-targets -- -D warnings`, `cargo test -p prismcast-app`,
+and `cargo test --workspace` all green. Not committed (orchestrator integrates).
+Follow-ups: meter coalescing/throttle (PLAN §56) once core emits meter events;
+snapshot-restore undo for destructive cascades; per-domain undo authz (CORE-005).
