@@ -1,12 +1,10 @@
 schema_version: 1
 
-project_phase: phase-0-research-and-architecture
+project_phase: phase-1-skeleton
 
-head_commit: f416e64
+head_commit: d000726
 
-current_objective:
-  id: ARCH-001
-  title: Domain model in prismcast-core
+current_objective: null
 
 completed:
   - SKILL-001
@@ -15,6 +13,13 @@ completed:
   - BOOT-003
   - BOOT-004
   - ARCH-000
+  - ARCH-001
+  - ARCH-002
+  - ARCH-003
+  - ARCH-004
+  - ARCH-005
+  - ARCH-006
+  - ARCH-007
   - RES-001
   - RES-002
   - RES-003
@@ -22,20 +27,26 @@ completed:
   - RES-005
   - RES-006
   - RES-007
+  - CORE-001
+  - CORE-002
+  - CORE-003
+  - IPC-001
+  - IPC-002
 
-in_progress:
-  - ARCH-001
-  - ARCH-002
+in_progress: []
 
-blocked: []
+blocked:
+  - id: UI-001
+    reason: libadwaita-1 dev package missing on this machine
+  - id: MEDIA-001
+    reason: gstreamer-1.0 dev package missing on this machine
 
 next_candidates:
-  - ARCH-003
-  - ARCH-004
-  - ARCH-005
-  - ARCH-006
-  - ARCH-007
-  - CORE-001
+  - CORE-004
+  - CORE-005
+  - WS-001
+  - UI-001
+  - MEDIA-001
 
 decisions:
   - ADR-0001
@@ -52,15 +63,18 @@ decisions:
 verification:
   cargo_fmt: pass
   cargo_clippy: pass
-  cargo_test: pass
+  cargo_test: pass  # 273 tests workspace-wide
+  cargo_deny: pass
 
 last_agent:
   model: kimi
-  session: orchestrated-wave-1
+  session: orchestrated-waves-1-5
 
 open_questions:
-  - Audio graph shape: typed AudioBusId bus matrix vs OBS 6 fixed mixes (RES-002) — resolve in ARCH-001/ARCH-002
-  - Reserve CanvasId in domain model for future per-canvas resolution (RES-001/RES-002)
-  - Minimum GStreamer floor 1.26 vs target 1.28 (RES-003/RES-005) — ADR when media work starts
-  - gst-plugins-rs vendoring strategy: isobmff/wpe2/gopbuffer not packaged by distros (RES-003)
+  - Minimum GStreamer floor 1.26 vs target 1.28 (RES-003/RES-005) — ADR when MEDIA work starts
+  - gst-plugins-rs vendoring: isobmff/wpe2/gopbuffer not distro-packaged (RES-003)
   - Browser source audio gap in wpe2 (RES-006) — revisit at Phase 11
+  - Group domain type missing for PLAN §8 Group/Ungroup (ARCH-003 follow-up)
+  - Scene-nesting cycle check for SourceKind::Scene in apply() (ARCH-003 follow-up)
+  - Wire StateSnapshot lacks revision field (IPC-001 follow-up, protocol schema change)
+  - Broadcaster unsubscribe API missing (IPC-001 workaround: server-wide fanout)

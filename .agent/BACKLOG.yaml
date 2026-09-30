@@ -7,96 +7,96 @@ tasks:
     title: OBS feature inventory
     priority: 10
     depends_on: []
-    status: ready
+    status: done
   - id: RES-002
     title: OBS architecture research
     priority: 10
     depends_on: []
-    status: ready
+    status: done
   - id: RES-003
     title: GStreamer capability research
     priority: 10
     depends_on: []
-    status: ready
+    status: done
   - id: RES-004
     title: Linux capture research (PipeWire, portal, V4L2)
     priority: 10
     depends_on: []
-    status: ready
+    status: done
   - id: RES-005
     title: Encoder capability matrix
     priority: 20
     depends_on: []
-    status: ready
+    status: done
   - id: RES-006
     title: Browser-source research (WebKitGTK 6)
     priority: 20
     depends_on: []
-    status: ready
+    status: done
   - id: RES-007
     title: obs-websocket protocol analysis
     priority: 20
     depends_on: []
-    status: ready
+    status: done
 
   # --- Architecture (Phase 0) ---
   - id: ARCH-000
     title: Author ADR-0001..0010
     priority: 5
     depends_on: []
-    status: ready
+    status: done
   - id: ARCH-001
     title: Domain model in prismcast-core
     priority: 15
     depends_on: [BOOT-001]
-    status: blocked
+    status: done
   - id: ARCH-002
     title: Command/Event API in prismcast-core
     priority: 15
     depends_on: [BOOT-001]
-    status: blocked
+    status: done
   - id: ARCH-003
     title: Scene graph design
     priority: 25
     depends_on: [ARCH-001]
-    status: blocked
+    status: done
   - id: ARCH-004
     title: Media abstraction traits
     priority: 25
     depends_on: [ARCH-001, RES-003]
-    status: blocked
+    status: done
   - id: ARCH-005
     title: Output graph design
     priority: 25
     depends_on: [ARCH-001]
-    status: blocked
+    status: done
   - id: ARCH-006
     title: Persistence model
     priority: 25
     depends_on: [ARCH-001]
-    status: blocked
+    status: done
   - id: ARCH-007
     title: Remote protocol design
     priority: 25
     depends_on: [ARCH-002, RES-007]
-    status: blocked
+    status: done
 
   # --- Bootstrap (Phase 1) ---
   - id: BOOT-001
     title: Cargo workspace + crate skeletons
     priority: 1
     depends_on: []
-    status: ready
+    status: done
   - id: BOOT-002
     title: Quality tooling (fmt/clippy/deny/just/CI)
     priority: 2
     depends_on: [BOOT-001]
-    status: blocked
+    status: done
   - id: BOOT-003
     title: Tracing + error model
     priority: 3
     depends_on: [BOOT-001]
-    status: blocked
+    status: done
   - id: BOOT-004
     title: Agent state infrastructure
     priority: 0
@@ -108,27 +108,27 @@ tasks:
     title: Application actor
     priority: 30
     depends_on: [ARCH-001, ARCH-002]
-    status: blocked
+    status: done
   - id: CORE-002
     title: Command dispatcher
     priority: 30
     depends_on: [CORE-001]
-    status: blocked
+    status: done
   - id: CORE-003
     title: Event broadcaster
     priority: 30
     depends_on: [CORE-001]
-    status: blocked
+    status: done
   - id: CORE-004
     title: Persistence
     priority: 35
     depends_on: [ARCH-006]
-    status: blocked
+    status: ready
   - id: CORE-005
     title: Undo/redo
     priority: 40
     depends_on: [CORE-002]
-    status: blocked
+    status: ready
 
   # --- Media prototype (Phase 2) ---
   - id: MEDIA-001
@@ -184,9 +184,9 @@ tasks:
     title: Unix socket server
     priority: 32
     depends_on: [CORE-001, ARCH-007]
-    status: blocked
+    status: done
   - id: IPC-002
     title: prismcast-cli ping/status
     priority: 33
     depends_on: [IPC-001]
-    status: blocked
+    status: done

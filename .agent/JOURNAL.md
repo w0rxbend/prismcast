@@ -396,3 +396,13 @@ Not committed (orchestrator integrates).
 Follow-ups: broadcaster unsubscribe API (app-level); WS transport (same session
 machinery); client-side batches; sustained-abuse rate-limit close; TOML crate for
 remote.toml; `revision` on wire snapshot; meter events once the domain emits them.
+
+---
+
+2026-10-01 ORCHESTRATOR-WAVE-WRAP
+
+Five orchestrated waves completed: bootstrap, research (7 parallel agents),
+ADRs, domain model + command/event API, architecture wave (5 parallel agents),
+app-core actor, IPC server + CLI. 273 tests green, just ci passes.
+UI-001/MEDIA-001 blocked on missing system packages (libadwaita-1-dev,
+gstreamer dev). STATE.yaml and HANDOFF.md rewritten; BACKLOG statuses synced.
