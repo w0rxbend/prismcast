@@ -27,9 +27,9 @@ use prismcast_app::broadcaster::StreamEvent;
 use prismcast_app::{AppHandle, EventFilter, DEFAULT_SUBSCRIBER_CAPACITY};
 
 use crate::auth::AuthConfig;
-use crate::codec::DEFAULT_MAX_FRAME_SIZE;
+use crate::codec::{split_ipc, DEFAULT_MAX_FRAME_SIZE};
 use crate::paths::default_socket_path;
-use crate::session::run_session;
+use crate::session::{run_session, SessionConfig, SessionContext};
 
 /// Tuning for [`IpcServer`].
 #[derive(Debug, Clone)]
@@ -68,6 +68,19 @@ impl Default for IpcServerConfig {
     }
 }
 
+impl IpcServerConfig {
+    /// The transport-independent part of the configuration, consumed by the
+    /// shared session machinery.
+    pub(crate) fn session_config(&self) -> SessionConfig {
+        SessionConfig {
+            auth: self.auth.clone(),
+            outbound_capacity: self.outbound_capacity,
+            send_timeout: self.send_timeout,
+            handshake_timeout: self.handshake_timeout,
+        }
+    }
+}
+
 /// Errors binding or running the IPC server.
 #[derive(Debug, thiserror::Error)]
 pub enum IpcError {
@@ -94,7 +107,7 @@ pub(crate) struct EventFanout {
 }
 
 impl EventFanout {
-    fn spawn(app: &AppHandle, capacity: usize) -> (Self, JoinHandle<()>) {
+    pub(crate) fn spawn(app: &AppHandle, capacity: usize) -> (Self, JoinHandle<()>) {
         let capacity = capacity.max(2);
         let mut stream = app.subscribe_with_capacity(EventFilter::all(), capacity);
         let (tx, _) = broadcast::channel(capacity);
@@ -253,14 +266,15 @@ async fn accept_loop(
                 Ok((stream, _addr)) => {
                     next_connection += 1;
                     debug!(connection_id = next_connection, "accepted connection");
-                    let handle = tokio::spawn(run_session(
-                        stream,
-                        app.clone(),
-                        config.clone(),
-                        fanout.clone(),
-                        next_connection,
-                        shutdown.clone(),
-                    ));
+                    let (reader, writer) = split_ipc(stream, config.max_frame_size);
+                    let context = SessionContext {
+                        app: app.clone(),
+                        config: Arc::new(config.session_config()),
+                        fanout: fanout.clone(),
+                        shutdown: shutdown.clone(),
+                        transport: "ipc",
+                    };
+                    let handle = tokio::spawn(run_session(reader, writer, next_connection, context));
                     let mut guard = sessions.lock().unwrap_or_else(|p| p.into_inner());
                     guard.retain(|h| !h.is_finished());
                     guard.push(handle);

@@ -1,9 +1,16 @@
-//! Per-connection session task (IPC-001; protocol doc §3, §5, §7).
+//! Per-connection session task, generic over the transport (IPC-001, WS-001;
+//! protocol doc §3, §5, §7).
 //!
 //! One task per connection drives the full lifecycle: server-first `Hello`,
 //! single `Identify` with version negotiation and authentication, then a
 //! steady-state loop multiplexing inbound frames, the session's event
 //! subscription, and throttle-flush timers over a `tokio::select!`.
+//!
+//! The transport is abstracted behind [`FrameReader`]/[`FrameWriter`]: the
+//! Unix-socket IPC transport ([`crate::codec`]) and the WebSocket transport
+//! ([`crate::ws`]) both implement them, so the handshake state machine,
+//! request dispatch, subscriptions, throttling, and backpressure live here
+//! exactly once.
 //!
 //! Socket writes live in a separate writer task fed by a **bounded** outbound
 //! queue ([`Outbound`]); producers never write to the socket directly.
@@ -32,7 +39,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::net::UnixStream;
 use tokio::sync::{mpsc, watch};
 use tokio::time::{timeout, Instant};
 use tracing::{debug, info, info_span, warn, Instrument};
@@ -53,13 +59,80 @@ use prismcast_protocol::response::{RequestResponse, ResponseData, ResponseStatus
 use prismcast_protocol::subscription::{EventCategory, SubscriptionSet};
 use prismcast_protocol::version;
 
-use crate::codec::{self, ClosingNotice};
+use crate::auth::AuthConfig;
+use crate::codec::ClosingNotice;
 use crate::map::{self, RequestClass};
-use crate::server::{EventFanout, IpcServerConfig};
+use crate::server::EventFanout;
 
 /// Consecutive outbound-queue overflows tolerated before the session is shed
 /// with [`CloseCode::SlowConsumer`].
 const MAX_OVERFLOW_STRIKES: u32 = 8;
+
+/// Transport-independent session tuning shared by the IPC and WebSocket
+/// servers (each server config converts into this). Inbound frame-size
+/// limits are enforced by the transport's [`FrameReader`], not here.
+#[derive(Debug, Clone)]
+pub(crate) struct SessionConfig {
+    /// Authentication policy applied at `Identify`.
+    pub auth: AuthConfig,
+    /// Bound of each session's outbound queue (protocol doc §Backpressure).
+    pub outbound_capacity: usize,
+    /// How long a response enqueue may block before the session is shed with
+    /// `SlowConsumer`.
+    pub send_timeout: Duration,
+    /// Deadline for the client's `Identify` after connect.
+    pub handshake_timeout: Duration,
+}
+
+/// An inbound frame could not be read or decoded. The session maps this to a
+/// [`CloseCode::MessageDecodeError`] close (protocol doc §8).
+#[derive(Debug)]
+pub(crate) struct FrameReadError(pub String);
+
+impl std::fmt::Display for FrameReadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// An outbound frame could not be written; the connection is dead.
+#[derive(Debug)]
+pub(crate) struct FrameWriteError(pub String);
+
+impl std::fmt::Display for FrameWriteError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// The reading half of a transport connection. Implementations decode one
+/// inbound frame into a generic [`serde_json::Value`] so the session can
+/// classify the `type` tag before committing to a typed decode.
+pub(crate) trait FrameReader: Send {
+    /// Reads one frame. `Ok(None)` means the peer closed cleanly (EOF or a
+    /// close frame); `Err` means the frame was unreadable or undecodable and
+    /// the session closes with [`CloseCode::MessageDecodeError`].
+    fn read_value(
+        &mut self,
+    ) -> impl std::future::Future<Output = Result<Option<serde_json::Value>, FrameReadError>> + Send;
+}
+
+/// The writing half of a transport connection. Owned by the session's writer
+/// task.
+pub(crate) trait FrameWriter: Send + 'static {
+    /// Writes one protocol message.
+    fn write_message(
+        &mut self,
+        message: &ServerMessage,
+    ) -> impl std::future::Future<Output = Result<(), FrameWriteError>> + Send;
+    /// Writes the terminal closing notice — a length-prefixed `closing`
+    /// frame on IPC, a WebSocket close frame carrying the numeric code on WS
+    /// (protocol doc §8) — then the writer task ends.
+    fn write_close(
+        &mut self,
+        notice: &ClosingNotice,
+    ) -> impl std::future::Future<Output = Result<(), FrameWriteError>> + Send;
+}
 
 /// One item in a session's bounded outbound queue.
 pub(crate) enum Outbound {
@@ -85,30 +158,49 @@ impl SessionExit {
     }
 }
 
+/// Everything a session task needs besides its transport halves.
+pub(crate) struct SessionContext {
+    /// Handle to the core actor.
+    pub app: AppHandle,
+    /// Transport-independent tuning.
+    pub config: Arc<SessionConfig>,
+    /// Server-wide event fan-out.
+    pub fanout: EventFanout,
+    /// Shutdown signal from the owning server.
+    pub shutdown: watch::Receiver<()>,
+    /// Transport name for structured logging (`"ipc"` / `"ws"`).
+    pub transport: &'static str,
+}
+
 /// Runs one connection to completion. Called from the accept loop with
 /// `connection_id` for structured logging.
-pub(crate) async fn run_session(
-    stream: UnixStream,
-    app: AppHandle,
-    config: Arc<IpcServerConfig>,
-    fanout: EventFanout,
+pub(crate) async fn run_session<R, W>(
+    reader: R,
+    writer: W,
     connection_id: u64,
-    shutdown: watch::Receiver<()>,
-) {
-    let span = info_span!("ipc_session", connection_id);
-    run_session_inner(stream, app, config, fanout, shutdown)
+    context: SessionContext,
+) where
+    R: FrameReader,
+    W: FrameWriter,
+{
+    let span = info_span!("session", transport = context.transport, connection_id);
+    run_session_inner(reader, writer, context)
         .instrument(span)
         .await;
 }
 
-async fn run_session_inner(
-    stream: UnixStream,
-    app: AppHandle,
-    config: Arc<IpcServerConfig>,
-    fanout: EventFanout,
-    mut shutdown: watch::Receiver<()>,
+async fn run_session_inner<R: FrameReader, W: FrameWriter>(
+    mut reader: R,
+    writer: W,
+    context: SessionContext,
 ) {
-    let (mut reader, writer) = stream.into_split();
+    let SessionContext {
+        app,
+        config,
+        fanout,
+        mut shutdown,
+        ..
+    } = context;
     let (out_tx, out_rx) = mpsc::channel::<Outbound>(config.outbound_capacity.max(1));
     let mut writer_task = tokio::spawn(run_writer(writer, out_rx));
 
@@ -141,26 +233,16 @@ async fn run_session_inner(
 
 /// Socket-writing half of a session: drains the bounded outbound queue; a
 /// [`Outbound::Close`] item is written and terminates the task.
-async fn run_writer(
-    mut writer: tokio::net::unix::OwnedWriteHalf,
-    mut rx: mpsc::Receiver<Outbound>,
-) {
+async fn run_writer<W: FrameWriter>(mut writer: W, mut rx: mpsc::Receiver<Outbound>) {
     while let Some(item) = rx.recv().await {
         let closing = matches!(item, Outbound::Close(_));
-        let encoded = match &item {
-            Outbound::Message(message) => codec::encode(message),
-            Outbound::Close(notice) => codec::encode_closing(notice),
+        let written = match &item {
+            Outbound::Message(message) => writer.write_message(message).await,
+            Outbound::Close(notice) => writer.write_close(notice).await,
         };
-        match encoded {
-            Ok(bytes) => {
-                if let Err(error) = codec::write_frame(&mut writer, &bytes).await {
-                    debug!(%error, "socket write failed; closing writer");
-                    return;
-                }
-            }
-            // Encoding these types is total; a failure here is a bug, not a
-            // client error.
-            Err(error) => warn!(%error, "failed to encode outbound message"),
+        if let Err(error) = written {
+            debug!(%error, "transport write failed; closing writer");
+            return;
         }
         if closing {
             return;
@@ -169,18 +251,12 @@ async fn run_writer(
 }
 
 /// Reads one frame and decodes it to a generic value for tag classification.
-async fn read_message(
-    reader: &mut tokio::net::unix::OwnedReadHalf,
-    max_frame_size: usize,
+async fn read_message<R: FrameReader>(
+    reader: &mut R,
 ) -> Result<Option<serde_json::Value>, SessionExit> {
-    let Some(payload) = codec::read_frame(reader, max_frame_size)
+    reader
+        .read_value()
         .await
-        .map_err(|e| SessionExit::notify(CloseCode::MessageDecodeError, e.to_string()))?
-    else {
-        return Ok(None);
-    };
-    codec::decode_value(&payload)
-        .map(Some)
         .map_err(|e| SessionExit::notify(CloseCode::MessageDecodeError, e.to_string()))
 }
 
@@ -195,10 +271,10 @@ struct Established {
 /// Server-first handshake (protocol doc §3): `Hello` → `Identify` →
 /// `Identified`. Anything but a single well-formed `Identify` closes the
 /// session with the corresponding close code.
-async fn handshake(
-    reader: &mut tokio::net::unix::OwnedReadHalf,
+async fn handshake<R: FrameReader>(
+    reader: &mut R,
     out_tx: &mpsc::Sender<Outbound>,
-    config: &IpcServerConfig,
+    config: &SessionConfig,
 ) -> Result<Established, SessionExit> {
     out_tx
         .send(Outbound::Message(ServerMessage::Hello(Hello {
@@ -212,12 +288,9 @@ async fn handshake(
         .await
         .map_err(|_| SessionExit::Silent)?;
 
-    let frame = timeout(
-        config.handshake_timeout,
-        read_message(reader, config.max_frame_size),
-    )
-    .await
-    .map_err(|_| SessionExit::notify(CloseCode::NotIdentified, "identify timeout"))??;
+    let frame = timeout(config.handshake_timeout, read_message(reader))
+        .await
+        .map_err(|_| SessionExit::notify(CloseCode::NotIdentified, "identify timeout"))??;
     let Some(value) = frame else {
         return Err(SessionExit::Silent);
     };
@@ -307,7 +380,7 @@ async fn handshake(
 /// Live session state for the steady-state loop.
 struct Session {
     app: AppHandle,
-    config: Arc<IpcServerConfig>,
+    config: Arc<SessionConfig>,
     session_id: Uuid,
     negotiated_protocol_version: u32,
     permissions: Permissions,
@@ -319,7 +392,7 @@ struct Session {
 impl Session {
     fn new(
         app: AppHandle,
-        config: Arc<IpcServerConfig>,
+        config: Arc<SessionConfig>,
         fanout: EventFanout,
         out_tx: mpsc::Sender<Outbound>,
         established: Established,
@@ -338,9 +411,9 @@ impl Session {
     }
 
     /// The steady-state loop (protocol doc §3 step 4).
-    async fn steady_state(
+    async fn steady_state<R: FrameReader>(
         mut self,
-        reader: &mut tokio::net::unix::OwnedReadHalf,
+        reader: &mut R,
         shutdown: &mut watch::Receiver<()>,
     ) -> SessionExit {
         loop {
@@ -349,7 +422,7 @@ impl Session {
                 _ = shutdown.changed() => {
                     return SessionExit::notify(CloseCode::ServerShutdown, "server is shutting down");
                 }
-                frame = read_message(reader, self.config.max_frame_size) => match frame {
+                frame = read_message(reader) => match frame {
                     Ok(Some(value)) => {
                         if let Some(exit) = self.handle_client_value(value).await {
                             return exit;

@@ -25,8 +25,12 @@
 
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::net::UnixStream;
 
 use prismcast_protocol::handshake::CloseCode;
+use prismcast_protocol::message::ServerMessage;
+
+use crate::session::{FrameReadError, FrameReader, FrameWriteError, FrameWriter};
 
 /// Default maximum frame payload size (4 MiB). Bounds memory per connection
 /// (PLAN.md §75); larger frames are rejected before allocation.
@@ -161,6 +165,66 @@ pub async fn read_frame<R: AsyncRead + Unpin>(
     let mut payload = vec![0u8; len];
     reader.read_exact(&mut payload).await?;
     Ok(Some(payload))
+}
+
+/// Splits a Unix stream into the IPC transport's session halves.
+pub(crate) fn split_ipc(
+    stream: UnixStream,
+    max_frame_size: usize,
+) -> (IpcFrameReader, IpcFrameWriter) {
+    let (reader, writer) = stream.into_split();
+    (
+        IpcFrameReader {
+            inner: reader,
+            max_frame_size,
+        },
+        IpcFrameWriter { inner: writer },
+    )
+}
+
+/// IPC [`FrameReader`]: length-prefixed MessagePack frames decoded through a
+/// [`serde_json::Value`] intermediate (see module docs).
+pub(crate) struct IpcFrameReader {
+    inner: tokio::net::unix::OwnedReadHalf,
+    max_frame_size: usize,
+}
+
+impl FrameReader for IpcFrameReader {
+    async fn read_value(&mut self) -> Result<Option<serde_json::Value>, FrameReadError> {
+        let Some(payload) = read_frame(&mut self.inner, self.max_frame_size)
+            .await
+            .map_err(|e| FrameReadError(e.to_string()))?
+        else {
+            return Ok(None);
+        };
+        decode_value(&payload)
+            .map(Some)
+            .map_err(|e| FrameReadError(e.to_string()))
+    }
+}
+
+/// IPC [`FrameWriter`]: MessagePack payloads behind a length prefix; the
+/// closing notice is sent as a `{"type": "closing"}` frame (protocol doc §8).
+pub(crate) struct IpcFrameWriter {
+    inner: tokio::net::unix::OwnedWriteHalf,
+}
+
+impl FrameWriter for IpcFrameWriter {
+    async fn write_message(&mut self, message: &ServerMessage) -> Result<(), FrameWriteError> {
+        // Encoding this type is total; a failure here is a bug, not a client
+        // error.
+        let bytes = encode(message).map_err(|e| FrameWriteError(e.to_string()))?;
+        write_frame(&mut self.inner, &bytes)
+            .await
+            .map_err(|e| FrameWriteError(e.to_string()))
+    }
+
+    async fn write_close(&mut self, notice: &ClosingNotice) -> Result<(), FrameWriteError> {
+        let bytes = encode_closing(notice).map_err(|e| FrameWriteError(e.to_string()))?;
+        write_frame(&mut self.inner, &bytes)
+            .await
+            .map_err(|e| FrameWriteError(e.to_string()))
+    }
 }
 
 #[cfg(test)]
