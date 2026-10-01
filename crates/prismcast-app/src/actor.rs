@@ -586,7 +586,20 @@ impl CoreActor {
         let foreign = self
             .group_controller
             .is_some_and(|owner| owner != controller_id);
-        self.undo.preflight(label, inverse.as_ref(), !foreign)?;
+        if let Err(limit_error) = self.undo.preflight(label, inverse.as_ref(), !foreign) {
+            // History saturation must not reject domain-defined no-ops. Input,
+            // permission and inverse payload checks already passed. Probe only
+            // this exceptional path on a scratch copy; never apply a rejected
+            // mutation to authoritative state or change history.
+            let mut scratch = self.state.clone();
+            match apply(&mut scratch, command) {
+                Ok(events) if events.is_empty() => {
+                    let events = self.commit(events);
+                    return Ok(CommandResponse { label, events });
+                }
+                _ => return Err(limit_error),
+            }
+        }
         let events = apply(&mut self.state, command)?;
         if foreign && !events.is_empty() {
             self.undo.end_transaction()?;
@@ -743,6 +756,58 @@ mod tests {
         let scene_id = snapshot.scenes().next().unwrap().id;
         let source_id = snapshot.sources().next().unwrap().id;
         (handle, scene_id, source_id)
+    }
+
+    #[tokio::test]
+    async fn full_owner_group_accepts_repeated_noop_without_consuming_history() {
+        let config = CoreConfig {
+            undo_limits: UndoLimits {
+                group_members: 2,
+                ..UndoLimits::default()
+            },
+            ..CoreConfig::default()
+        };
+        let (handle, scene_id, _) = undo_fixture(config).await;
+        handle.begin_transaction("one member").await.unwrap();
+        let rename = Command::RenameScene {
+            scene_id,
+            name: "one".into(),
+        };
+        handle.dispatch(rename.clone()).await.unwrap();
+        let mut stream = handle.subscribe(EventFilter::all());
+        let response = handle
+            .dispatch(rename.clone())
+            .await
+            .expect("same rename remains successful at group limit");
+        assert!(response.events.is_empty());
+        // Real mutation is still rejected: the no-op did not free or append members.
+        assert!(handle
+            .dispatch(Command::RenameScene {
+                scene_id,
+                name: "two".into()
+            })
+            .await
+            .is_err());
+        assert_eq!(handle.snapshot().scene(scene_id).unwrap().name, "one");
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(10), stream.recv())
+                .await
+                .is_err()
+        );
+        handle.end_transaction().await.unwrap();
+        handle.undo().await.unwrap();
+        assert_eq!(handle.snapshot().scene(scene_id).unwrap().name, "original");
+        // A no-op must also preserve a previously available redo step.
+        handle
+            .dispatch(Command::RenameScene {
+                scene_id,
+                name: "original".into(),
+            })
+            .await
+            .unwrap();
+        handle.redo().await.unwrap();
+        assert_eq!(handle.snapshot().scene(scene_id).unwrap().name, "one");
+        handle.shutdown().await;
     }
 
     #[tokio::test]
