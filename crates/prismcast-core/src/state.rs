@@ -364,6 +364,8 @@ impl AppState {
                 inverses.reverse();
                 Some(Command::Transaction { commands: inverses })
             }
+            // Authorization is an external effect, never an undo/replay operation.
+            Command::AuthorizeSourceCapture { .. } => None,
             // Irreversible: creations, destructions, duplicates.
             Command::AddScene { .. }
             | Command::RemoveScene { .. }
@@ -390,7 +392,32 @@ impl AppState {
 /// `(state, command) -> (events)`.
 pub fn apply(state: &mut AppState, command: &Command) -> Result<Vec<Event>> {
     match command {
+        Command::AuthorizeSourceCapture { source_id } => {
+            let source = state
+                .source(*source_id)
+                .ok_or_else(|| Error::NotFound(format!("source {source_id}")))?;
+            if !source.enabled
+                || !matches!(
+                    source.kind,
+                    SourceKind::PipeWireDisplay | SourceKind::PipeWireWindow
+                )
+            {
+                return Err(Error::InvalidInput(
+                    "capture authorization requires an enabled display/window source".into(),
+                ));
+            }
+            Ok(vec![Event::Source(
+                SourceEvent::CaptureAuthorizationRequested {
+                    source_id: *source_id,
+                },
+            )])
+        }
         Command::Transaction { commands } => {
+            if contains_capture_authorization(command) {
+                return Err(Error::InvalidInput(
+                    "capture authorization cannot be inside a transaction".into(),
+                ));
+            }
             // Atomic: apply to a scratch copy; only commit on full success.
             let mut scratch = state.clone();
             let mut events = Vec::new();
@@ -404,8 +431,20 @@ pub fn apply(state: &mut AppState, command: &Command) -> Result<Vec<Event>> {
     }
 }
 
+/// External authorization is never replayed through atomic transactions.
+pub fn contains_capture_authorization(command: &Command) -> bool {
+    match command {
+        Command::AuthorizeSourceCapture { .. } => true,
+        Command::Transaction { commands } => commands.iter().any(contains_capture_authorization),
+        _ => false,
+    }
+}
+
 fn apply_one(state: &mut AppState, command: &Command) -> Result<Vec<Event>> {
     match command {
+        Command::AuthorizeSourceCapture { .. } => Err(Error::InvalidInput(
+            "capture authorization requires application dispatch".into(),
+        )),
         // Transactions are handled by the public `apply`; nested transactions
         // are flattened by treating them as a sequential group here.
         Command::Transaction { commands } => {

@@ -101,6 +101,8 @@ pub fn primary_entity(event: &Event) -> Option<Uuid> {
             SourceEvent::Removed { source_id }
             | SourceEvent::Renamed { source_id, .. }
             | SourceEvent::SettingsChanged { source_id }
+            | SourceEvent::CaptureAuthorizationRequested { source_id }
+            | SourceEvent::RuntimeChanged { source_id, .. }
             | SourceEvent::EnabledChanged { source_id, .. } => source_id.as_uuid(),
         },
         Event::Audio(audio) => match audio {

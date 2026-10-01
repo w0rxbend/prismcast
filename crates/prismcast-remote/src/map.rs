@@ -89,6 +89,7 @@ pub const AVAILABLE_REQUESTS: &[&str] = &[
     "set_scene_item_z_index",
     "set_source_balance",
     "set_source_enabled",
+    "authorize_source_capture",
     "set_source_monitor",
     "set_source_muted",
     "set_source_settings",
@@ -352,6 +353,9 @@ pub fn command_from_wire(kind: RequestKind) -> Result<Command, WireError> {
             source_id: SourceId::from(source_id),
             settings,
         }),
+        R::AuthorizeSourceCapture { source_id } => Ok(Command::AuthorizeSourceCapture {
+            source_id: SourceId::from(source_id),
+        }),
         R::SetSourceEnabled { source_id, enabled } => Ok(Command::SetSourceEnabled {
             source_id: SourceId::from(source_id),
             enabled,
@@ -600,6 +604,17 @@ pub fn event_to_wire(event: &Event) -> WireEvent {
             }
         }),
         Event::Source(event) => WireEvent::Source(match event {
+            SourceEvent::CaptureAuthorizationRequested { source_id } => {
+                prismcast_protocol::event::SourceEvent::CaptureAuthorizationRequested {
+                    source_id: *source_id.as_uuid(),
+                }
+            }
+            SourceEvent::RuntimeChanged { source_id, runtime } => {
+                prismcast_protocol::event::SourceEvent::RuntimeChanged {
+                    source_id: *source_id.as_uuid(),
+                    runtime: runtime.as_ref().map(runtime_to_wire),
+                }
+            }
             SourceEvent::Added { source } => prismcast_protocol::event::SourceEvent::Added {
                 source: Box::new(source_to_wire(source)),
             },
@@ -752,6 +767,7 @@ pub fn state_to_wire(state: &AppState) -> data::StateSnapshot {
         active_collection: state.active_collection.map(|id| *id.as_uuid()),
         scenes: state.scenes.values().map(scene_to_wire).collect(),
         sources: state.sources.values().map(source_to_wire).collect(),
+        source_runtime: Vec::new(),
         transition: transition_to_wire(&state.transition),
         audio: audio_config_to_wire(&state.audio),
         outputs: state.outputs.values().map(output_to_wire).collect(),
@@ -762,7 +778,36 @@ pub fn state_to_wire(state: &AppState) -> data::StateSnapshot {
 
 /// Convenience wrapper for snapshots.
 pub fn snapshot_to_wire(snapshot: &AppSnapshot) -> data::StateSnapshot {
-    state_to_wire(snapshot.state())
+    let mut wire = state_to_wire(snapshot.state());
+    wire.source_runtime = snapshot
+        .source_runtimes()
+        .map(|(source_id, runtime)| data::SourceRuntimeEntry {
+            source_id: *source_id.as_uuid(),
+            runtime: runtime_to_wire(runtime),
+        })
+        .collect();
+    wire.source_runtime.sort_by_key(|entry| entry.source_id);
+    wire
+}
+
+fn runtime_to_wire(runtime: &prismcast_core::SourceRuntime) -> data::SourceRuntime {
+    use prismcast_core::CaptureStatus as C;
+    data::SourceRuntime {
+        generation: runtime.generation.value(),
+        status: match runtime.status {
+            C::Authorizing => data::CaptureStatus::Authorizing,
+            C::Active => data::CaptureStatus::Active,
+            C::Cancelled => data::CaptureStatus::Cancelled,
+            C::Denied => data::CaptureStatus::Denied,
+            C::Revoked => data::CaptureStatus::Revoked,
+            C::Failed => data::CaptureStatus::Failed,
+        },
+        dimensions: runtime.dimensions.map(|d| data::SourceDimensions {
+            width: d.width,
+            height: d.height,
+        }),
+        message: runtime.message.clone(),
+    }
 }
 
 fn vec2_to_wire(v: Vec2) -> data::Vec2 {
