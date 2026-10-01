@@ -618,3 +618,98 @@ async fn runtime_observations_are_bounded_and_non_capture_sources_reject_authori
     assert_eq!(app.snapshot().revision(), revision);
     app.shutdown().await;
 }
+
+#[tokio::test]
+async fn v4l2_camera_authorization_reports_and_invalidation_match_portal_sources() {
+    let mut state = AppState::new();
+    let source = Source::new(SourceKind::V4l2Camera, "camera");
+    let source_id = source.id;
+    state.sources.insert(source_id, source);
+    let app = AppHandle::spawn_with_state(state, CoreConfig::default());
+    let mut owner = app.attach_capture_owner().await.unwrap();
+    // Lease-free: no portal parent window is ever involved.
+    let response = app.authorize_source_capture(source_id, None).await.unwrap();
+    assert!(response
+        .events
+        .iter()
+        .any(|e| matches!(e, Event::Source(SourceEvent::RuntimeChanged { .. }))));
+    let request = owner.requests.recv().await.unwrap();
+    assert_eq!(request.parent_window, None);
+    assert_eq!(
+        app.snapshot().source_runtime(source_id).unwrap().generation,
+        request.generation
+    );
+    assert_eq!(
+        app.snapshot().source_runtime(source_id).unwrap().status,
+        CaptureStatus::Authorizing
+    );
+    owner
+        .runtime
+        .report(
+            source_id,
+            request.generation,
+            CaptureStatus::Active,
+            pixels(),
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        app.snapshot().source_runtime(source_id).unwrap().dimensions,
+        pixels()
+    );
+    // A device change invalidates the active camera runtime (ADR-0017 rule).
+    app.dispatch(Command::SetSourceSettings {
+        source_id,
+        settings: serde_json::json!({"device": "/dev/video1"}),
+    })
+    .await
+    .unwrap();
+    assert!(app.snapshot().source_runtime(source_id).is_none());
+    assert!(owner
+        .runtime
+        .report(
+            source_id,
+            request.generation,
+            CaptureStatus::Active,
+            pixels(),
+            None
+        )
+        .await
+        .is_err());
+    // Disable rejects re-authorization; re-enable admits a new generation.
+    app.dispatch(Command::SetSourceEnabled {
+        source_id,
+        enabled: false,
+    })
+    .await
+    .unwrap();
+    assert!(app.authorize_source_capture(source_id, None).await.is_err());
+    app.dispatch(Command::SetSourceEnabled {
+        source_id,
+        enabled: true,
+    })
+    .await
+    .unwrap();
+    assert!(app.snapshot().source_runtime(source_id).is_none());
+    app.authorize_source_capture(source_id, None).await.unwrap();
+    let retry = owner.requests.recv().await.unwrap();
+    assert!(retry.generation > request.generation);
+    // Removal clears the runtime; late reports cannot revive it.
+    app.dispatch(Command::RemoveSource { source_id })
+        .await
+        .unwrap();
+    assert!(app.snapshot().source_runtime(source_id).is_none());
+    assert!(owner
+        .runtime
+        .report(
+            source_id,
+            retry.generation,
+            CaptureStatus::Active,
+            pixels(),
+            None
+        )
+        .await
+        .is_err());
+    app.shutdown().await;
+}
