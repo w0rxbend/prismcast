@@ -1034,6 +1034,10 @@ name = "prismcast-media-gst"
 version = "0.1.0"
 dependencies = [
  "gstreamer",
+ "prismcast-core",
+ "prismcast-media",
+ "serde",
+ "serde_json",
  "thiserror",
  "tracing",
 ]

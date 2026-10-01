@@ -75,3 +75,8 @@ impl GstRuntime {
         })
     }
 }
+
+pub mod test_pattern;
+pub use test_pattern::{
+    build_test_pattern_bin, GstTestPatternSource, Pattern, TestPatternSettings,
+};

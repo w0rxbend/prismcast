@@ -10,3 +10,7 @@ license.workspace = true
 gstreamer.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+prismcast-core = { path = "../prismcast-core" }
+prismcast-media = { path = "../prismcast-media" }
+serde.workspace = true
+serde_json.workspace = true
