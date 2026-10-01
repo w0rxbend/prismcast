@@ -45,6 +45,7 @@
 pub mod actor;
 pub mod broadcaster;
 pub mod dispatch;
+pub mod persistence;
 pub mod snapshot;
 pub mod undo;
 
@@ -56,5 +57,8 @@ pub use broadcaster::{
     StreamEvent, DEFAULT_SUBSCRIBER_CAPACITY, MIN_SUBSCRIBER_CAPACITY,
 };
 pub use dispatch::{required_permission, Permission, Permissions, Query, QueryResponse};
+pub use persistence::{
+    dirty_class, DirtyClass, PersistenceConfig, PersistenceEvent, PersistenceHandle,
+};
 pub use snapshot::AppSnapshot;
 pub use undo::{UndoEntry, UndoService, DEFAULT_UNDO_CAPACITY};

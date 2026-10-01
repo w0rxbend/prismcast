@@ -39,6 +39,7 @@ use prismcast_core::state::{apply, AppState};
 
 use crate::broadcaster::{EventBroadcaster, EventFilter, EventStream};
 use crate::dispatch::{Permissions, Query, QueryResponse};
+use crate::persistence::PersistenceHandle;
 use crate::snapshot::AppSnapshot;
 use crate::undo::{UndoEntry, UndoService, DEFAULT_UNDO_CAPACITY};
 
@@ -139,6 +140,26 @@ impl AppHandle {
 
     /// Spawns the core actor around an existing state (persistence restore).
     pub fn spawn_with_state(state: AppState, config: CoreConfig) -> Self {
+        Self::spawn_inner(state, config, None)
+    }
+
+    /// Spawns the core actor with persistence wired in: every applied command
+    /// notifies the persistence actor (non-blocking; see
+    /// [`PersistenceHandle::command_applied`]), and shutdown performs a final
+    /// awaited flush so no dirty state is lost.
+    pub fn spawn_with_persistence(
+        state: AppState,
+        config: CoreConfig,
+        persistence: PersistenceHandle,
+    ) -> Self {
+        Self::spawn_inner(state, config, Some(persistence))
+    }
+
+    fn spawn_inner(
+        state: AppState,
+        config: CoreConfig,
+        persistence: Option<PersistenceHandle>,
+    ) -> Self {
         let (tx, rx) = mpsc::channel(config.command_capacity.max(1));
         let (snapshot_tx, snapshot_rx) = watch::channel(AppSnapshot::new(0, state.clone()));
         let broadcaster = EventBroadcaster::new(config.event_queue_capacity);
@@ -150,6 +171,7 @@ impl AppHandle {
             broadcaster: broadcaster.clone(),
             snapshot_tx,
             rx,
+            persistence,
         };
         tokio::spawn(actor.run());
         Self {
@@ -362,6 +384,7 @@ struct CoreActor {
     broadcaster: EventBroadcaster,
     snapshot_tx: watch::Sender<Arc<AppSnapshot>>,
     rx: mpsc::Receiver<ActorMessage>,
+    persistence: Option<PersistenceHandle>,
 }
 
 impl CoreActor {
@@ -383,7 +406,17 @@ impl CoreActor {
                 ActorMessage::EndTransaction { reply } => {
                     let _ = reply.send(self.undo.end_transaction());
                 }
-                ActorMessage::Shutdown => break,
+                ActorMessage::Shutdown => {
+                    // Save-on-shutdown: flush pending dirty state before
+                    // stopping. FIFO ordering guarantees every Dirty mark
+                    // queued by earlier commands is written.
+                    if let Some(persistence) = &self.persistence {
+                        if let Err(error) = persistence.flush().await {
+                            warn!(%error, "persistence flush on shutdown failed");
+                        }
+                    }
+                    break;
+                }
             }
         }
         self.broadcaster.close_all();
@@ -415,10 +448,9 @@ impl CoreActor {
         let inverse = self.state.inverse(command);
         let events = apply(&mut self.state, command)?;
         self.undo.record(label, inverse);
-        Ok(CommandResponse {
-            label,
-            events: self.commit(events),
-        })
+        let events = self.commit(events);
+        self.notify_persistence(command, !events.is_empty());
+        Ok(CommandResponse { label, events })
     }
 
     fn handle_undo(&mut self) -> Result<CommandResponse, Error> {
@@ -444,10 +476,9 @@ impl CoreActor {
                         inverse,
                     });
                 }
-                Ok(CommandResponse {
-                    label,
-                    events: self.commit(events),
-                })
+                let events = self.commit(events);
+                self.notify_persistence(&entry.inverse, !events.is_empty());
+                Ok(CommandResponse { label, events })
             }
             Err(error) => {
                 warn!(step = entry.label, %error, "undo failed; entry restored to stack");
@@ -477,16 +508,25 @@ impl CoreActor {
                         inverse,
                     });
                 }
-                Ok(CommandResponse {
-                    label,
-                    events: self.commit(events),
-                })
+                let events = self.commit(events);
+                self.notify_persistence(&entry.inverse, !events.is_empty());
+                Ok(CommandResponse { label, events })
             }
             Err(error) => {
                 warn!(step = entry.label, %error, "redo failed; entry restored to stack");
                 self.undo.push_redo(entry);
                 Err(error)
             }
+        }
+    }
+
+    /// Notifies the persistence actor of an applied command (CORE-004).
+    /// Skipped for no-op applies (a command that emitted no events changed
+    /// nothing, so there is nothing to save). Never blocks: the handle
+    /// `try_send`s whole-aggregate snapshots over a bounded channel.
+    fn notify_persistence(&self, command: &Command, changed: bool) {
+        if let (Some(persistence), true) = (&self.persistence, changed) {
+            persistence.command_applied(command, &self.state);
         }
     }
 

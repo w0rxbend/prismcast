@@ -1,0 +1,42 @@
+schemaVersion = 1
+id = "66666666-6666-6666-6666-666666666666"
+name = "twitch-1080p"
+
+[video]
+width = 1920
+height = 1080
+fps_num = 60
+fps_den = 1
+
+[[encoders]]
+id = "77777777-7777-7777-7777-777777777777"
+codec = "h264"
+bitrate_kbps = 6000
+keyframe_interval = 120
+
+[encoders.settings]
+preset = "veryfast"
+rate_control = "cbr"
+
+[[services]]
+id = "88888888-8888-8888-8888-888888888888"
+name = "Twitch"
+url = "rtmps://live.twitch.tv/app"
+key = "live_example_key"
+
+[[outputs]]
+id = "99999999-9999-9999-9999-999999999999"
+kind = "rtmp"
+name = "Twitch main"
+video_encoder = "77777777-7777-7777-7777-777777777777"
+audio_encoders = []
+service = "88888888-8888-8888-8888-888888888888"
+
+[outputs.reconnect_policy]
+max_retries = 10
+initial_backoff_ms = 1000
+max_backoff_ms = 30000
+
+[settings.recording]
+format = "mkv"
+path = "~/Videos/prismcast"
