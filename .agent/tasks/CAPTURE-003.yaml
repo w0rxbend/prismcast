@@ -24,7 +24,14 @@ acceptance:
 - UI offers camera creation with discovered-device selection plus explicit authorize/retry controls with pending/error presentation
 - Mock/headless lifecycle, validation and error-mapping tests pass; opt-in real-camera or v4l2loopback evidence is recorded separately from headless evidence
 validation: [just ci, just deny, focused mock/headless tests, separately recorded opt-in V4L2 hardware probe]
-status: ready
+status: done
+
+validation_notes:
+- Combined just ci gate (fmt/clippy -D warnings/workspace tests/deny) passed on the integrated branch
+- Live real-camera probe passed on the integrated branch: Anker PowerConf C200 /dev/video2, 640x480, 4 frames, negotiated caps, clean teardown
+- Live discovery evidence: list_video_sources() enumerated the real camera (requires show-all-devices under PipeWire)
+- Headless coverage: device-path/extraction tables, error mapping (ENOENT/EACCES/EBUSY), injected-videotestsrc session lifecycle, owner generation guards, actor admission/invalidation, feed-keyed compositor regression with negative control, UI signal-matrix and command-order tests
+- Camera USB link flapped during validation (nodes re-enumerated); busy/unplug typed mappings implemented, live unplug UX untested
 
 notes:
 - ADR-0019 (lease-free camera capture contract) must be written before implementation per project rules

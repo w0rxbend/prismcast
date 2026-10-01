@@ -1,62 +1,70 @@
 # Current state
 
-CAPTURE-002 command-driven monitor/window capture preview is implemented and
-integrated on agent/CAPTURE-002 with separate Core/API, media and UI worktrees
-and independent reviews. Main026c823 was pushed at the user's explicit request
-before this wave; current wave integration/push is recorded in the journal.
+CAPTURE-003 (V4L2 camera discovery and capture) is implemented and integrated
+on agent/CAPTURE-003 via five delegated worktree agents (capture, core+app,
+media-gst, preview, ui) under kimi-code orchestration, preceded by ADR-0019
+and docs/research/v4l2-gst-device-monitor.md per project rule. CAPTURE-002's
+integrated live window preview remains UNVERIFIED and is the immediate
+follow-up; a raw consumer-frame diagnostic is armed for it.
 
-## Implemented
+## Implemented (CAPTURE-003)
 
-- AuthorizeSourceCapture is an explicit Core Command. A singleton bounded owner
-  receives effects; absent/full/disconnected owners fail admission before changes.
-  Ephemeral parent context is local-only. Transient source runtime lives outside
-  persisted AppState; Core Events and snapshots expose status/actual dimensions.
-  Owner/generation checks prevent stale revival, including retry/remove/disable.
-  Authorization is not replayed by transactions, undo or snapshot restoration.
-- Persistent pipewiresrc producers retain one portal lease per shared SourceId
-  through compositor rebuilds. Bounded RGBA appsink/appsrc consumers share native
-  buffers and tee placements; native caps define geometry. Timelines are rebased
-  across independent producers/consumers. Unavailable captures leave other content
-  visible. Native graph retirement precedes voluntary portal session close.
-- UI offers monitor/window source creation and explicit authorize/retry controls.
-  GTK-local exported parent guard survives asynchronous media shutdown. Pending,
-  terminal and disabled sources gate repeated signals. Negotiated dimensions drive
-  preview editing; caps/generation/revocation changes cancel stale drafts.
-- ADR-0017/0018 and docs/testing/capture-core-runtime.md, capture-ui.md and
-  shared-capture-preview.md document the contract and evidence.
+- AuthorizeSourceCapture reused unchanged as an explicit open-device effect for
+  SourceKind::V4l2Camera (ADR-0019): user-initiated, generation-guarded via
+  transient SourceRuntime, never replayed by restore/undo/transactions, no
+  portal session/lease/FD/parent window. Persisted identity is only the
+  validated device path setting (absolute, /dev/, <=255 bytes, no control
+  chars). Core admission, actor report gate and preview owner admit the kind.
+- prismcast-capture devices.rs: one-shot GstDeviceMonitor enumeration
+  (show-all-devices(true) is MANDATORY — PipeWire hides the v4l2 provider on
+  target desktops) plus VideoDeviceMonitor publishing bounded watch snapshots
+  via timed_pop polling on a dedicated thread; extraction is a pure function.
+  camera.rs: validate_device_path, build_v4l2_source with probe.rs-style
+  property checks, CameraSession with pre-open ENOENT/EACCES/EBUSY mapping and
+  a dedicated OS thread FrameProducer; blocking close with native-first order.
+- media-gst compositor capture placement is feed-keyed (was portal-kind-gated;
+  audit disproved the plan's kind-agnostic assumption) with a regression test
+  verified by negative control.
+- Preview capture owner drives portal leases and camera sessions behind
+  OpenedCapture/NativeCapture arms sharing pending/active/report bounds,
+  prune/retire/shutdown ordering and the 10s no-frame timeout. Camera open is
+  synchronous on the media owner thread; only completion delivery rides Tokio.
+- UI camera creation with async discovered-device picker (worker thread +
+  GLib oneshot delivery; GTK never blocks), kind-aware labels ("Start
+  Camera"/"Opening camera…"), authorize/retry reuse; cameras never export a
+  parent window. One-shot list + manual refresh; no live hotplug wiring.
 
-## Evidence and live limitation
+## Evidence and live limitations
 
-Combined fmt/clippy/workspace tests and dependency audit pass; final count is in
-JOURNAL. Seven separate real Wayland display regressions pass, including source
-buttons and actual parent export; those tests open no permission dialogs.
+Combined just ci passed on the integrated branch (fmt, clippy -D warnings,
+workspace tests, deny). Live real-camera probe passed on the integrated
+branch: PRISMCAST_CAMERA_DEVICE=/dev/video2, Anker PowerConf C200, 640x480, 4
+frames, clean teardown. Live discovery enumerated the camera. Camera USB link
+flapped during validation and nodes renumbered (video1/2 -> video2/3): typed
+busy/unplug mapping exists, live unplug UX untested, sysfs/serial-stable
+identity is a follow-up.
 
-Actual GNOME window probe passed: three6144x3456 RGBA frames, timestamps and clean
-session shutdown. The integrated animated-window preview test opened one picker
-but received no completed sharing grant; at120seconds it reported Failed with
-"capture authorization timed out" and cleaned up. Integrated live preview pixels
-are therefore unverified. User was asked whether available for one retry; do not
-open another dialog without their reply. Headless native pixels/producer retention
-are tested separately and cannot replace this manual evidence.
-
-Run opt-in: GDK_BACKEND=wayland GSK_RENDERER=cairo G_DEBUG=fatal-criticals cargo test
--p prismcast-preview actual_window_capture_preview_pixels_placement_and_shutdown
--- --ignored --nocapture --test-threads=1. Select the animated window titled
-"Prismcast capture test target – select this window". The test expects red/blue
-paintable pixels, unchanged grant across hide/show rebuild, source removal and
-shutdown. Capture tests must run in separate processes from other GTK tests.
+CAPTURE-002 integrated window preview: three picker grants captured windows
+that were NOT the fixture (white, dark-brown and pure-black composites at a
+constant 6144x3456 geometry, frames flowing at ~60fps); a fourth attempt saw
+no selection and timed out cleanly. Diagnosis instrumentation is in place on
+main: composite PNG dump + frame count on pixel-check failure, and an opt-in
+raw consumer probe `actual_window_capture_consumer_frames_show_fixture_pixels`
+that dumps the actual captured frame to target/tmp/capture-raw-frame.png.
+Run both opt-in tests with GDK_BACKEND=wayland GSK_RENDERER=cairo
+G_DEBUG=fatal-criticals, -- --ignored --nocapture --test-threads=1, in
+separate processes from other GTK tests. The user must select the window
+titled "Prismcast capture test target – select this window" (small flashing
+red/blue 480x270), NOT "Prismcast capture preview" and not a maximized window.
+Do not open another dialog without user confirmation.
 
 ## Next and remaining limits
 
-Coordinate live preview revalidation when user available, then scope CAPTURE-003
-V4L2 discovery/camera producer integration. Monitor, KDE and X11 actual capture
-remain unverified. CPU RGBA producer frames are capped128MiB and axes8192; queues
-are bounded but conversion/composition can copy pixels. No zero-copy claim.
-ScreenCast v5 node IDs are supported; v6 serial targeting remains future work.
-
-Canonical Undo/Redo Commands/UI/wire, destructive Add/Remove history, persisted
-history, z-order boundary overflow/missing neighbor events and atomic expected
-version edits remain follow-ups. Existing cardinal rotation/Normal blend and CPU
-rebuild interruption remain. Prior overlapping edits are preserved on
-archive/paused-agent-phase2 (2ce3390) and its named stash; do not reapply its alternate
-backend API wholesale. Worktrees remain reviewable. Never persist grants/FDs.
+Coordinate the picker retry with the user (raw probe first, then integrated
+test), then WS-002 or monitor/KDE/X11 capture validation. Wire-exposed camera
+device listing needs a protocol schema change (follow-up). UI live camera
+preview pixels with real hardware remain unverified end-to-end (headless and
+probe evidence only). Prior overlapping edits remain archived on
+archive/paused-agent-phase2 (2ce3390); do not reapply wholesale. All wave
+worktrees under .worktrees/capture-003-* remain reviewable. Never persist
+grants/FDs/device sessions.

@@ -1,7 +1,7 @@
 schema_version: 1
 project_phase: phase-3-linux-capture
 head_commit: c17a86e
-current_objective: Validate live shared capture preview and scope V4L2 camera capture
+current_objective: Retry integrated live window preview picker (user-coordinated), then scope WS-002 or monitor/KDE/X11 capture validation
 completed:
 - RESUME-001
 - SKILL-001
@@ -44,10 +44,10 @@ completed:
 - CORE-005
 - CAPTURE-001
 - CAPTURE-002
+- CAPTURE-003
 in_progress: []
 blocked: []
 next_candidates:
-- CAPTURE-003
 - WS-002
 decisions:
 - ADR-0001
@@ -68,20 +68,27 @@ decisions:
 - ADR-0016
 - ADR-0017
 - ADR-0018
+- ADR-0019
 verification:
   cargo_fmt: pass
   cargo_clippy: pass
   cargo_test: pass
   cargo_deny: pass
   portal_capture: live_window_three_frame_probe_pass
-  shared_capture_preview: opt_in_sharing_selection_timeout
+  shared_capture_preview: picker_granted_wrong_window_thrice_then_no_selection; raw consumer diagnostic armed
   native_display_regressions: pass
+  v4l2_camera: live_probe_pass_anker_powerconf_c200_640x480
+  v4l2_discovery: live_enumeration_pass_show_all_devices_required
 last_agent:
-  model: codex
-  session: dynamic-capture-integration-wave
+  model: kimi-code
+  session: capture-003-orchestration
 open_questions:
-- Integrated live window preview requires sharing selection; first attempt timed out and cleaned up
+- Integrated live window preview: picker grants landed but selected windows were not the fixture (white/dark/black composites, constant 6144x3456); raw consumer diagnostic test armed, awaiting a coordinated selection retry
 - KDE/X11 capture and monitor validation remain unverified
+- Camera device paths renumber across replug; sysfs/serial-stable identity is a follow-up (persisted path is advisory, missing device is recoverable)
+- GstDeviceMonitor v4l2 provider is hidden by PipeWire on target desktops; show-all-devices workaround in place, PipeWire camera sources deferred
+- Wire-exposed camera device listing needs a protocol schema change (CAPTURE-003 follow-up)
+- Camera USB link flapped during validation (nodes vanished/re-enumerated); busy/unplug mapping implemented, live unplug UX untested
 - Canonical Undo/Redo Commands and protocol/UI integration remain follow-up work
 - Destructive Add/Remove undo and persisted history are not implemented
 - Z-order boundary overflow and missing neighbor update events need coordinated core fixes

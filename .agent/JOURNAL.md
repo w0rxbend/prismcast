@@ -693,3 +693,37 @@ Marked implementation CAPTURE-002 done with explicit live validation limitation;
 next is live preview revalidation and scoped CAPTURE-003 V4L2 integration. No
 unrelated task implementation or old archive/stash changes included. Worktrees
 retained for review. No secrets, FD grants or session tokens persisted.
+
+CAPTURE-003 V4L2 camera discovery and capture integrated on agent/CAPTURE-003
+via five delegated worktree agents under kimi-code orchestration. ADR-0019 and
+the gst-device-monitor research note landed before code per project rule. The
+AuthorizeSourceCapture command is reused unchanged as an explicit open-device
+effect for SourceKind::V4l2Camera: no portal session, lease, FD, node grant or
+parent window; persisted identity is only the validated /dev/ device path;
+snapshot restore never opens a device. prismcast-capture gained devices.rs
+(one-shot GstDeviceMonitor enumeration with show-all-devices, required because
+PipeWire hides the v4l2 provider on target desktops, plus a bounded watch
+monitor with timed_pop polling) and camera.rs (validated v4l2src session with
+pre-open ENOENT/EACCES/EBUSY mapping and a dedicated OS thread producer reusing
+FrameProducer/CaptureFeed). Core admission and actor report gates admit the new
+kind with unchanged generation guards; media-gst compositor placement was found
+NOT kind-agnostic (audit disproved the plan's assumption) and is now feed-keyed
+with a negative-control regression test. The preview capture owner drives both
+portal leases and camera sessions behind OpenedCapture/NativeCapture arms with
+shared bounds, prune and retire ordering; camera open runs synchronously on the
+media owner OS thread, only completion delivery rides Tokio. UI gained camera
+creation with async discovered-device picker (worker thread + GLib delivery,
+never blocking GTK), kind-aware labels, and authorize/retry reuse.
+
+Validation: combined just ci passed on the integrated branch. Live real-camera
+probe passed twice in the capture worktree and once post-integration: Anker
+PowerConf C200 /dev/video2, 640x480, 4 frames, clean teardown. Live discovery
+enumerated the real camera. Headless suites cover validation tables, error
+mapping, injected-videotestsrc lifecycle, owner interleavings, actor admission
+and UI signal matrices. The camera USB link flapped during validation and
+nodes renumbered (video1/2 -> video2/3); typed busy/unplug mapping exists but
+live unplug UX is untested. Integrated window preview live pixels remain
+UNVERIFIED: three picker grants captured wrong windows (white/dark/black
+composites at constant 6144x3456), one attempt saw no selection; a raw
+consumer-frame diagnostic with PNG dump is armed in prismcast-preview for the
+next coordinated retry. Next: user-coordinated picker retry, then WS-002.
