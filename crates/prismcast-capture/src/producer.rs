@@ -9,6 +9,29 @@ fn native(error: impl std::fmt::Display) -> CaptureError {
     CaptureError::Native(error.to_string())
 }
 
+/// Only forward unit-rate TIME capture segments are supported. Convert buffer
+/// position through the producer segment before choosing a consumer epoch.
+fn sample_running_time(sample: &gst::Sample) -> Result<Option<gst::ClockTime>> {
+    let segment = sample
+        .segment()
+        .and_then(|segment| segment.downcast_ref::<gst::ClockTime>())
+        .ok_or_else(|| native("capture requires a TIME sample segment"))?;
+    if segment.rate() != 1.0 || segment.applied_rate() != 1.0 {
+        return Err(native("capture requires forward unit-rate sample segments"));
+    }
+    let buffer = sample
+        .buffer()
+        .ok_or_else(|| native("capture sample lacks buffer"))?;
+    buffer
+        .pts()
+        .map(|pts| {
+            segment
+                .to_running_time(pts)
+                .ok_or_else(|| native("capture PTS lies outside its segment"))
+        })
+        .transpose()
+}
+
 #[derive(Default)]
 struct TimestampEpoch {
     origin: Option<gst::ClockTime>,
@@ -99,10 +122,16 @@ impl CaptureFeed {
             .ok_or_else(|| native("appsrc has no src pad"))?;
         bin.add_pad(&gst::GhostPad::with_target(&pad).map_err(native)?)
             .map_err(native)?;
-        self.0.lock().map_err(native)?.endpoint = Some(Endpoint {
-            source: source.clone(),
-            epoch: TimestampEpoch::default(),
-        });
+        {
+            let mut state = self.0.lock().map_err(native)?;
+            if !state.active {
+                return Err(native("capture feed stopped during consumer construction"));
+            }
+            state.endpoint = Some(Endpoint {
+                source: source.clone(),
+                epoch: TimestampEpoch::default(),
+            });
+        }
         Ok(CaptureConsumer {
             bin,
             source,
@@ -149,6 +178,7 @@ impl CaptureFeed {
             if buffer.size() < minimum || buffer.size() > MAX_FRAME_BYTES {
                 return Err(native("capture frame outside 128 MiB budget"));
             }
+            let running_time = sample_running_time(&sample)?;
             let mut state = self.0.lock().map_err(native)?;
             if !state.active {
                 return Ok(None);
@@ -165,7 +195,7 @@ impl CaptureFeed {
             let Some(now) = endpoint.source.current_running_time() else {
                 return Ok(None);
             };
-            let (pts, discont) = endpoint.epoch.map(buffer.pts(), now);
+            let (pts, discont) = endpoint.epoch.map(running_time, now);
             let mut buffer = buffer.to_owned();
             let writable = buffer.make_mut();
             writable.set_pts(pts);
@@ -390,6 +420,46 @@ fn build_producer(source: gst::Element) -> Result<(ProducerGraph, CaptureFeed)> 
 mod tests {
     use super::*;
     use std::time::{Duration, Instant};
+    #[test]
+    fn time_segment_positions_translate_before_epoch_and_other_rates_are_rejected() {
+        gst::init().unwrap();
+        let ns = gst::ClockTime::from_nseconds;
+        let mut segment = gst::FormattedSegment::<gst::ClockTime>::new();
+        segment.set_start(ns(1000));
+        segment.set_time(ns(9000));
+        segment.set_base(ns(200));
+        let mut buffer = gst::Buffer::with_size(4).unwrap();
+        buffer.make_mut().set_pts(ns(1300));
+        let make = |segment: &gst::FormattedSegment<gst::ClockTime>| {
+            gst::Sample::builder()
+                .segment(segment)
+                .buffer(&buffer)
+                .build()
+        };
+        assert_eq!(sample_running_time(&make(&segment)).unwrap(), Some(ns(500)));
+        // Stream-time origin does not replace running-time; base/start are applied.
+        segment.set_time(ns(50000));
+        assert_eq!(sample_running_time(&make(&segment)).unwrap(), Some(ns(500)));
+        segment.set_rate(2.0);
+        assert!(sample_running_time(&make(&segment)).is_err());
+        segment.set_rate(1.0);
+        segment.set_applied_rate(0.5);
+        assert!(sample_running_time(&make(&segment)).is_err());
+        segment.set_applied_rate(1.0);
+        segment.set_start(ns(2000));
+        assert!(sample_running_time(&make(&segment)).is_err());
+        let bytes = gst::FormattedSegment::<gst::format::Bytes>::new();
+        let sample = gst::Sample::builder()
+            .segment(&bytes)
+            .buffer(&buffer)
+            .build();
+        assert!(sample_running_time(&sample).is_err());
+        // GstSample supplies a default unit-rate TIME segment if omitted.
+        assert_eq!(
+            sample_running_time(&gst::Sample::builder().buffer(&buffer).build()).unwrap(),
+            Some(ns(1300))
+        );
+    }
     #[test]
     fn timestamp_epoch_preserves_deltas_and_marks_resets() {
         let mut epoch = TimestampEpoch::default();
