@@ -399,7 +399,7 @@ impl Session {
     ) -> Self {
         let events = EventPipe::new(&fanout, established.subscriptions);
         Self {
-            app,
+            app: app.new_controller(),
             config,
             session_id: established.session_id,
             negotiated_protocol_version: established.negotiated_protocol_version,
@@ -1080,6 +1080,42 @@ impl RateLimiter {
 mod tests {
     use super::*;
     use prismcast_protocol::subscription::EventCategory as Cat;
+
+    #[tokio::test]
+    async fn distinct_sessions_fork_controller_identity_and_group_ownership() {
+        let app = AppHandle::spawn(prismcast_app::CoreConfig::default());
+        let (fanout, task) = EventFanout::spawn(&app, 8);
+        let config = Arc::new(SessionConfig {
+            auth: AuthConfig::allow_local(),
+            outbound_capacity: 8,
+            send_timeout: Duration::from_secs(1),
+            handshake_timeout: Duration::from_secs(1),
+        });
+        let (out_tx, _out_rx) = mpsc::channel(8);
+        let make_session = || {
+            Session::new(
+                app.clone(),
+                config.clone(),
+                fanout.clone(),
+                out_tx.clone(),
+                Established {
+                    session_id: Uuid::new_v4(),
+                    negotiated_protocol_version: 1,
+                    permissions: vec![prismcast_protocol::handshake::Permission::Admin],
+                    subscriptions: SubscriptionSet::default(),
+                },
+            )
+        };
+        let first = make_session();
+        let second = make_session();
+        assert_ne!(first.app.controller_id(), second.app.controller_id());
+        assert_ne!(first.app.controller_id(), app.controller_id());
+        first.app.begin_transaction("first session").await.unwrap();
+        assert!(second.app.end_transaction().await.is_err());
+        first.app.clone().end_transaction().await.unwrap();
+        app.shutdown().await;
+        task.await.unwrap();
+    }
 
     fn wire_scene_event(name: &str) -> WireEvent {
         WireEvent::Scene(prismcast_protocol::event::SceneEvent::Added {

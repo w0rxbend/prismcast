@@ -50,7 +50,8 @@ pub mod snapshot;
 pub mod undo;
 
 pub use actor::{
-    AppHandle, CommandEnvelope, CommandResponse, CoreConfig, HandleError, DEFAULT_COMMAND_CAPACITY,
+    AppControllerId, AppHandle, CommandEnvelope, CommandResponse, CoreConfig, HandleError,
+    DEFAULT_COMMAND_CAPACITY,
 };
 pub use broadcaster::{
     category_of, primary_entity, EventBroadcaster, EventCategory, EventFilter, EventStream,
@@ -61,4 +62,4 @@ pub use persistence::{
     dirty_class, DirtyClass, PersistenceConfig, PersistenceEvent, PersistenceHandle,
 };
 pub use snapshot::AppSnapshot;
-pub use undo::{UndoEntry, UndoService, DEFAULT_UNDO_CAPACITY};
+pub use undo::{UndoEntry, UndoLimits, UndoService, DEFAULT_UNDO_CAPACITY};
