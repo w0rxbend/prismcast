@@ -30,11 +30,12 @@ use crate::presentation::{choice_for_transition, transition_for_choice, StreamSt
 use crate::preview_editor::PreviewEditor;
 
 /// Kinds offered by the add-source dialog, in picker order.
-const SOURCE_KIND_CHOICES: [(SourceKind, &str); 4] = [
+const SOURCE_KIND_CHOICES: [(SourceKind, &str); 5] = [
     (SourceKind::TestPattern, "Test Pattern"),
     (SourceKind::Color, "Solid Color"),
     (SourceKind::PipeWireDisplay, "Monitor Capture"),
     (SourceKind::PipeWireWindow, "Window Capture"),
+    (SourceKind::V4l2Camera, "Camera"),
 ];
 
 /// Root component inputs: user intents plus coalesced snapshot wakeups.
@@ -63,6 +64,8 @@ pub enum AppMsg {
         scene_id: SceneId,
         /// Chosen source name.
         name: String,
+        /// Selected camera device path (camera kind only).
+        device: Option<String>,
     },
     /// The user clicked "+" in the outputs panel.
     AddOutputRequested,
@@ -213,7 +216,10 @@ impl AppModel {
         dialog.present(Some(root));
     }
 
-    /// Shows a dialog asking for a new source's kind and name.
+    /// Shows a dialog asking for a new source's kind and name. The camera kind
+    /// additionally requires selecting a discovered device (ADR-0019);
+    /// discovery is a read-only query delivered asynchronously, so the GTK
+    /// main thread never blocks on device probing.
     fn present_add_source_dialog(
         root: &adw::ApplicationWindow,
         sender: relm4::Sender<AppMsg>,
@@ -243,37 +249,146 @@ impl AppModel {
         let group = adw::PreferencesGroup::new();
         group.add(&kind_row);
         group.add(&name_row);
+
+        // Camera device picker: visible only for the camera kind.
+        let camera_group = adw::PreferencesGroup::new();
+        camera_group.set_title("Camera");
+        camera_group.set_visible(false);
+        let device_row = adw::ComboRow::new();
+        device_row.set_title("Device");
+        let device_model = gtk::StringList::new(&[]);
+        device_row.set_model(Some(&device_model));
+        let refresh_button = gtk::Button::from_icon_name("view-refresh-symbolic");
+        refresh_button.add_css_class("flat");
+        refresh_button.set_valign(gtk::Align::Center);
+        refresh_button.set_tooltip_text(Some("Refresh camera list"));
+        device_row.add_suffix(&refresh_button);
+        camera_group.add(&device_row);
+
+        let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        content.append(&group);
+        content.append(&camera_group);
         let clamp = adw::Clamp::new();
         clamp.set_margin_start(12);
         clamp.set_margin_end(12);
         clamp.set_margin_top(12);
         clamp.set_margin_bottom(12);
-        clamp.set_child(Some(&group));
+        clamp.set_child(Some(&content));
         toolbar.set_content(Some(&clamp));
         dialog.set_child(Some(&toolbar));
 
-        name_row.connect_changed({
+        let devices = Rc::new(RefCell::new(
+            Vec::<prismcast_capture::devices::VideoDevice>::new(),
+        ));
+        let listing = Rc::new(Cell::new(false));
+
+        let sync_sensitivity = {
             let add_button = add_button.clone();
-            move |entry| add_button.set_sensitive(!entry.text().trim().is_empty())
+            let name_row = name_row.clone();
+            let kind_row = kind_row.clone();
+            let devices = devices.clone();
+            Rc::new(move || {
+                let camera = selected_kind(&kind_row) == SourceKind::V4l2Camera;
+                let device_ready = !camera || !devices.borrow().is_empty();
+                add_button.set_sensitive(!name_row.text().trim().is_empty() && device_ready);
+            })
+        };
+
+        let refresh_devices = {
+            let devices = devices.clone();
+            let listing = listing.clone();
+            let device_model = device_model.clone();
+            let camera_group = camera_group.clone();
+            let sync = sync_sensitivity.clone();
+            Rc::new(move || {
+                if listing.replace(true) {
+                    return;
+                }
+                camera_group.set_description(Some("Searching for cameras…"));
+                let devices = devices.clone();
+                let listing = listing.clone();
+                let model = device_model.clone();
+                let group = camera_group.clone();
+                let sync = sync.clone();
+                crate::camera_devices::list(move |result| {
+                    listing.set(false);
+                    match result {
+                        Ok(found) => {
+                            while model.n_items() > 0 {
+                                model.remove(0);
+                            }
+                            for device in &found {
+                                model.append(&crate::camera_devices::device_label(device));
+                            }
+                            group.set_description(if found.is_empty() {
+                                Some("No cameras found. Connect a camera and refresh.")
+                            } else {
+                                None
+                            });
+                            *devices.borrow_mut() = found;
+                        }
+                        Err(error) => {
+                            group.set_description(Some(&format!(
+                                "Camera discovery failed: {error}"
+                            )));
+                        }
+                    }
+                    sync();
+                });
+            })
+        };
+
+        kind_row.connect_selected_notify({
+            let camera_group = camera_group.clone();
+            let refresh = refresh_devices.clone();
+            let sync = sync_sensitivity.clone();
+            let devices = devices.clone();
+            move |row| {
+                let camera = selected_kind(row) == SourceKind::V4l2Camera;
+                camera_group.set_visible(camera);
+                if camera && devices.borrow().is_empty() {
+                    refresh();
+                }
+                sync();
+            }
         });
-        add_button.set_sensitive(!name_row.text().trim().is_empty());
+        refresh_button.connect_clicked({
+            let refresh = refresh_devices.clone();
+            move |_| refresh()
+        });
+        name_row.connect_changed({
+            let sync = sync_sensitivity.clone();
+            move |_| sync()
+        });
+        sync_sensitivity();
 
         let submit = {
             let dialog = dialog.clone();
             let name_row = name_row.clone();
             let kind_row = kind_row.clone();
+            let device_row = device_row.clone();
+            let devices = devices.clone();
             move || {
                 let name = name_row.text().trim().to_string();
-                let index = usize::try_from(kind_row.selected()).unwrap_or(0);
-                let kind = SOURCE_KIND_CHOICES
-                    .get(index)
-                    .map(|(kind, _)| *kind)
-                    .unwrap_or(SourceKind::TestPattern);
-                if !name.is_empty() {
+                let kind = selected_kind(&kind_row);
+                let device = if kind == SourceKind::V4l2Camera {
+                    usize::try_from(device_row.selected())
+                        .ok()
+                        .and_then(|index| {
+                            devices
+                                .borrow()
+                                .get(index)
+                                .map(|device| device.path().to_owned())
+                        })
+                } else {
+                    None
+                };
+                if !name.is_empty() && (kind != SourceKind::V4l2Camera || device.is_some()) {
                     sender.emit(AppMsg::AddSourceSubmitted {
                         kind,
                         name,
                         scene_id,
+                        device,
                     });
                     dialog.close();
                 }
@@ -286,6 +401,14 @@ impl AppModel {
         name_row.connect_entry_activated(move |_| submit());
         dialog.present(Some(root));
     }
+}
+
+/// The kind selected in the add-source dialog's kind row.
+fn selected_kind(kind_row: &adw::ComboRow) -> SourceKind {
+    SOURCE_KIND_CHOICES
+        .get(usize::try_from(kind_row.selected()).unwrap_or(0))
+        .map(|(kind, _)| *kind)
+        .unwrap_or(SourceKind::TestPattern)
 }
 
 /// Builds an `adw::Dialog` with a single name entry and an "Add" button in
@@ -615,36 +738,46 @@ impl AsyncComponent for AppModel {
                     self.publish_snapshot();
                     return;
                 }
-                if self.capture_parent_pending {
-                    self.toast_overlay.add_toast(adw::Toast::new(
-                        "The window is preparing capture authorization. Try again shortly.",
-                    ));
-                    self.publish_snapshot();
-                    return;
-                }
                 let snapshot = self.bridge.handle().snapshot();
-                if !snapshot.source(source_id).is_some_and(|source| {
-                    source.enabled
-                        && matches!(
-                            source.kind,
-                            SourceKind::PipeWireDisplay | SourceKind::PipeWireWindow
+                let Some(source) = snapshot.source(source_id) else {
+                    self.publish_snapshot();
+                    return;
+                };
+                let portal = matches!(
+                    source.kind,
+                    SourceKind::PipeWireDisplay | SourceKind::PipeWireWindow
+                );
+                if !source.enabled
+                    || !(portal || matches!(source.kind, SourceKind::V4l2Camera))
+                    || snapshot.source_runtime(source_id).is_some_and(|runtime| {
+                        matches!(
+                            runtime.status,
+                            prismcast_core::CaptureStatus::Authorizing
+                                | prismcast_core::CaptureStatus::Active
                         )
-                }) || snapshot.source_runtime(source_id).is_some_and(|runtime| {
-                    matches!(
-                        runtime.status,
-                        prismcast_core::CaptureStatus::Authorizing
-                            | prismcast_core::CaptureStatus::Active
-                    )
-                }) {
+                    })
+                {
                     self.publish_snapshot();
                     return;
                 }
+                // Cameras never export a parent window (ADR-0019); only portal
+                // capture waits on the GTK-local export before authorizing.
+                let parent = if portal {
+                    if self.capture_parent_pending {
+                        self.toast_overlay.add_toast(adw::Toast::new(
+                            "The window is preparing capture authorization. Try again shortly.",
+                        ));
+                        self.publish_snapshot();
+                        return;
+                    }
+                    self.capture_parent
+                        .borrow()
+                        .as_ref()
+                        .map(|parent| parent.identifier())
+                } else {
+                    None
+                };
                 self.capture_dispatch_pending = true;
-                let parent = self
-                    .capture_parent
-                    .borrow()
-                    .as_ref()
-                    .map(|parent| parent.identifier());
                 let handle = self.bridge.handle().clone();
                 sender.oneshot_command(async move {
                     AppCmd::CaptureDispatched(
@@ -665,26 +798,11 @@ impl AsyncComponent for AppModel {
                 kind,
                 name,
                 scene_id,
+                device,
             } => {
                 let handle = self.bridge.handle().clone();
                 sender.oneshot_command(async move {
-                    let response = match handle.dispatch(Command::AddSource { kind, name }).await {
-                        Ok(response) => response,
-                        Err(error) => return AppCmd::Dispatched(Err(error)),
-                    };
-                    let Some(source_id) = created_source_id(&response.events) else {
-                        return AppCmd::SourceEventMissing;
-                    };
-                    match handle
-                        .dispatch(Command::AddSceneItem {
-                            scene_id,
-                            source_id,
-                        })
-                        .await
-                    {
-                        Ok(response) => AppCmd::Dispatched(Ok(response)),
-                        Err(error) => AppCmd::PlacementFailed { source_id, error },
-                    }
+                    create_placed_source(&handle, kind, name, scene_id, device).await
                 });
             }
             AppMsg::AddOutputRequested => {
@@ -826,6 +944,46 @@ impl Drop for AppModel {
     }
 }
 
+/// AddSource → optional device settings → AddSceneItem, in committed order.
+/// A camera's validated device path becomes the `{"device": ...}` setting
+/// (ADR-0019); nothing here opens the device.
+async fn create_placed_source(
+    handle: &prismcast_app::AppHandle,
+    kind: SourceKind,
+    name: String,
+    scene_id: SceneId,
+    device: Option<String>,
+) -> AppCmd {
+    let response = match handle.dispatch(Command::AddSource { kind, name }).await {
+        Ok(response) => response,
+        Err(error) => return AppCmd::Dispatched(Err(error)),
+    };
+    let Some(source_id) = created_source_id(&response.events) else {
+        return AppCmd::SourceEventMissing;
+    };
+    if let Some(device) = device {
+        if let Err(error) = handle
+            .dispatch(Command::SetSourceSettings {
+                source_id,
+                settings: serde_json::json!({ "device": device }),
+            })
+            .await
+        {
+            return AppCmd::Dispatched(Err(error));
+        }
+    }
+    match handle
+        .dispatch(Command::AddSceneItem {
+            scene_id,
+            source_id,
+        })
+        .await
+    {
+        Ok(response) => AppCmd::Dispatched(Ok(response)),
+        Err(error) => AppCmd::PlacementFailed { source_id, error },
+    }
+}
+
 fn created_source_id(events: &[prismcast_core::Event]) -> Option<prismcast_core::SourceId> {
     events.iter().find_map(|event| match event {
         prismcast_core::Event::Source(prismcast_core::SourceEvent::Added { source }) => {
@@ -838,13 +996,16 @@ fn created_source_id(events: &[prismcast_core::Event]) -> Option<prismcast_core:
 #[cfg(test)]
 mod source_placement_tests {
     #[test]
-    fn source_dialog_offers_both_capture_kinds_without_authorizing() {
+    fn source_dialog_offers_all_capture_kinds_without_authorizing() {
         assert!(super::SOURCE_KIND_CHOICES
             .iter()
             .any(|(kind, _)| matches!(kind, prismcast_core::SourceKind::PipeWireDisplay)));
         assert!(super::SOURCE_KIND_CHOICES
             .iter()
             .any(|(kind, _)| matches!(kind, prismcast_core::SourceKind::PipeWireWindow)));
+        assert!(super::SOURCE_KIND_CHOICES
+            .iter()
+            .any(|(kind, _)| matches!(kind, prismcast_core::SourceKind::V4l2Camera)));
     }
     use super::*;
     #[test]
@@ -860,6 +1021,49 @@ mod source_placement_tests {
             )]),
             Some(id)
         );
+    }
+    #[test]
+    fn camera_device_selection_produces_add_source_and_device_settings_commands() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let handle = prismcast_app::AppHandle::spawn(prismcast_app::CoreConfig::default());
+            handle
+                .dispatch(Command::AddScene {
+                    name: "Target".into(),
+                })
+                .await
+                .unwrap();
+            let scene_id = handle.snapshot().current_scene().unwrap();
+            let result = create_placed_source(
+                &handle,
+                SourceKind::V4l2Camera,
+                "Webcam".into(),
+                scene_id,
+                Some("/dev/video0".into()),
+            )
+            .await;
+            assert!(matches!(result, AppCmd::Dispatched(Ok(_))));
+            let snapshot = handle.snapshot();
+            let source = snapshot.sources().next().unwrap();
+            assert_eq!(source.kind, SourceKind::V4l2Camera);
+            assert_eq!(
+                source.settings,
+                serde_json::json!({ "device": "/dev/video0" }),
+                "selected device path persists as the bounded source setting"
+            );
+            assert_eq!(
+                snapshot.state().scenes[&scene_id].items[0].source_id,
+                source.id
+            );
+            assert!(
+                snapshot.source_runtime(source.id).is_none(),
+                "creation never opens or authorizes the device"
+            );
+            handle.shutdown().await;
+        });
     }
     #[test]
     fn placement_uses_captured_scene_and_preserves_source_on_missing_scene() {
