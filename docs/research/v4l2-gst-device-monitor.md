@@ -33,14 +33,14 @@ dequeue failure, after the pipeline was already running. Classification should
 prefer pre-open node checks (existence, access mode) and the typed ResourceError
 quark over parsing human-readable error text.
 
-Validation machine evidence (2026-10-01, re-confirmed 2026-10-02):
+Validation machine evidence (2026-10-01, pre-camera baseline):
 gst-inspect-1.0 v4l2src reports the element installed at rank primary from
-plugin video4linux2 1.28.2; ls /dev/video* matches nothing; neither v4l2loopback
-nor uvcvideo kernel modules are loaded; gst-device-monitor-1.0 Video/Source
-enumerates no devices (only the libcamera provider logs). Hardware evidence
-therefore requires a physical webcam or `sudo modprobe v4l2loopback`; mock and
-headless lifecycle tests remain the CI baseline, with any real-camera or
-loopback probe recorded separately per the task's validation rule.
+plugin video4linux2 1.28.2; ls /dev/video* matched nothing; neither v4l2loopback
+nor uvcvideo kernel modules were loaded; gst-device-monitor-1.0 Video/Source
+enumerated no devices (only the libcamera provider logs). An Anker PowerConf
+C200 webcam was connected on 2026-10-02 and provides the real-device evidence
+recorded below; mock and headless lifecycle tests remain the CI baseline, with
+real-camera probes recorded separately per the task's validation rule.
 
 Live hardware findings (2026-10-02, Anker PowerConf C200, uvcvideo):
 - Direct capture works: `v4l2src device=/dev/video2 num-buffers=5 ! fakesink`
@@ -62,6 +62,26 @@ Live hardware findings (2026-10-02, Anker PowerConf C200, uvcvideo):
   error" was observed while the camera re-enumerated mid-probe; retry after
   re-enumeration succeeded. Busy/ unplug races are real and must map to typed,
   retryable statuses.
+
+Implementation findings (2026-10-02, encoded in crates/prismcast-capture/src/devices.rs):
+- The v4l2deviceprovider gap has a precise cause: PipeWire's device provider
+  calls gst_device_provider_hide_provider on v4l2deviceprovider, so a default
+  DeviceMonitor returns zero kernel V4L2 nodes on exactly the PipeWire
+  desktops Prismcast targets (gstdevicemonitor.c is_provider_hidden).
+  `show-all-devices(true)` is mandatory; PipeWire's duplicate entries are then
+  still filtered by extraction because they carry no `device.path`.
+- One-shot enumeration is only valid after `start()`: provider enumeration
+  happens on start, so `devices()` on an unstarted monitor returns nothing.
+- `display-name` is not in the GstDevice properties structure; read the
+  GstDevice object property instead or the name falls back to the raw path.
+- The v4l2 provider runs its own thread with a GLib main loop
+  (gstv4l2deviceprovider.c provider_thread), so monitor watches work headless
+  via timed_pop polling on a dedicated thread without a GLib main context on
+  our side.
+- Real-camera evidence (Anker PowerConf C200, /dev/video2): the opt-in probe
+  `actual_v4l2_camera_frames_and_teardown` captured 640x480 frames with
+  negotiated caps and clean teardown, and list_video_sources() returned the
+  camera with its display name.
 
 Verified installed element details (gst-inspect-1.0 v4l2src, GStreamer 1.28.2):
 `device` is readable/writable string, default "/dev/video0"; `device-fd` is a
