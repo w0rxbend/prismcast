@@ -44,6 +44,7 @@ pub mod map;
 mod paths;
 mod server;
 mod session;
+mod session_kit;
 pub mod ws;
 pub mod ws_client;
 

@@ -30,7 +30,7 @@ use tokio::net::UnixStream;
 use prismcast_protocol::handshake::CloseCode;
 use prismcast_protocol::message::ServerMessage;
 
-use crate::session::{FrameReadError, FrameReader, FrameWriteError, FrameWriter};
+use crate::session_kit::{FrameReadError, FrameReader, FrameWriteError, FrameWriter};
 
 /// Default maximum frame payload size (4 MiB). Bounds memory per connection
 /// (PLAN.md §75); larger frames are rejected before allocation.

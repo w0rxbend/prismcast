@@ -50,10 +50,8 @@ use prismcast_app::{AppHandle, DEFAULT_SUBSCRIBER_CAPACITY};
 use crate::auth::AuthConfig;
 use crate::codec::ClosingNotice;
 use crate::server::EventFanout;
-use crate::session::{
-    run_session, FrameReadError, FrameReader, FrameWriteError, FrameWriter, SessionConfig,
-    SessionContext,
-};
+use crate::session::{run_session, SessionConfig, SessionContext};
+use crate::session_kit::{FrameReadError, FrameReader, FrameWriteError, FrameWriter};
 
 /// The WebSocket subprotocol tag for the JSON codec (protocol doc §1). The
 /// MessagePack subprotocol name `prismcast.msgpack` is reserved but not
