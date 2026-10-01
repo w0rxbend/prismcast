@@ -399,11 +399,13 @@ pub fn apply(state: &mut AppState, command: &Command) -> Result<Vec<Event>> {
             if !source.enabled
                 || !matches!(
                     source.kind,
-                    SourceKind::PipeWireDisplay | SourceKind::PipeWireWindow
+                    SourceKind::PipeWireDisplay
+                        | SourceKind::PipeWireWindow
+                        | SourceKind::V4l2Camera
                 )
             {
                 return Err(Error::InvalidInput(
-                    "capture authorization requires an enabled display/window source".into(),
+                    "capture authorization requires an enabled capture source".into(),
                 ));
             }
             Ok(vec![Event::Source(
@@ -2226,6 +2228,49 @@ mod tests {
         assert_eq!(copy.source_id, src);
         assert_eq!(copy.z_index, 1);
         assert_eq!(state.scene(scene).unwrap().items.len(), 2);
+    }
+
+    #[test]
+    fn capture_authorization_admission_gates_on_kind_and_enabled() {
+        let mut state = AppState::new();
+        for kind in [
+            SourceKind::PipeWireDisplay,
+            SourceKind::PipeWireWindow,
+            SourceKind::V4l2Camera,
+        ] {
+            let id = add_source(&mut state, kind, "capture");
+            let events = state
+                .apply(&Command::AuthorizeSourceCapture { source_id: id })
+                .unwrap();
+            assert_eq!(
+                events,
+                vec![Event::Source(SourceEvent::CaptureAuthorizationRequested {
+                    source_id: id
+                })]
+            );
+        }
+        // Disabled, non-capture and unknown sources stay rejected.
+        let cam = add_source(&mut state, SourceKind::V4l2Camera, "cam");
+        state
+            .apply(&Command::SetSourceEnabled {
+                source_id: cam,
+                enabled: false,
+            })
+            .unwrap();
+        assert!(state
+            .apply(&Command::AuthorizeSourceCapture { source_id: cam })
+            .is_err());
+        let generator = add_source(&mut state, SourceKind::TestPattern, "pattern");
+        assert!(state
+            .apply(&Command::AuthorizeSourceCapture {
+                source_id: generator
+            })
+            .is_err());
+        assert!(state
+            .apply(&Command::AuthorizeSourceCapture {
+                source_id: SourceId::new()
+            })
+            .is_err());
     }
 
     #[test]

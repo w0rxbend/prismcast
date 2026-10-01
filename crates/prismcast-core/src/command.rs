@@ -192,7 +192,7 @@ pub enum Command {
         enabled: bool,
     },
 
-    /// Explicitly requests or retries capture authorization for an enabled portal source.
+    /// Explicitly requests or retries capture authorization for an enabled capture source.
     AuthorizeSourceCapture {
         /// Shared source to authorize.
         source_id: SourceId,
