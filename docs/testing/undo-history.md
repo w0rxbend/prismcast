@@ -8,7 +8,10 @@ handle. This identity owns an open group; it is not an authentication credential
 A successful mutation from another controller closes the owner's group before
 recording itself, preserving chronological undo. Foreign End, invalid or
 unauthorized commands, admission overflow and successful empty-event no-ops do
-not close it. The owner can explicitly End after overflow. New successful
+not close it. The owner can explicitly End after overflow. At history saturation a command
+that already passed structural, payload and authorization admission is probed
+on a scratch state; an empty-event no-op succeeds without touching authoritative
+state/history. This exceptional path avoids duplicating domain no-op rules. New successful
 mutations invalidate redo; rejected commands preserve it.
 
 Defaults are 100 closed undo entries, 8 MiB retained command/label accounting,
@@ -44,7 +47,8 @@ just deny
 ```
 
 Tests exercise cloned/forked controller ownership, real session construction,
-foreign failed/unauthorized/no-op boundaries, chronological undo/redo, atomic and
+foreign failed/unauthorized/no-op boundaries, repeated owner no-ops in a full
+group and redo preservation, chronological undo/redo, atomic and
 grouped mixed-domain permission denial/retry, redo preservation, label/member/byte
 and recursive payload overflow, tight aggregate group accounting, zero-depth
 grouping, oversized restored inverse payloads, and repeated failed inverse
