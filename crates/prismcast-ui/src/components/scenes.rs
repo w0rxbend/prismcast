@@ -1,8 +1,7 @@
 //! The scenes panel: the ordered scene list with selection and an add
 //! button, per PLAN.md §28.
 
-use std::sync::Arc;
-
+use crate::bridge::SnapshotRefresh;
 use adw::prelude::*;
 use prismcast_app::AppSnapshot;
 use prismcast_core::id::SceneId;
@@ -24,7 +23,7 @@ pub struct ScenesPanel {
 #[derive(Debug)]
 pub enum ScenesInput {
     /// A fresh snapshot; the list is rebuilt from it.
-    Refresh(Arc<AppSnapshot>),
+    Refresh(SnapshotRefresh),
     /// A row was selected by the user (row index).
     RowSelected(usize),
 }
@@ -106,7 +105,7 @@ impl SimpleComponent for ScenesPanel {
                     }
                 }
             }
-            ScenesInput::Refresh(snapshot) => self.refresh(&snapshot),
+            ScenesInput::Refresh(snapshot) => self.refresh(&snapshot.read()),
         }
     }
 }
