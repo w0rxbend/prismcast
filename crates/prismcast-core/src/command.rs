@@ -192,6 +192,12 @@ pub enum Command {
         enabled: bool,
     },
 
+    /// Explicitly requests or retries capture authorization for an enabled portal source.
+    AuthorizeSourceCapture {
+        /// Shared source to authorize.
+        source_id: SourceId,
+    },
+
     // --- Audio ---
     /// Sets a source's mixer volume.
     SetSourceVolume {
@@ -383,6 +389,7 @@ impl Command {
             Self::RemoveSource { .. } => "remove source",
             Self::RenameSource { .. } => "rename source",
             Self::SetSourceSettings { .. } => "configure source",
+            Self::AuthorizeSourceCapture { .. } => "authorize source capture",
             Self::SetSourceEnabled { .. } => "enable source",
             Self::SetSourceVolume { .. } => "set source volume",
             Self::SetSourceMuted { .. } => "mute source",
@@ -521,6 +528,7 @@ mod tests {
                 source_id: source,
                 settings: serde_json::json!({"device": "/dev/video0"}),
             },
+            Command::AuthorizeSourceCapture { source_id: source },
             Command::SetSourceEnabled {
                 source_id: source,
                 enabled: false,

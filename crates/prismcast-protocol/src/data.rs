@@ -470,6 +470,52 @@ pub struct StudioMode {
 /// Full initial state snapshot (PLAN.md §23: `InitialStateSnapshot` + event
 /// stream — clients never re-download the whole state after this).
 ///
+/// Actual native pixel dimensions, not portal coordinate dimensions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceDimensions {
+    /// Pixel width.
+    pub width: u32,
+    /// Pixel height.
+    pub height: u32,
+}
+/// Capture lifecycle observation; contains no live permission grant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CaptureStatus {
+    /// Request pending.
+    Authorizing,
+    /// Native producer ready.
+    Active,
+    /// User canceled.
+    Cancelled,
+    /// Permission denied.
+    Denied,
+    /// Grant revoked.
+    Revoked,
+    /// Recoverable failure.
+    Failed,
+}
+/// Transient source runtime observation, independently mapped from domain types.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceRuntime {
+    /// Monotonic request correlation, not a portal token.
+    pub generation: u64,
+    /// Current capture lifecycle.
+    pub status: CaptureStatus,
+    /// Actual native pixels when Active.
+    pub dimensions: Option<SourceDimensions>,
+    /// Bounded diagnostic.
+    pub message: Option<String>,
+}
+/// Runtime map entry, separate from persisted source settings.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceRuntimeEntry {
+    /// Capture source identity.
+    pub source_id: Uuid,
+    /// Transient observation.
+    pub runtime: SourceRuntime,
+}
+
 /// Order of the `Vec` fields is presentation order (scene list order, output
 /// insertion order), mirroring the server's ordered maps.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -486,6 +532,9 @@ pub struct StateSnapshot {
     pub scenes: Vec<Scene>,
     /// Shared sources referenced by scene items.
     pub sources: Vec<Source>,
+    /// Transient capture observations; absent in older servers/snapshots.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub source_runtime: Vec<SourceRuntimeEntry>,
     /// The default transition configuration.
     pub transition: Transition,
     /// Audio buses, routes, and mixer state.
