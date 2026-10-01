@@ -81,4 +81,5 @@ Implementation + unit tests (+ integration where possible) + docs + error handli
 
 - Branch per task: `agent/<TASK-ID>`; integrate into `main` after validation. Use `git worktree` under `.worktrees/` when multiple agents run concurrently.
 - Architecture-affecting changes require an ADR in `docs/adr/` first.
-- Never commit secrets. Never push without explicit user instruction.
+- Never commit secrets.
+- Standing instruction: always commit AND push to `main` (origin = github.com:w0rxbend/prismcast). Every integration ends with `git push`.
