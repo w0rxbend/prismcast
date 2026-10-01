@@ -25,7 +25,9 @@ use crate::bridge::{CoreBridge, SnapshotRefresh};
 use crate::components::outputs::{OutputsInput, OutputsOutput, OutputsPanel};
 use crate::components::scenes::{ScenesInput, ScenesOutput, ScenesPanel};
 use crate::components::sources::{SourcesInput, SourcesOutput, SourcesPanel};
-use crate::presentation::{choice_for_transition, transition_for_choice, StreamStatus};
+use crate::presentation::{
+    choice_for_transition, transition_for_choice, trimmed_name, StreamStatus,
+};
 
 /// Kinds offered by the add-source dialog, in picker order.
 const SOURCE_KIND_CHOICES: [(SourceKind, &str); 2] = [
@@ -175,8 +177,7 @@ impl AppModel {
         let submit = {
             let dialog = dialog.clone();
             move || {
-                let name = entry.text().trim().to_string();
-                if !name.is_empty() {
+                if let Some(name) = trimmed_name(&entry.text()) {
                     sender.emit(AppMsg::AddSceneSubmitted(name));
                     dialog.close();
                 }
@@ -239,13 +240,12 @@ impl AppModel {
             let name_row = name_row.clone();
             let kind_row = kind_row.clone();
             move || {
-                let name = name_row.text().trim().to_string();
                 let index = usize::try_from(kind_row.selected()).unwrap_or(0);
                 let kind = SOURCE_KIND_CHOICES
                     .get(index)
                     .map(|(kind, _)| *kind)
                     .unwrap_or(SourceKind::TestPattern);
-                if !name.is_empty() {
+                if let Some(name) = trimmed_name(&name_row.text()) {
                     sender.emit(AppMsg::AddSourceSubmitted {
                         kind,
                         name,

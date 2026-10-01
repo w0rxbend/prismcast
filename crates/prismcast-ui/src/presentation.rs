@@ -88,6 +88,14 @@ pub fn choice_for_transition(kind: TransitionKind) -> Option<u32> {
         .map(|position| position as u32)
 }
 
+/// Trims a user-entered name; returns `None` when nothing usable remains.
+/// Used by the add/rename dialogs to keep submit buttons and Enter activation
+/// honest without pre-judging core-side validation (duplicates, length).
+pub fn trimmed_name(input: &str) -> Option<String> {
+    let trimmed = input.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
 /// Short user-facing label for a source kind (source list subtitles and the
 /// kind picker).
 pub fn source_kind_label(kind: &SourceKind) -> &'static str {
@@ -189,6 +197,16 @@ mod tests {
         assert!(output_can_stop(&OutputState::Reconnecting { attempt: 1 }));
         assert!(!output_can_stop(&OutputState::Stopped));
         assert!(!output_can_stop(&OutputState::Stopping));
+    }
+
+    #[test]
+    fn trimmed_name_rejects_blank_and_trims_padding() {
+        assert_eq!(trimmed_name(""), None);
+        assert_eq!(trimmed_name("   \t\n "), None);
+        assert_eq!(
+            trimmed_name("  Main Stage  "),
+            Some("Main Stage".to_string())
+        );
     }
 
     #[test]

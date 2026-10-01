@@ -610,3 +610,27 @@ Read-only media and UI agent audits completed. Created scoped MEDIA-001..004 and
 2026-10-01 Phase 2 wave, MEDIA-001/UI-003/UI-004/BRIDGE-001
 
 User installed native GStreamer development packages and clarified UltraCode as dynamic multi-agent orchestration. Integrated isolated worktree implementations: GStreamer initialization/capabilities (a2a49e2), scenes (0c0c5a6), runtime startup/coalesced snapshot refresh (ef2f191), and source placements (eabfcba). Per-task CI/deny passed; combined UI tests 13 pass. Scene/source controls and bounded snapshot tokens preserved during conflict resolution. MEDIA-002 now active; MEDIA-003 and MEDIA-004 remain dependent next steps.
+
+2026-10-01 UI-003
+
+Scene list panel completed on top of the partial implementation from commit
+0c0c5a6. Added: removal gated by an adw::AlertDialog (Cancel is default/close,
+Remove is destructive-styled; core rejections such as "cannot remove the last
+scene" or studio-mode/scene-source references surface via the root's existing
+toast), Delete-key activation on the selected row routed through the same
+confirmation, an adw::StatusPage empty state via GtkListBox:placeholder,
+boundary-sensitive up/down reorder buttons, and a rename dialog restyled to
+adw (EntryRow + header-bar Rename button, name preselected, Enter confirms,
+blank names keep the button disabled). Extracted the GTK-free `trimmed_name`
+validator into presentation.rs (shared by add-scene/add-source/rename dialogs)
+with a unit test; kept the move_target boundary test. All mutations dispatch
+existing core Commands (SetCurrentScene/RenameScene/RemoveScene/ReorderScene)
+through the root's shared dispatcher; selection/order always re-render from
+committed snapshots via the SnapshotRefresh path (BRIDGE-001 API reconciled
+mid-task after parallel integration moved HEAD). docs/testing/ui-scene-list.md
+updated with the interaction contract and manual checks. Validation:
+`cargo fmt -p prismcast-ui` clean, `cargo clippy -p prismcast-ui --all-targets
+-- -D warnings` clean, `cargo test --workspace` exit 0 (prismcast-ui: 14
+tests). Workspace-wide `cargo fmt --check` fails only in prismcast-media-gst
+(parallel agent's in-flight code; out of scope). Not committed (orchestrator
+integrates). GUI smoke test still pending a real display session.

@@ -99,6 +99,16 @@ fn inventory_and_missing_optional_factory_are_explicit() {
         .element_factories
         .iter()
         .any(|f| f == "fakesink"));
+    // Structured inventory: locally verified elements land in their families
+    // (RES-003 §8 snapshot), absent hardware elements are simply missing.
+    let elements = &runtime.capabilities().elements;
+    assert!(elements.compositors.iter().any(|e| e == "compositor"));
+    assert!(elements.preview_sinks.iter().any(|e| e == "gtk4paintablesink"));
+    assert!(runtime.capabilities().has_element("videotestsrc"));
+    assert!(!runtime.capabilities().has_element("prismcast_nonexistent_factory"));
+    for probed in elements.all_present() {
+        assert!(runtime.capabilities().has_element(probed), "{probed}");
+    }
     assert!(
         matches!(runtime.require_factory("prismcast_nonexistent_factory"),
         Err(GstError::MissingFactory { factory }) if factory == "prismcast_nonexistent_factory")
