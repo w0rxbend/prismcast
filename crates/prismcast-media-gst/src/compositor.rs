@@ -3,7 +3,8 @@
 //! this module neither imports GTK nor accesses its paintable.
 use crate::{build_test_pattern_bin, GstRuntime, TestPatternSettings};
 use gstreamer::{self as gst, prelude::*};
-use prismcast_compositor::{layout_item, CardinalRotation, SourceSize};
+use prismcast_capture::producer::{CaptureConsumer, CaptureFeed};
+use prismcast_compositor::{layout_item, source_size, CardinalRotation, SourceSize};
 use prismcast_core::{
     BlendMode, CanvasId, Error, Result, Scene, SceneId, SceneItem, SceneItemId, Source, SourceId,
     SourceKind, Transition, TransitionKind, VideoConfig,
@@ -47,7 +48,24 @@ fn validate_video(video: &VideoConfig) -> Result<()> {
     }
     Ok(())
 }
-fn validate_scene(scene: &Scene, sources: &HashMap<SourceId, Source>) -> Result<()> {
+fn dimensions(
+    source: &Source,
+    captures: &HashMap<SourceId, CaptureInput>,
+) -> Result<Option<SourceSize>> {
+    if matches!(
+        source.kind,
+        SourceKind::PipeWireDisplay | SourceKind::PipeWireWindow
+    ) && !captures.contains_key(&source.id)
+    {
+        return Ok(None);
+    }
+    source_size(source, captures.get(&source.id).map(|input| input.size)).map(Some)
+}
+fn validate_scene(
+    scene: &Scene,
+    sources: &HashMap<SourceId, Source>,
+    captures: &HashMap<SourceId, CaptureInput>,
+) -> Result<()> {
     if scene.items.len() > 256 {
         return Err(invalid("CPU prototype supports at most 256 scene items"));
     }
@@ -64,19 +82,15 @@ fn validate_scene(scene: &Scene, sources: &HashMap<SourceId, Source>) -> Result<
                 "source filter rendering awaits filter backend tasks",
             ));
         }
-        let source = settings(source)?;
+        let Some(size) = dimensions(source, captures)? else {
+            continue;
+        };
         if item.blend_mode != BlendMode::Normal {
             return Err(invalid(
                 "CPU compositor supports normal alpha blending only",
             ));
         }
-        layout_item(
-            item,
-            SourceSize {
-                width: source.width,
-                height: source.height,
-            },
-        )?;
+        layout_item(item, size)?;
     }
     Ok(())
 }
@@ -105,15 +119,24 @@ fn render_matches(
                 a.kind == b.kind
                     && a.enabled == b.enabled
                     && a.filters == b.filters
-                    && settings(a).ok() == settings(b).ok()
+                    && if a.kind == SourceKind::TestPattern {
+                        settings(a).ok() == settings(b).ok()
+                    } else {
+                        a.settings == b.settings
+                    }
             }
             _ => false,
         }
     })
 }
+struct CaptureInput {
+    feed: CaptureFeed,
+    size: SourceSize,
+}
 struct SharedSource {
     bin: gst::Bin,
     tee: gst::Element,
+    _capture: Option<CaptureConsumer>,
 }
 struct Branch {
     elements: Vec<gst::Element>,
@@ -136,6 +159,8 @@ pub struct GstCompositor {
     video: VideoConfig,
     canvas: Option<CanvasId>,
     shared: HashMap<SourceId, SharedSource>,
+    captures: HashMap<SourceId, CaptureInput>,
+    warned_capture: HashSet<SourceId>,
     branches: Vec<Branch>,
     state: ComponentState,
     events: VecDeque<BackendEvent>,
@@ -202,6 +227,8 @@ impl GstCompositor {
             },
             canvas: None,
             shared: HashMap::new(),
+            captures: HashMap::new(),
+            warned_capture: HashSet::new(),
             branches: Vec::new(),
             state: ComponentState::Stopped,
             events: VecDeque::new(),
@@ -211,11 +238,49 @@ impl GstCompositor {
         result.apply_caps();
         Ok(result)
     }
+    /// Register already-authorized independent producers. This never opens a picker.
+    pub fn sync_capture_feeds(&mut self, feeds: &[(SourceId, CaptureFeed)]) -> Result<()> {
+        if feeds.len() > 16 {
+            return Err(invalid("at most 16 capture feeds"));
+        }
+        let mut captures = HashMap::new();
+        for (id, feed) in feeds {
+            if feed.error().is_some() {
+                continue;
+            }
+            let Some((width, height)) = feed.dimensions() else {
+                continue;
+            };
+            if captures
+                .insert(
+                    *id,
+                    CaptureInput {
+                        feed: feed.clone(),
+                        size: SourceSize { width, height },
+                    },
+                )
+                .is_some()
+            {
+                return Err(invalid("duplicate capture feed"));
+            }
+        }
+        let same = captures.len() == self.captures.len()
+            && captures.iter().all(|(id, input)| {
+                self.captures.get(id).is_some_and(|old| {
+                    old.size == input.size && old.feed.same_producer(&input.feed)
+                })
+            });
+        if same {
+            return Ok(());
+        }
+        self.captures = captures;
+        self.rebuild()
+    }
     /// Atomically validate authoritative sources and the selected scene before
     /// changing the graph. Native construction failure leaves it stopped/Failed.
     pub fn sync_snapshot(&mut self, sources: &[Source], scene: &Scene) -> Result<()> {
         let sources = Self::source_map(sources)?;
-        validate_scene(scene, &sources)?;
+        validate_scene(scene, &sources, &self.captures)?;
         let same = self.current == Some(scene.id)
             && self
                 .scenes
@@ -237,7 +302,7 @@ impl GstCompositor {
     pub fn sync_sources(&mut self, sources: &[Source]) -> Result<()> {
         let sources = Self::source_map(sources)?;
         if let Some(scene) = self.current.and_then(|id| self.scenes.get(&id)) {
-            validate_scene(scene, &sources)?;
+            validate_scene(scene, &sources, &self.captures)?;
         }
         let same = self
             .current
@@ -396,10 +461,13 @@ impl GstCompositor {
         let Some(scene) = self.current.and_then(|id| self.scenes.get(&id)).cloned() else {
             self.warned_rotation.clear();
             self.warned_scale.clear();
+            self.warned_capture.clear();
             return Ok(());
         };
         self.warned_rotation.retain(|id| scene.item(*id).is_some());
         self.warned_scale.retain(|id| scene.item(*id).is_some());
+        self.warned_capture
+            .retain(|id| scene.items.iter().any(|item| item.source_id == *id));
         let mut items = scene.items.clone();
         items.sort_by_key(|item| item.z_index);
         for (rank, item) in items.iter().enumerate() {
@@ -410,9 +478,39 @@ impl GstCompositor {
             if !source.enabled {
                 continue;
             }
-            let source_settings = settings(source)?;
+            let Some(size) = dimensions(source, &self.captures)? else {
+                if self.warned_capture.insert(item.source_id) {
+                    self.push(BackendEvent::Warning {
+                        message: format!(
+                            "capture {} unavailable; explicit authorization required",
+                            item.source_id
+                        ),
+                    });
+                }
+                continue;
+            };
+            self.warned_capture.remove(&item.source_id);
             if !self.shared.contains_key(&item.source_id) {
-                let bin = build_test_pattern_bin(&self.runtime, item.source_id, &source_settings)?;
+                let capture = if matches!(
+                    source.kind,
+                    SourceKind::PipeWireDisplay | SourceKind::PipeWireWindow
+                ) {
+                    Some(
+                        self.captures
+                            .get(&item.source_id)
+                            .ok_or_else(|| media("missing capture input"))?
+                            .feed
+                            .consumer()
+                            .map_err(media)?,
+                    )
+                } else {
+                    None
+                };
+                let bin = if let Some(capture) = &capture {
+                    capture.bin.clone()
+                } else {
+                    build_test_pattern_bin(&self.runtime, item.source_id, &settings(source)?)?
+                };
                 let tee = self
                     .runtime
                     .require_factory("tee")
@@ -429,6 +527,7 @@ impl GstCompositor {
                     SharedSource {
                         bin: bin.clone(),
                         tee: tee.clone(),
+                        _capture: capture,
                     },
                 );
                 bin.link(&tee).map_err(media)?;
@@ -439,7 +538,7 @@ impl GstCompositor {
                 .ok_or_else(|| media("shared source registry missing entry"))?
                 .tee
                 .clone();
-            self.add_branch(tee, item, &source_settings, rank as u32)?;
+            self.add_branch(tee, item, size, rank as u32)?;
         }
         Ok(())
     }
@@ -447,7 +546,7 @@ impl GstCompositor {
         &mut self,
         tee: gst::Element,
         item: &SceneItem,
-        settings: &TestPatternSettings,
+        size: SourceSize,
         rank: u32,
     ) -> Result<()> {
         let queue = self
@@ -461,13 +560,7 @@ impl GstCompositor {
             .property_from_str("leaky", "downstream")
             .build()
             .map_err(media)?;
-        let layout = layout_item(
-            item,
-            SourceSize {
-                width: settings.width,
-                height: settings.height,
-            },
-        )?;
+        let layout = layout_item(item, size)?;
         let crop = self
             .runtime
             .require_factory("videocrop")
@@ -611,7 +704,7 @@ impl CompositorBackend for GstCompositor {
         Ok(())
     }
     fn sync_scene(&mut self, scene: &Scene) -> Result<()> {
-        validate_scene(scene, &self.sources)?;
+        validate_scene(scene, &self.sources, &self.captures)?;
         let same = self
             .scenes
             .get(&scene.id)
@@ -652,7 +745,7 @@ impl CompositorBackend for GstCompositor {
             .scenes
             .get(&scene_id)
             .ok_or_else(|| Error::NotFound(format!("scene {scene_id}")))?;
-        validate_scene(scene, &self.sources)?;
+        validate_scene(scene, &self.sources, &self.captures)?;
         if self.current == Some(scene_id) {
             return Ok(());
         }
@@ -762,6 +855,63 @@ mod tests {
     const RED: [u8; 4] = [255, 0, 0, 255];
     const BLUE: [u8; 4] = [0, 0, 255, 255];
     const BLACK: [u8; 4] = [0, 0, 0, 255];
+    #[test]
+    fn unavailable_capture_preserves_generator_and_shared_producer_survives_rebuilds() {
+        use prismcast_capture::producer::FrameProducer;
+        let (mut compositor, rx) = setup();
+        let capture = Source::new(SourceKind::PipeWireWindow, "capture");
+        let blue = solid("blue");
+        let mut scene = Scene::new("mixedcapture");
+        let mut a = SceneItem::new(capture.id, 0);
+        let mut b = SceneItem::new(blue.id, 1);
+        b.transform.position.x = 16.0;
+        b.transform.scale.x = 0.5;
+        scene.add_item(a.clone());
+        scene.add_item(b.clone());
+        compositor
+            .sync_snapshot(&[capture.clone(), blue.clone()], &scene)
+            .unwrap();
+        compositor.start().unwrap();
+        wait_pixels(&mut compositor, &rx, BLACK, BLUE);
+        let source = gst::ElementFactory::make("videotestsrc")
+            .property("is-live", true)
+            .property_from_str("pattern", "red")
+            .build()
+            .unwrap();
+        let mut producer = FrameProducer::start(source.clone()).unwrap();
+        let feed = producer.feed();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while feed.dimensions().is_none() {
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        compositor
+            .sync_capture_feeds(&[(capture.id, feed.clone())])
+            .unwrap();
+        wait_pixels(&mut compositor, &rx, RED, BLUE);
+        let received = feed.received();
+        a.visible = false;
+        compositor.upsert_item(scene.id, &a).unwrap();
+        wait_pixels(&mut compositor, &rx, BLACK, BLUE);
+        a.visible = true;
+        compositor.upsert_item(scene.id, &a).unwrap();
+        wait_pixels(&mut compositor, &rx, RED, BLUE);
+        assert_eq!(source.current_state(), gst::State::Playing);
+        assert!(feed.received() > received);
+        // Two placements still use one source/tee and the independent producer.
+        let mut copy = SceneItem::new(capture.id, 2);
+        copy.transform.position.x = 16.0;
+        scene.add_item(copy);
+        compositor.sync_snapshot(&[capture, blue], &scene).unwrap();
+        wait_pixels(&mut compositor, &rx, RED, RED);
+        assert_eq!(compositor.source_count(), 2);
+        assert_eq!(compositor.branch_count(), 3);
+        compositor.sync_capture_feeds(&[]).unwrap();
+        wait_pixels(&mut compositor, &rx, BLACK, BLUE);
+        producer.shutdown_native().unwrap();
+        assert_eq!(source.current_state(), gst::State::Null);
+        compositor.stop().unwrap();
+    }
     #[test]
     fn two_sources_visibility_zorder_removal_and_scene_switch_change_pixels() {
         let (mut compositor, rx) = setup();

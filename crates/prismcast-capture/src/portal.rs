@@ -12,13 +12,14 @@ use tokio::{
 
 pub(crate) struct PortalConnection {
     connection: ashpd::zbus::Connection,
+    parent: Option<ashpd::WindowIdentifier>,
     proxy: Screencast,
     session: Option<Arc<Session<Screencast>>>,
     closed: watch::Sender<bool>,
     watcher: Option<JoinHandle<()>>,
 }
 impl PortalConnection {
-    pub(crate) async fn connect() -> Result<Self> {
+    pub(crate) async fn connect(parent: Option<ashpd::WindowIdentifier>) -> Result<Self> {
         let connection = ashpd::zbus::Connection::session()
             .await
             .map_err(bus_error)?;
@@ -28,6 +29,7 @@ impl PortalConnection {
         let (closed, _) = watch::channel(false);
         Ok(Self {
             connection,
+            parent,
             proxy,
             session: None,
             closed,
@@ -44,6 +46,9 @@ fn bus_error(error: impl std::fmt::Display) -> CaptureError {
 fn portal_error(error: ashpd::Error) -> CaptureError {
     match error {
         ashpd::Error::Response(ashpd::desktop::ResponseError::Cancelled) => CaptureError::Cancelled,
+        ashpd::Error::Response(ashpd::desktop::ResponseError::Other) => {
+            CaptureError::Denied("portal rejected the authorization request".into())
+        }
         other => CaptureError::Portal(other.to_string()),
     }
 }
@@ -130,7 +135,7 @@ impl Portal for PortalConnection {
         Box::pin(async move {
             let response = self
                 .proxy
-                .start(self.session()?, None, Default::default())
+                .start(self.session()?, self.parent.as_ref(), Default::default())
                 .await
                 .map_err(portal_error)?
                 .response()

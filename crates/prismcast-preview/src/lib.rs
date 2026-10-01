@@ -1,6 +1,7 @@
 //! GTK-local preview attachment. Pipeline ownership lives on a media thread.
 
 use gstreamer::{self as gst, prelude::*};
+mod capture_owner;
 
 /// Failures at the GTK/native media integration boundary.
 #[derive(Debug, thiserror::Error)]
@@ -11,6 +12,8 @@ pub enum PreviewError {
     Thread(#[source] std::io::Error),
     #[error("preview media backend failed: {0}")]
     Backend(#[source] prismcast_core::Error),
+    #[error("capture service failed: {0}")]
+    Capture(String),
     #[error("preview owner panicked")]
     WorkerPanic,
     #[error("preview owner completion channel closed")]
@@ -87,9 +90,18 @@ impl PreviewSession {
         let (completed, completion) = oneshot::channel();
         let owner_sink = sink.clone();
         let owner_status = status_tx.clone();
+        let owner_handle = handle.clone();
         let owner = std::thread::Builder::new()
             .name("prismcast-media-preview".into())
-            .spawn(move || media_owner(owner_sink, snapshots, cancellation, owner_status))
+            .spawn(move || {
+                media_owner(
+                    owner_sink,
+                    snapshots,
+                    cancellation,
+                    owner_status,
+                    owner_handle,
+                )
+            })
             .map_err(PreviewError::Thread)?;
         // Reaping away from GTK means completion proves the owner has exited,
         // without a blocking join in a GLib future.
@@ -151,6 +163,8 @@ enum Wake {
     Snapshot,
     Health,
     Stop,
+    CaptureRequest(prismcast_app::CaptureAuthorizationRequest),
+    CaptureComplete(capture_owner::Completion),
 }
 
 fn media_owner(
@@ -158,11 +172,17 @@ fn media_owner(
     mut snapshots: watch::Receiver<Arc<AppSnapshot>>,
     mut cancellation: oneshot::Receiver<()>,
     status: watch::Sender<PreviewStatus>,
+    handle: AppHandle,
 ) -> Result<(), PreviewError> {
     let wait_runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_time()
+        .enable_all()
         .build()
         .map_err(PreviewError::Thread)?;
+    let owner = wait_runtime
+        .block_on(handle.attach_capture_owner())
+        .map_err(|error| PreviewError::Capture(error.to_string()))?;
+    let mut captures = capture_owner::Captures::new(owner)
+        .map_err(|error| PreviewError::Capture(error.to_string()))?;
     let mut compositor = GstCompositor::new(sink).map_err(PreviewError::Backend)?;
     let canvas = CanvasId::new();
     let initial = snapshots.borrow_and_update().clone();
@@ -175,21 +195,41 @@ fn media_owner(
                 biased;
                 _ = &mut cancellation => Wake::Stop,
                 changed = snapshots.changed() => if changed.is_ok() { Wake::Snapshot } else { Wake::Stop },
+                completion = captures.completed.recv() => if let Some(completion)=completion {Wake::CaptureComplete(completion)} else {Wake::Stop},
+                request = captures.owner.requests.recv() => if let Some(request)=request {Wake::CaptureRequest(request)} else {Wake::Stop},
                 _ = tokio::time::sleep(Duration::from_millis(100)) => Wake::Health,
             }
         });
+        drain_health(&mut compositor, &status);
         match wake {
             Wake::Stop => break,
             Wake::Snapshot => {
-                drain_health(&mut compositor, &status);
                 let snapshot = snapshots.borrow_and_update().clone();
+                captures.health(&snapshot, &wait_runtime, &mut compositor);
                 reconcile(&mut compositor, &snapshot, canvas, &status);
             }
-            Wake::Health => drain_health(&mut compositor, &status),
+            Wake::Health => {
+                let snapshot = snapshots.borrow().clone();
+                captures.health(&snapshot, &wait_runtime, &mut compositor);
+                drain_health(&mut compositor, &status);
+            }
+            Wake::CaptureRequest(request) => {
+                let snapshot = snapshots.borrow().clone();
+                captures.authorize(request, &snapshot, &wait_runtime, &mut compositor);
+            }
+            Wake::CaptureComplete(completion) => {
+                let snapshot = snapshots.borrow().clone();
+                captures.complete(completion, &snapshot, &wait_runtime, &mut compositor);
+            }
+        }
+        if let Some(error) = captures.graph_error() {
+            status.send_replace(PreviewStatus::Failed(error.to_owned()));
         }
     }
     drain_health(&mut compositor, &status);
-    compositor.stop().map_err(PreviewError::Backend)
+    let result = compositor.stop().map_err(PreviewError::Backend);
+    captures.shutdown(&wait_runtime, &mut compositor);
+    result
 }
 
 fn reconcile(
@@ -401,6 +441,89 @@ mod display_tests {
             drop(renderer);
             window.close();
             handle.shutdown().await;
+        });
+    }
+    #[test]
+    #[ignore = "opens one real Window portal picker; select Prismcast capture test target"]
+    fn actual_window_capture_preview_pixels_placement_and_shutdown() {
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+        gtk::init().unwrap();
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let handle = {
+            let _enter = runtime.enter();
+            AppHandle::spawn(prismcast_app::CoreConfig::default())
+        };
+        gtk::glib::MainContext::default().block_on(async {
+            let session=PreviewSession::start(handle.clone()).unwrap();let status=session.subscribe_status();let paintable=session.paintable().clone();
+            let frames=Arc::new(AtomicUsize::new(0));let count=frames.clone();
+            session.sink.static_pad("sink").unwrap().add_probe(gst::PadProbeType::BUFFER,move|_,_|{count.fetch_add(1,Ordering::SeqCst);gst::PadProbeReturn::Ok});
+            let window=gtk::Window::new();window.set_title(Some("Prismcast capture preview"));window.set_default_size(640,360);window.set_child(Some(&gtk::Picture::for_paintable(&paintable)));window.present();
+            let target=gtk::Window::new();target.set_title(Some("Prismcast capture test target – select this window"));target.set_default_size(480,270);
+            let area=gtk::DrawingArea::new();let red=Rc::new(Cell::new(true));
+            area.set_draw_func({let red=red.clone();move|_,context,_,_|{if red.get(){context.set_source_rgb(1.0,0.0,0.0)}else{context.set_source_rgb(0.0,0.0,1.0)}let _=context.paint();}});
+            target.set_child(Some(&area));target.present();
+            let timer=gtk::glib::timeout_add_local(Duration::from_millis(250),{let area=area.downgrade();move||{if let Some(area)=area.upgrade(){red.set(!red.get());area.queue_draw();gtk::glib::ControlFlow::Continue}else{gtk::glib::ControlFlow::Break}}});
+            gtk::glib::timeout_future(Duration::from_millis(150)).await;
+            let renderer=RendererGuard(gtk::gsk::Renderer::for_surface(&window.surface().unwrap()).unwrap());
+            let result:Result<(),String>=async {
+                handle.dispatch(Command::AddScene{name:"Capture scene".into()}).await.map_err(|error|error.to_string())?;
+                let scene_id=handle.snapshot().current_scene().ok_or("no scene")?;
+                let created=handle.dispatch(Command::AddSource{kind:SourceKind::PipeWireWindow,name:"Window under test".into()}).await.map_err(|error|error.to_string())?;
+                let source_id=created.events.iter().find_map(|event|match event{Event::Source(SourceEvent::Added{source})=>Some(source.id),_=>None}).ok_or("no source")?;
+                handle.dispatch(Command::AddSceneItem{scene_id,source_id}).await.map_err(|error|error.to_string())?;
+                let item_id=handle.snapshot().state().scenes[&scene_id].items[0].id;
+                let deadline=Instant::now()+Duration::from_secs(5);
+                while *status.borrow()!=PreviewStatus::Running{if Instant::now()>deadline{return Err(format!("preview service not ready: {:?}",status.borrow()))}gtk::glib::timeout_future(Duration::from_millis(30)).await;}
+                eprintln!("Portal will open once: choose 'Prismcast capture test target – select this window'.");
+                handle.authorize_source_capture(source_id,None).await.map_err(|error|error.to_string())?;
+                let deadline=Instant::now()+Duration::from_secs(130);
+                let observed=loop{
+                    let snapshot=handle.snapshot();
+                    if let Some(observed)=snapshot.source_runtime(source_id){
+                        if observed.status==prismcast_core::CaptureStatus::Active{break observed.clone()}
+                        if observed.status!=prismcast_core::CaptureStatus::Authorizing{return Err(format!("capture terminal: {observed:?}"))}
+                    }
+                    if Instant::now()>deadline{return Err("capture authorization deadline".into())}
+                    gtk::glib::timeout_future(Duration::from_millis(30)).await;
+                };
+                let dimensions=observed.dimensions.ok_or("active capture missing dimensions")?;
+                let transform=prismcast_core::Transform{scale:prismcast_core::Vec2::new(1280.0/dimensions.width as f32,720.0/dimensions.height as f32),..Default::default()};
+                handle.dispatch(Command::SetSceneItemTransform{scene_id,item_id,transform}).await.map_err(|error|error.to_string())?;
+                let first_count=frames.load(Ordering::SeqCst);
+                let deadline=Instant::now()+Duration::from_secs(10);let mut red_seen=false;let mut blue_seen=false;
+                while !(red_seen&&blue_seen){
+                    if let Some(pixel)=pixel(&paintable,&renderer){red_seen|=pixel[2]>200&&pixel[0]<30&&pixel[1]<30;blue_seen|=pixel[0]>200&&pixel[2]<30&&pixel[1]<30;}
+                    if Instant::now()>deadline{return Err(format!("selected window did not show fixture red/blue pixels: {:?}",pixel(&paintable,&renderer)))}
+                    gtk::glib::timeout_future(Duration::from_millis(30)).await;
+                }
+                if frames.load(Ordering::SeqCst)<=first_count+2{return Err("no native frames after capture activation".into())}
+                handle.dispatch(Command::SetSceneItemVisible{scene_id,item_id,visible:false}).await.map_err(|error|error.to_string())?;
+                let deadline=Instant::now()+Duration::from_secs(5);
+                while !pixel(&paintable,&renderer).is_some_and(|pixel|pixel[..3].iter().all(|byte|*byte<12)){
+                    if Instant::now()>deadline{return Err("hidden placement did not become black".into())}gtk::glib::timeout_future(Duration::from_millis(30)).await;
+                }
+                handle.dispatch(Command::SetSceneItemVisible{scene_id,item_id,visible:true}).await.map_err(|error|error.to_string())?;
+                let deadline=Instant::now()+Duration::from_secs(5);
+                while !pixel(&paintable,&renderer).is_some_and(|pixel|pixel[0]>200||pixel[2]>200){if Instant::now()>deadline{return Err("capture did not survive placement rebuild".into())}gtk::glib::timeout_future(Duration::from_millis(30)).await;}
+                let snapshot=handle.snapshot();let retained=snapshot.source_runtime(source_id).ok_or("capture runtime lost")?;
+                if retained.generation!=observed.generation||retained.dimensions!=Some(dimensions){return Err("placement changed capture grant/caps".into())}
+                eprintln!("Integrated window capture: {dimensions:?}, generation {:?}, native frames {}",observed.generation,frames.load(Ordering::SeqCst)-first_count);
+                handle.dispatch(Command::RemoveSource{source_id}).await.map_err(|error|error.to_string())?;
+                gtk::glib::timeout_future(Duration::from_millis(300)).await;
+                if handle.snapshot().source_runtime(source_id).is_some(){return Err("removed source revived".into())}
+                Ok(())
+            }.await;
+            // Cleanup completes even if manual selection, pixels, or caps checks fail.
+            let shutdown=gtk::glib::future_with_timeout(Duration::from_secs(15),session.shutdown()).await;
+            timer.remove();drop(renderer);target.close();window.close();handle.shutdown().await;
+            shutdown.unwrap().unwrap();result.unwrap();
         });
     }
 }
