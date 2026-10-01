@@ -759,6 +759,7 @@ impl CoreActor {
                 source.kind,
                 prismcast_core::SourceKind::PipeWireDisplay
                     | prismcast_core::SourceKind::PipeWireWindow
+                    | prismcast_core::SourceKind::V4l2Camera
             )
         {
             return Err(Error::InvalidInput("capture source is inactive".into()));

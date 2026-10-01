@@ -200,17 +200,26 @@ impl SourcesPanel {
                 source.kind,
                 prismcast_core::SourceKind::PipeWireDisplay
                     | prismcast_core::SourceKind::PipeWireWindow
+                    | prismcast_core::SourceKind::V4l2Camera
             ) {
                 let runtime = snapshot.source_runtime(source.id);
-                let status =
-                    gtk::Label::new(Some(crate::presentation::capture_status_label(runtime)));
+                let status = gtk::Label::new(Some(crate::presentation::capture_status_label(
+                    &source.kind,
+                    runtime,
+                )));
                 status.set_wrap(true);
                 status.set_tooltip_text(runtime.and_then(|runtime| runtime.message.as_deref()));
                 row.append(&status);
                 let output = sender.output_sender().clone();
-                let button = capture_button(source.id, source.enabled, runtime, move |source_id| {
-                    output.emit(SourcesOutput::AuthorizeCapture(source_id));
-                });
+                let button = capture_button(
+                    &source.kind,
+                    source.id,
+                    source.enabled,
+                    runtime,
+                    move |source_id| {
+                        output.emit(SourcesOutput::AuthorizeCapture(source_id));
+                    },
+                );
                 row.append(&button);
             }
             if let Some(scene) = scene {
@@ -240,16 +249,13 @@ impl SourcesPanel {
 }
 
 fn capture_button(
+    kind: &prismcast_core::SourceKind,
     source_id: SourceId,
     enabled: bool,
     runtime: Option<&prismcast_core::SourceRuntime>,
     send: impl Fn(SourceId) + 'static,
 ) -> gtk::Button {
-    let button = gtk::Button::with_label(if runtime.is_some() {
-        "Retry Authorization"
-    } else {
-        "Authorize Capture"
-    });
+    let button = gtk::Button::with_label(crate::presentation::capture_button_label(kind, runtime));
     button.set_sensitive(
         enabled
             && runtime.is_none_or(|runtime| {
@@ -342,18 +348,35 @@ mod tests {
     #[ignore = "requires a real GTK display; opens no portal picker"]
     fn explicit_capture_button_gates_repeat_signals_and_disabled_sources() {
         gtk::init().unwrap();
+        for (kind, fresh, retry) in [
+            (
+                prismcast_core::SourceKind::PipeWireDisplay,
+                "Authorize Capture",
+                "Retry Authorization",
+            ),
+            (
+                prismcast_core::SourceKind::V4l2Camera,
+                "Start Camera",
+                "Retry Camera",
+            ),
+        ] {
+            assert_button_signal_gating(&kind, fresh, retry);
+        }
+    }
+
+    fn assert_button_signal_gating(kind: &prismcast_core::SourceKind, fresh: &str, retry: &str) {
         let requests = Rc::new(RefCell::new(Vec::new()));
         let source_id = SourceId::new();
-        let button = capture_button(source_id, true, None, {
+        let button = capture_button(kind, source_id, true, None, {
             let requests = requests.clone();
             move |id| requests.borrow_mut().push(id)
         });
-        assert_eq!(button.label().as_deref(), Some("Authorize Capture"));
+        assert_eq!(button.label().as_deref(), Some(fresh));
         assert!(requests.borrow().is_empty(), "rendering never authorizes");
         button.emit_clicked();
         button.emit_clicked();
         assert_eq!(&*requests.borrow(), &[source_id]);
-        let disabled = capture_button(SourceId::new(), false, None, {
+        let disabled = capture_button(kind, SourceId::new(), false, None, {
             let requests = requests.clone();
             move |id| requests.borrow_mut().push(id)
         });
@@ -375,12 +398,12 @@ mod tests {
                 message: None,
             };
             let id = SourceId::new();
-            let button = capture_button(id, true, Some(&runtime), {
+            let button = capture_button(kind, id, true, Some(&runtime), {
                 let requests = requests.clone();
                 move |id| requests.borrow_mut().push(id)
             });
             let before = requests.borrow().len();
-            assert_eq!(button.label().as_deref(), Some("Retry Authorization"));
+            assert_eq!(button.label().as_deref(), Some(retry));
             button.emit_clicked();
             let recoverable = !matches!(status, CaptureStatus::Authorizing | CaptureStatus::Active);
             assert_eq!(requests.borrow().len(), before + usize::from(recoverable));

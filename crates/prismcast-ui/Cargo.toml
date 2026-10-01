@@ -17,6 +17,7 @@ prismcast-core = { path = "../prismcast-core", version = "0.1.0" }
 prismcast-app = { path = "../prismcast-app", version = "0.1.0" }
 prismcast-compositor = { path = "../prismcast-compositor", version = "0.1.0" }
 prismcast-preview = { path = "../prismcast-preview", version = "0.1.0" }
+prismcast-capture = { path = "../prismcast-capture", version = "0.1.0" }
 
 # GTK stack (system: gtk4 4.22.4, libadwaita-1 1.9.1).
 # relm4 0.11 pairs with gtk4-rs 0.11; libadwaita 0.9 targets libadwaita 1.9

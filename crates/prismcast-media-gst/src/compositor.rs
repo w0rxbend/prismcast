@@ -52,14 +52,21 @@ fn dimensions(
     source: &Source,
     captures: &HashMap<SourceId, CaptureInput>,
 ) -> Result<Option<SourceSize>> {
+    // A registered feed supplies negotiated pixels for any capture kind.
+    if let Some(input) = captures.get(&source.id) {
+        let size = input.size;
+        if !(1..=8192).contains(&size.width) || !(1..=8192).contains(&size.height) {
+            return Err(invalid("invalid capture pixel dimensions"));
+        }
+        return Ok(Some(size));
+    }
     if matches!(
         source.kind,
-        SourceKind::PipeWireDisplay | SourceKind::PipeWireWindow
-    ) && !captures.contains_key(&source.id)
-    {
+        SourceKind::PipeWireDisplay | SourceKind::PipeWireWindow | SourceKind::V4l2Camera
+    ) {
         return Ok(None);
     }
-    source_size(source, captures.get(&source.id).map(|input| input.size)).map(Some)
+    source_size(source, None).map(Some)
 }
 fn validate_scene(
     scene: &Scene,
@@ -491,21 +498,14 @@ impl GstCompositor {
             };
             self.warned_capture.remove(&item.source_id);
             if !self.shared.contains_key(&item.source_id) {
-                let capture = if matches!(
-                    source.kind,
-                    SourceKind::PipeWireDisplay | SourceKind::PipeWireWindow
-                ) {
-                    Some(
-                        self.captures
-                            .get(&item.source_id)
-                            .ok_or_else(|| media("missing capture input"))?
-                            .feed
-                            .consumer()
-                            .map_err(media)?,
-                    )
-                } else {
-                    None
-                };
+                // Feed presence, not source kind, selects the capture consumer:
+                // any authorized producer (portal or camera) renders identically.
+                let capture = self
+                    .captures
+                    .get(&item.source_id)
+                    .map(|input| input.feed.consumer())
+                    .transpose()
+                    .map_err(media)?;
                 let bin = if let Some(capture) = &capture {
                     capture.bin.clone()
                 } else {
@@ -908,6 +908,50 @@ mod tests {
         assert_eq!(compositor.branch_count(), 3);
         compositor.sync_capture_feeds(&[]).unwrap();
         wait_pixels(&mut compositor, &rx, BLACK, BLUE);
+        producer.shutdown_native().unwrap();
+        assert_eq!(source.current_state(), gst::State::Null);
+        compositor.stop().unwrap();
+    }
+    #[test]
+    fn v4l2_camera_placement_uses_capture_feed_like_portal_kinds() {
+        use prismcast_capture::producer::FrameProducer;
+        let (mut compositor, rx) = setup();
+        let mut camera = Source::new(SourceKind::V4l2Camera, "camera");
+        camera.settings = serde_json::json!({"device": "/dev/video0"});
+        let mut scene = Scene::new("camera");
+        scene.add_item(SceneItem::new(camera.id, 0));
+        // Without an authorized producer the placement waits with a warning
+        // instead of failing validation, like a restored portal source.
+        compositor
+            .sync_snapshot(std::slice::from_ref(&camera), &scene)
+            .unwrap();
+        compositor.start().unwrap();
+        assert!(compositor
+            .drain_events()
+            .iter()
+            .any(|event| matches!(event, BackendEvent::Warning { .. })));
+        wait_pixels(&mut compositor, &rx, BLACK, BLACK);
+        let source = gst::ElementFactory::make("videotestsrc")
+            .property("is-live", true)
+            .property_from_str("pattern", "red")
+            .build()
+            .unwrap();
+        let mut producer = FrameProducer::start(source.clone()).unwrap();
+        let feed = producer.feed();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while feed.dimensions().is_none() {
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        compositor
+            .sync_capture_feeds(&[(camera.id, feed.clone())])
+            .unwrap();
+        wait_pixels(&mut compositor, &rx, RED, RED);
+        assert_eq!(source.current_state(), gst::State::Playing);
+        assert_eq!(compositor.source_count(), 1);
+        assert_eq!(compositor.branch_count(), 1);
+        compositor.sync_capture_feeds(&[]).unwrap();
+        wait_pixels(&mut compositor, &rx, BLACK, BLACK);
         producer.shutdown_native().unwrap();
         assert_eq!(source.current_state(), gst::State::Null);
         compositor.stop().unwrap();

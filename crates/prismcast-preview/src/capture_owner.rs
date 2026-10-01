@@ -1,5 +1,12 @@
 //! Capture effects are consumed once. Native mutations stay on the preview OS owner.
+//! Portal leases arrive through async broker waits on Tokio; camera sessions
+//! (ADR-0019) are lease-free: path validation, node pre-open checks and element
+//! construction inside CameraSession::open are near-instant synchronous work, so
+//! they run directly on this owner thread and only completion delivery rides the
+//! runtime. CameraSession::close blocks like the portal lease close and is
+//! invoked with the same owner-thread discipline, never on a Tokio worker.
 use prismcast_app::{AppSnapshot, CaptureAuthorizationRequest, CaptureOwner};
+use prismcast_capture::camera::CameraSession;
 use prismcast_capture::producer::{CaptureFeed, CaptureProducer};
 use prismcast_capture::{CaptureBroker, CaptureConfig, CaptureError, CaptureKind, CaptureLease};
 use prismcast_core::{CaptureGeneration, CaptureStatus, SourceDimensions, SourceId, SourceKind};
@@ -14,7 +21,25 @@ use tokio::{runtime::Runtime, sync::mpsc, task::JoinHandle};
 pub(super) struct Completion {
     source_id: SourceId,
     generation: CaptureGeneration,
-    result: prismcast_capture::Result<CaptureLease>,
+    result: prismcast_capture::Result<OpenedCapture>,
+}
+/// One authorized native capture; cameras carry no lease (ADR-0019).
+pub(super) enum OpenedCapture {
+    Portal(CaptureLease),
+    Camera(CameraSession),
+}
+/// Running native capture behind a uniform feed/status surface.
+enum NativeCapture {
+    Portal(CaptureProducer),
+    Camera(CameraSession),
+}
+impl NativeCapture {
+    fn feed(&self) -> Option<CaptureFeed> {
+        match self {
+            Self::Portal(producer) => Some(producer.feed()),
+            Self::Camera(session) => session.feed(),
+        }
+    }
 }
 struct Pending {
     generation: CaptureGeneration,
@@ -29,7 +54,7 @@ struct Report {
 }
 struct Active {
     generation: CaptureGeneration,
-    producer: CaptureProducer,
+    capture: NativeCapture,
     dimensions: Option<(u32, u32)>,
     started: Instant,
 }
@@ -48,7 +73,7 @@ fn valid(snapshot: &AppSnapshot, id: SourceId, generation: CaptureGeneration) ->
         source.enabled
             && matches!(
                 source.kind,
-                SourceKind::PipeWireDisplay | SourceKind::PipeWireWindow
+                SourceKind::PipeWireDisplay | SourceKind::PipeWireWindow | SourceKind::V4l2Camera
             )
     }) && snapshot.source_runtime(id).is_some_and(|runtime| {
         runtime.generation == generation
@@ -145,7 +170,7 @@ impl Captures {
         self.active
             .iter()
             .filter_map(|(id, active)| {
-                let feed = active.producer.feed();
+                let feed = active.capture.feed()?;
                 (feed.dimensions().is_some() && feed.error().is_none()).then_some((*id, feed))
             })
             .collect()
@@ -163,21 +188,32 @@ impl Captures {
             pending.task.abort();
             let _ = runtime.block_on(pending.task);
         }
-        if let Some(mut active) = self.active.remove(&id) {
+        if let Some(active) = self.active.remove(&id) {
             // Consumer NULL/remove barrier precedes stopping the persistent producer.
             self.sync(compositor);
-            if let Err(error) = active.producer.shutdown_native() {
-                tracing::warn!(source_id=%id,%error,"capture native stop failed; retaining graph until object destruction");
-            }
-            match active.producer.take_stopped_lease() {
-                Ok(lease) => {
-                    drop(active.producer);
-                    let result = runtime.block_on(lease.close());
-                    if let Err(error) = result {
-                        tracing::warn!(source_id=%id,%error,"capture lease cleanup failed");
+            match active.capture {
+                NativeCapture::Portal(mut producer) => {
+                    if let Err(error) = producer.shutdown_native() {
+                        tracing::warn!(source_id=%id,%error,"capture native stop failed; retaining graph until object destruction");
+                    }
+                    match producer.take_stopped_lease() {
+                        Ok(lease) => {
+                            drop(producer);
+                            let result = runtime.block_on(lease.close());
+                            if let Err(error) = result {
+                                tracing::warn!(source_id=%id,%error,"capture lease cleanup failed");
+                            }
+                        }
+                        Err(_) => drop(producer),
                     }
                 }
-                Err(_) => drop(active.producer),
+                NativeCapture::Camera(session) => {
+                    // Blocking like lease.close above: stops the native graph
+                    // and joins the session worker on this owner thread.
+                    if let Err(error) = session.close() {
+                        tracing::warn!(source_id=%id,%error,"camera session cleanup failed");
+                    }
+                }
             }
         }
     }
@@ -217,6 +253,9 @@ impl Captures {
         {
             Some(SourceKind::PipeWireDisplay) => CaptureKind::Monitor,
             Some(SourceKind::PipeWireWindow) => CaptureKind::Window,
+            Some(SourceKind::V4l2Camera) => {
+                return self.authorize_camera(request, snapshot, runtime);
+            }
             _ => return,
         };
         let pending = {
@@ -230,7 +269,7 @@ impl Captures {
                 let generation = request.generation;
                 let tx = self.tx.clone();
                 let task = runtime.spawn(async move {
-                    let result = pending.wait().await;
+                    let result = pending.wait().await.map(OpenedCapture::Portal);
                     let _ = tx
                         .send(Completion {
                             source_id: id,
@@ -248,6 +287,49 @@ impl Captures {
                 );
             }
             Err(error) => self.report_error(runtime, request.source_id, request.generation, error),
+        }
+    }
+    /// Lease-free camera authorization (ADR-0019). Validation failures and open
+    /// errors report synchronously, mirroring the broker error arm; an opened
+    /// session still travels through Completion so activation re-checks the
+    /// generation guard in complete().
+    fn authorize_camera(
+        &mut self,
+        request: CaptureAuthorizationRequest,
+        snapshot: &AppSnapshot,
+        runtime: &Runtime,
+    ) {
+        let id = request.source_id;
+        let generation = request.generation;
+        let device = snapshot
+            .state()
+            .sources
+            .get(&id)
+            .and_then(|source| source.settings.get("device"))
+            .and_then(|device| device.as_str())
+            .filter(|device| !device.is_empty());
+        let Some(device) = device else {
+            let error =
+                CaptureError::Unsupported("camera source settings lack a \"device\" path".into());
+            return self.report_error(runtime, id, generation, error);
+        };
+        // Synchronous open on this owner thread: validate, node pre-open check
+        // and v4l2src construction; the session worker thread takes over after.
+        match CameraSession::open(device) {
+            Ok(session) => {
+                let tx = self.tx.clone();
+                let task = runtime.spawn(async move {
+                    let _ = tx
+                        .send(Completion {
+                            source_id: id,
+                            generation,
+                            result: Ok(OpenedCapture::Camera(session)),
+                        })
+                        .await;
+                });
+                self.pending.insert(id, Pending { generation, task });
+            }
+            Err(error) => self.report_error(runtime, id, generation, error),
         }
     }
     fn report_error(
@@ -292,28 +374,42 @@ impl Captures {
             self.pending.remove(&id);
         }
         if !valid(snapshot, id, generation) {
-            if let Ok(lease) = result {
-                let _ = runtime.block_on(lease.close());
+            match result {
+                Ok(OpenedCapture::Portal(lease)) => {
+                    let _ = runtime.block_on(lease.close());
+                }
+                Ok(OpenedCapture::Camera(session)) => {
+                    let _ = session.close();
+                }
+                Err(_) => {}
             }
             return;
         }
-        match result {
-            Ok(lease) => match CaptureProducer::start(lease) {
-                Ok(producer) => {
-                    self.active.insert(
-                        id,
-                        Active {
-                            generation,
-                            producer,
-                            dimensions: None,
-                            started: Instant::now(),
-                        },
-                    );
+        let capture = match result {
+            Ok(OpenedCapture::Portal(lease)) => match CaptureProducer::start(lease) {
+                Ok(producer) => NativeCapture::Portal(producer),
+                Err(error) => {
+                    self.report_error(runtime, id, generation, error);
+                    self.health(snapshot, runtime, compositor);
+                    return;
                 }
-                Err(error) => self.report_error(runtime, id, generation, error),
             },
-            Err(error) => self.report_error(runtime, id, generation, error),
-        }
+            Ok(OpenedCapture::Camera(session)) => NativeCapture::Camera(session),
+            Err(error) => {
+                self.report_error(runtime, id, generation, error);
+                self.health(snapshot, runtime, compositor);
+                return;
+            }
+        };
+        self.active.insert(
+            id,
+            Active {
+                generation,
+                capture,
+                dimensions: None,
+                started: Instant::now(),
+            },
+        );
         self.health(snapshot, runtime, compositor);
     }
     pub fn health(
@@ -326,16 +422,41 @@ impl Captures {
         self.flush_reports(snapshot, runtime);
         let mut terminal = Vec::new();
         for (id, active) in &mut self.active {
-            let status = active.producer.status();
-            if status != prismcast_capture::CaptureStatus::Ready {
-                terminal.push((*id, active.generation, CaptureError::Closed));
-                continue;
+            let closed = CaptureError::Closed.to_string();
+            match &active.capture {
+                NativeCapture::Portal(producer) => {
+                    if producer.status() != prismcast_capture::CaptureStatus::Ready {
+                        terminal.push((*id, active.generation, CaptureStatus::Revoked, closed));
+                        continue;
+                    }
+                    if let Some(error) = producer.error() {
+                        terminal.push((*id, active.generation, CaptureStatus::Failed, error));
+                        continue;
+                    }
+                }
+                NativeCapture::Camera(session) => match session.status() {
+                    prismcast_capture::CaptureStatus::Authorizing
+                    | prismcast_capture::CaptureStatus::Ready => {}
+                    // ADR-0019: losing a device after Active maps to Revoked,
+                    // the same outcome report_error gives CaptureError::Closed.
+                    prismcast_capture::CaptureStatus::Failed(message)
+                        if active.dimensions.is_some() =>
+                    {
+                        terminal.push((*id, active.generation, CaptureStatus::Revoked, message));
+                        continue;
+                    }
+                    prismcast_capture::CaptureStatus::Failed(message) => {
+                        terminal.push((*id, active.generation, CaptureStatus::Failed, message));
+                        continue;
+                    }
+                    prismcast_capture::CaptureStatus::Cancelled
+                    | prismcast_capture::CaptureStatus::Closed => {
+                        terminal.push((*id, active.generation, CaptureStatus::Revoked, closed));
+                        continue;
+                    }
+                },
             }
-            if let Some(error) = active.producer.error() {
-                terminal.push((*id, active.generation, CaptureError::Native(error)));
-                continue;
-            }
-            let dimensions = active.producer.feed().dimensions();
+            let dimensions = active.capture.feed().and_then(|feed| feed.dimensions());
             if let Some(dimensions) = dimensions {
                 if active.dimensions != Some(dimensions) {
                     active.dimensions = Some(dimensions);
@@ -344,13 +465,14 @@ impl Captures {
                 terminal.push((
                     *id,
                     active.generation,
-                    CaptureError::Native("capture negotiated no frame within 10s".into()),
+                    CaptureStatus::Failed,
+                    "capture negotiated no frame within 10s".to_owned(),
                 ));
             }
         }
-        for (id, generation, error) in terminal {
+        for (id, generation, status, message) in terminal {
             self.retire(id, runtime, compositor);
-            self.report_error(runtime, id, generation, error);
+            self.report(runtime, id, generation, status, None, Some(message));
         }
         // Core reports only changed caps/status, preventing a self-generated watch loop.
         let updates = self
@@ -395,8 +517,14 @@ impl Captures {
             self.retire(id, runtime, compositor);
         }
         while let Ok(completion) = self.completed.try_recv() {
-            if let Ok(lease) = completion.result {
-                let _ = runtime.block_on(lease.close());
+            match completion.result {
+                Ok(OpenedCapture::Portal(lease)) => {
+                    let _ = runtime.block_on(lease.close());
+                }
+                Ok(OpenedCapture::Camera(session)) => {
+                    let _ = session.close();
+                }
+                Err(_) => {}
             }
         }
         if let Err(error) = runtime.block_on(self.broker.shutdown()) {
@@ -422,12 +550,19 @@ mod tests {
         }
     }
     fn setup() -> (Runtime, AppHandle, Captures, GstCompositor, SourceId) {
+        setup_source(SourceKind::PipeWireWindow, serde_json::Value::Null)
+    }
+    fn setup_source(
+        kind: SourceKind,
+        settings: serde_json::Value,
+    ) -> (Runtime, AppHandle, Captures, GstCompositor, SourceId) {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(1)
             .enable_all()
             .build()
             .unwrap();
-        let source = Source::new(SourceKind::PipeWireWindow, "restored");
+        let mut source = Source::new(kind, "restored");
+        source.settings = settings;
         let id = source.id;
         let mut state = AppState::new();
         state.sources.insert(id, source);
@@ -546,6 +681,167 @@ mod tests {
         captures.health(&handle.snapshot(), &runtime, &mut compositor);
         assert!(captures.reports.is_empty());
         assert!(captures.active.is_empty());
+        captures.shutdown(&runtime, &mut compositor);
+        runtime.block_on(handle.shutdown());
+    }
+    #[test]
+    fn camera_authorize_without_device_setting_reports_failed_and_opens_nothing() {
+        let (runtime, handle, mut captures, mut compositor, id) =
+            setup_source(SourceKind::V4l2Camera, serde_json::Value::Null);
+        let request = request(&runtime, &handle, &mut captures, id);
+        captures.authorize(request, &handle.snapshot(), &runtime, &mut compositor);
+        let snapshot = handle.snapshot();
+        let state = snapshot.source_runtime(id).unwrap();
+        assert_eq!(state.status, CaptureStatus::Failed);
+        assert!(state.message.as_ref().unwrap().contains("device"));
+        assert!(captures.pending.is_empty());
+        assert!(captures.active.is_empty());
+        assert!(captures.completed.try_recv().is_err());
+        captures.shutdown(&runtime, &mut compositor);
+        runtime.block_on(handle.shutdown());
+    }
+    #[test]
+    fn camera_missing_node_reports_failed_without_pending() {
+        let (runtime, handle, mut captures, mut compositor, id) = setup_source(
+            SourceKind::V4l2Camera,
+            serde_json::json!({"device": "/dev/prismcast-test-missing"}),
+        );
+        let request = request(&runtime, &handle, &mut captures, id);
+        captures.authorize(request, &handle.snapshot(), &runtime, &mut compositor);
+        let snapshot = handle.snapshot();
+        let state = snapshot.source_runtime(id).unwrap();
+        assert_eq!(state.status, CaptureStatus::Failed);
+        assert!(state.message.as_ref().unwrap().contains("does not exist"));
+        assert!(captures.pending.is_empty());
+        assert!(captures.active.is_empty());
+        captures.shutdown(&runtime, &mut compositor);
+        runtime.block_on(handle.shutdown());
+    }
+    #[test]
+    fn camera_stale_generation_cannot_revive_retry() {
+        let (runtime, handle, mut captures, mut compositor, id) = setup_source(
+            SourceKind::V4l2Camera,
+            serde_json::json!({"device": "/dev/video0"}),
+        );
+        assert!(captures.pending.is_empty());
+        assert!(captures.active.is_empty());
+        let old = request(&runtime, &handle, &mut captures, id);
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let guard = Cancelled(cancelled.clone());
+        let task = runtime.spawn(async move {
+            let _guard = guard;
+            std::future::pending::<()>().await;
+        });
+        captures.pending.insert(
+            id,
+            Pending {
+                generation: old.generation,
+                task,
+            },
+        );
+        let fresh = request(&runtime, &handle, &mut captures, id);
+        captures.prune(&handle.snapshot(), &runtime, &mut compositor);
+        assert!(cancelled.load(Ordering::SeqCst));
+        assert!(captures.pending.is_empty());
+        captures.complete(
+            Completion {
+                source_id: id,
+                generation: old.generation,
+                result: Err(CaptureError::Denied("late".into())),
+            },
+            &handle.snapshot(),
+            &runtime,
+            &mut compositor,
+        );
+        let snapshot = handle.snapshot();
+        assert_eq!(
+            snapshot.source_runtime(id).unwrap().generation,
+            fresh.generation
+        );
+        assert_eq!(
+            snapshot.source_runtime(id).unwrap().status,
+            CaptureStatus::Authorizing
+        );
+        captures.complete(
+            Completion {
+                source_id: id,
+                generation: fresh.generation,
+                result: Err(CaptureError::Native("camera lost".into())),
+            },
+            &snapshot,
+            &runtime,
+            &mut compositor,
+        );
+        assert_eq!(
+            handle.snapshot().source_runtime(id).unwrap().status,
+            CaptureStatus::Failed
+        );
+        captures.shutdown(&runtime, &mut compositor);
+        runtime.block_on(handle.shutdown());
+    }
+    #[test]
+    fn camera_disable_and_remove_retire_generation_before_late_result() {
+        let (runtime, handle, mut captures, mut compositor, id) = setup_source(
+            SourceKind::V4l2Camera,
+            serde_json::json!({"device": "/dev/video0"}),
+        );
+        let effect = request(&runtime, &handle, &mut captures, id);
+        runtime
+            .block_on(handle.dispatch(Command::SetSourceEnabled {
+                source_id: id,
+                enabled: false,
+            }))
+            .unwrap();
+        captures.complete(
+            Completion {
+                source_id: id,
+                generation: effect.generation,
+                result: Err(CaptureError::Cancelled),
+            },
+            &handle.snapshot(),
+            &runtime,
+            &mut compositor,
+        );
+        assert!(handle.snapshot().source_runtime(id).is_none());
+        runtime
+            .block_on(handle.dispatch(Command::RemoveSource { source_id: id }))
+            .unwrap();
+        captures.health(&handle.snapshot(), &runtime, &mut compositor);
+        assert!(captures.reports.is_empty());
+        assert!(captures.active.is_empty());
+        captures.shutdown(&runtime, &mut compositor);
+        runtime.block_on(handle.shutdown());
+    }
+    #[test]
+    fn camera_settings_change_clears_runtime_and_prune_retires_pending() {
+        let (runtime, handle, mut captures, mut compositor, id) = setup_source(
+            SourceKind::V4l2Camera,
+            serde_json::json!({"device": "/dev/video0"}),
+        );
+        let effect = request(&runtime, &handle, &mut captures, id);
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let guard = Cancelled(cancelled.clone());
+        let task = runtime.spawn(async move {
+            let _guard = guard;
+            std::future::pending::<()>().await;
+        });
+        captures.pending.insert(
+            id,
+            Pending {
+                generation: effect.generation,
+                task,
+            },
+        );
+        runtime
+            .block_on(handle.dispatch(Command::SetSourceSettings {
+                source_id: id,
+                settings: serde_json::json!({"device": "/dev/video2"}),
+            }))
+            .unwrap();
+        assert!(handle.snapshot().source_runtime(id).is_none());
+        captures.prune(&handle.snapshot(), &runtime, &mut compositor);
+        assert!(cancelled.load(Ordering::SeqCst));
+        assert!(captures.pending.is_empty());
         captures.shutdown(&runtime, &mut compositor);
         runtime.block_on(handle.shutdown());
     }
