@@ -409,11 +409,11 @@ Send element to the media owner. This crate does not depend on GTK.
 `sync_snapshot(&[Source], &Scene)` validates the authoritative source list and
 selected scene before mutating the graph; `clear_scene()` handles no selected
 scene. Source null settings (the domain's initial value) mean test-pattern
-settings defaults. This prototype supports TestPattern sources, positive
-position/scale with top-left anchor, normal opacity, hidden items and stable
-dense z-order. Crop, rotations, alternate anchors, bounds, other blend modes,
-source filters and nested/non-test-pattern sources return explicit errors when
-placed; MEDIA-005 and later source tasks implement them. Disabled sources do
+settings defaults. MEDIA-003 introduced TestPattern sources, position/scale,
+normal opacity, hidden items and stable dense z-order. MEDIA-005 adds crop,
+all anchors/bounds, signed flips and cardinal/quantized rotations via shared
+geometry (§15). Other blend modes, source filters and nested/non-test-pattern
+sources remain explicit errors when placed. Disabled sources do
 not run. Each enabled SourceId has one bin and tee; each placed item has one
 downstream-leaky two-buffer queue and compositor request pad. Hidden enabled
 items retain branches with zero alpha. Output is CPU SystemMemory RGBA with
@@ -465,3 +465,22 @@ crop edges clamp left/top first, then right/bottom to retain one source pixel,
 without summing raw u32 edges. Finite scale magnitudes clamp to64 as specified;
 resulting extents >8192 or invalid bounds/nonfinite values fail preflight. The
 existing half-away-from-zero position/extent rounding remains unchanged.
+
+
+### MEDIA-005 native branch implementation
+
+Each item branch now owns queue -> videocrop -> optional source-axis flip ->
+optional cardinal rotation -> compositor pad. Native video-direction nicks are
+horiz/vert/180 for flips and90r/180/90l for rotation; both signed flips combine
+as180 before rotation. The source bin/tee remains shared perSourceId. Crop
+properties and outputpad rectangle come exclusively from `layout_item`; crop
+u32 edges never reach a signed native property until normalization.
+
+Arbitrary rotation quantizes to the nearest90°; positive45° goes clockwise to90,
+315° wraps to0. One tracing warning and BackendEvent::Warning per placed item
+warn users without repeating on each topology rebuild. Diagnostic tracking is
+bounded by the256 current items and pruned on scene/item removal. Unsupported
+blend modes remain rejected rather than silently approximated in this wave.
+Zero/signed scales, small fit sizes and clamped crops remain negotiable with
+minimum1×1 native output. Full graph updates still use theNULL barrier and may
+briefly interrupt frames; no incremental or GPU support is claimed.

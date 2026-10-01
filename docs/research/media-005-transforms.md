@@ -14,8 +14,9 @@ use180 orientation; one flip uses horiz/vert. Crop happens first. Cardinal
 orientation swaps cropped width/height before layout scaling. Backend and UI
 must use a single pure layout function for the exact rounded output rectangle.
 Nearest-cardinal arbitrary rotation follows existing scene-graph policy and
-emits one bounded diagnostic per item per owner lifetime (cleared at source/scene
-removal). Native tests must compare asymmetric images, not merely solid colors.
+emits one diagnostic per currently retained placement; tracking is cleared when
+an item leaves the selected scene or no scene is active. Returning to a scene
+may warn again, while repeated rebuilds of the same placement do not. Native tests must compare asymmetric images, not merely solid colors.
 
 Production graph changes retain the existing NULL barrier and typed preflight
 validation. New placement elements are removed after request pads are released.

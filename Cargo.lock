@@ -1379,6 +1379,7 @@ name = "prismcast-media-gst"
 version = "0.1.0"
 dependencies = [
  "gstreamer",
+ "prismcast-compositor",
  "prismcast-core",
  "prismcast-media",
  "serde",
