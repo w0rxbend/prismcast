@@ -1350,6 +1350,9 @@ dependencies = [
 [[package]]
 name = "prismcast-compositor"
 version = "0.1.0"
+dependencies = [
+ "prismcast-core",
+]
 
 [[package]]
 name = "prismcast-core"

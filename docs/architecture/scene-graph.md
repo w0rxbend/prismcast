@@ -440,3 +440,28 @@ Stop and Drop release both tee and compositor request pads, unlink branches and
 remove graph children, including partial native additions after failure. Graph
 construction failures report Failed and leave a stopped graph; owners may
 retry via start after reconciling an authoritative snapshot.
+
+## 15. Shared transform geometry (MEDIA-005)
+
+`prismcast_compositor::layout_item(&SceneItem, SourceSize)` is the framework-free
+rendering contract for native graph properties and UI outline/hit testing.
+`ItemLayout.rect` exposes the exact integer pixel rectangle, normalized `crop`
+exposes the actual native edge properties, and `rotated_source_size` gives the
+intrinsic cropped/rotated dimensions before scale for UI resize tools.
+`test_pattern_source_size(&Source)` resolves validated known dimensions, using
+1920×1080 for null or missing settings; other source kinds remain explicit errors.
+
+Transform order is crop -> signed source-axis flips -> cardinal rotation ->
+absolute canvas-axis scale or bounds fit. A 6×4 source rotated90°, scale(-2,3)
+has intrinsic rotated size4×6 and rendered size8×18: the negative X first flips
+the original source horizontally, while magnitudes size the rotated output on
+canvas X/Y axes. Both negative signs flip180° before rotation. Bounds fitting
+uses the rotated cropped dimensions. This clarifies §6's dimension swap before
+sizing; do not substitute conventional source-scale-then-rotate formulas.
+
+Native width/height clamp to at least one pixel only after rounding; anchor and
+bounds alignment use raw float sizes, including zero/subpixel scales. Oversized
+crop edges clamp left/top first, then right/bottom to retain one source pixel,
+without summing raw u32 edges. Finite scale magnitudes clamp to64 as specified;
+resulting extents >8192 or invalid bounds/nonfinite values fail preflight. The
+existing half-away-from-zero position/extent rounding remains unchanged.
