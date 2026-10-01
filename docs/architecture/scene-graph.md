@@ -1,7 +1,7 @@
 # Scene graph → GStreamer compositor mapping
 
 Date: 2026-10-01. Task: `.agent/tasks/ARCH-003.yaml`. Design doc only — implementation
-is MEDIA-003 (compositor) and MEDIA-005 (transform support).
+is MEDIA-003 (CPU prototype) and MEDIA-005 (full transform support). See §14 for implemented scope.
 
 Normative inputs:
 
@@ -396,3 +396,47 @@ the §6/§8 capability bits differ.
    feed into ARCH-004 (media abstraction) if not already covered.
 4. **Arbitrary rotation + Multiply/Screen** require the custom GL/Vulkan element
    (§6, §8); blocked on the same media work, tracked by MEDIA-005.
+
+
+## 14. MEDIA-003 implemented CPU prototype
+
+Native implementation lives in `prismcast-media-gst::GstCompositor`; the
+framework-free `prismcast-compositor` crate remains reserved for composition
+math. `GstCompositor::new(sink: gst::Element)` accepts an unattached native sink.
+GTK adapters create/inspect GTK sinks on the GTK thread and transfer only the
+Send element to the media owner. This crate does not depend on GTK.
+
+`sync_snapshot(&[Source], &Scene)` validates the authoritative source list and
+selected scene before mutating the graph; `clear_scene()` handles no selected
+scene. Source null settings (the domain's initial value) mean test-pattern
+settings defaults. This prototype supports TestPattern sources, positive
+position/scale with top-left anchor, normal opacity, hidden items and stable
+dense z-order. Crop, rotations, alternate anchors, bounds, other blend modes,
+source filters and nested/non-test-pattern sources return explicit errors when
+placed; MEDIA-005 and later source tasks implement them. Disabled sources do
+not run. Each enabled SourceId has one bin and tee; each placed item has one
+downstream-leaky two-buffer queue and compositor request pad. Hidden enabled
+items retain branches with zero alpha. Output is CPU SystemMemory RGBA with
+fixed canvas dimensions, rational frame rate and square pixels. No zero-copy
+claim applies.
+
+Topology changes stop the pipeline to NULL before unlinking: this synchronous
+barrier joins streaming threads, avoiding live-pad races. The prototype then
+reconstructs shared bins, tees and item branches and resumes if previously
+running. This intentionally trades continuity for correctness; streaming-safe
+incremental updates and retention across scene switches remain future work.
+Scene/source names, locked flags and unused source changes do not rebuild an
+unchanged rendered graph. `configure_canvas` applies the latest selected profile
+configuration and emits renegotiation. Validation rejects dimensions outside
+1..8192, nonpositive/oversized rational fps, fps above 240, nonfinite/excessive
+geometry, duplicate IDs and more than 256 items/256 cached scenes/4096 sources.
+
+The compositor is force-live with black background: empty scenes and
+`clear_scene()` continue producing black frames while running. Bus ERROR/EOS
+use an eight-slot nonblocking terminal channel; other native messages are
+dropped. The bounded control event queue retains the latest 32 events. Draining
+terminal events tears down the graph; errors dominate EOS in either order.
+Stop and Drop release both tee and compositor request pads, unlink branches and
+remove graph children, including partial native additions after failure. Graph
+construction failures report Failed and leave a stopped graph; owners may
+retry via start after reconciling an authoritative snapshot.

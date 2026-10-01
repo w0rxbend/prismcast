@@ -80,3 +80,5 @@ pub mod test_pattern;
 pub use test_pattern::{
     build_test_pattern_bin, GstTestPatternSource, Pattern, TestPatternSettings,
 };
+pub mod compositor;
+pub use compositor::GstCompositor;
