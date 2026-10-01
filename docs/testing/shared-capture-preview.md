@@ -49,3 +49,9 @@ interleaving tests and the shared pure dimension test passed. Independent read-o
 media lifecycle review found no remaining blockers after the common pre-mutation
 bus drain fix. The integrated Window fixture test compiled and remains opt-in;
 no portal dialog was opened during this agent's checks.
+
+Timestamp follow-up additionally tests nonzero TIME start/base/time conversion,
+rejection of non-unit applied/playback rates, byte segments, default TIME segments and out-of-range
+PTS. Persistent native producer tests still exercise actual appsink TIME segments.
+Consumer construction rechecks active state under the endpoint installation lock,
+preventing a concurrently retired public feed from attaching a fresh endpoint.
