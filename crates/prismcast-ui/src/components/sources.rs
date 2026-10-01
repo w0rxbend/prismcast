@@ -1,8 +1,7 @@
 //! The sources panel: the shared source list with an add button, per
 //! PLAN.md §28.
 
-use std::sync::Arc;
-
+use crate::bridge::SnapshotRefresh;
 use adw::prelude::*;
 use prismcast_app::AppSnapshot;
 use relm4::{ComponentParts, ComponentSender, SimpleComponent};
@@ -17,7 +16,7 @@ pub struct SourcesPanel {
 #[derive(Debug)]
 pub enum SourcesInput {
     /// A fresh snapshot; the list is rebuilt from it.
-    Refresh(Arc<AppSnapshot>),
+    Refresh(SnapshotRefresh),
 }
 
 #[derive(Debug)]
@@ -67,7 +66,7 @@ impl SimpleComponent for SourcesPanel {
 
     fn update(&mut self, message: Self::Input, _sender: ComponentSender<Self>) {
         match message {
-            SourcesInput::Refresh(snapshot) => self.refresh(&snapshot),
+            SourcesInput::Refresh(snapshot) => self.refresh(&snapshot.read()),
         }
     }
 }

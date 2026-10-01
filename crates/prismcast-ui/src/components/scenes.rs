@@ -6,6 +6,7 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::Arc;
 
+use crate::bridge::SnapshotRefresh;
 use adw::prelude::*;
 use prismcast_app::AppSnapshot;
 use prismcast_core::id::SceneId;
@@ -29,7 +30,7 @@ pub struct ScenesPanel {
 #[derive(Debug, Clone)]
 pub enum ScenesInput {
     /// A fresh snapshot; the list is rebuilt from it.
-    Refresh(Arc<AppSnapshot>),
+    Refresh(SnapshotRefresh),
     /// A row was selected by the user (row index).
     RowSelected(SceneId),
     Rename(SceneId),
@@ -132,7 +133,8 @@ impl SimpleComponent for ScenesPanel {
                     sender.output_sender().emit(ScenesOutput::Select(scene_id));
                 }
             }
-            ScenesInput::Refresh(snapshot) => {
+            ScenesInput::Refresh(refresh) => {
+                let snapshot = refresh.read();
                 self.refresh(&snapshot, &sender);
                 self.snapshot = Some(snapshot);
             }

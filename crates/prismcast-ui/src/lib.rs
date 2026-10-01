@@ -15,9 +15,9 @@
 //! │  ├─ scenes / sources /       │ Command │  └─ CoreActor (owns AppState)│
 //! │  │  outputs panels           ├────────►│        │                     │
 //! │  └─ header / preview /       │ oneshot │        ▼                     │
-//! │     transition bar           │ command │  EventBroadcaster            │
+//! │     transition bar           │ command │  Snapshot watch            │
 //! │           ▲                  │◄────────┤        │                     │
-//! │           │ AppMsg::Pump     │ Sender  │  event pump (tokio task)     │
+//! │           │ AppMsg::Pump     │ Sender  │  snapshot pump (tokio task)     │
 //! └──────────────────────────────┘         └──────────────────────────────┘
 //! ```
 

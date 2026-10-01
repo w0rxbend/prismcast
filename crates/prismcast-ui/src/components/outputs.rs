@@ -1,8 +1,7 @@
 //! The outputs panel: one card per configured output with start/stop
 //! controls, plus an add button, in the bottom bar per PLAN.md §28.
 
-use std::sync::Arc;
-
+use crate::bridge::SnapshotRefresh;
 use adw::prelude::*;
 use prismcast_app::AppSnapshot;
 use prismcast_core::id::OutputId;
@@ -18,7 +17,7 @@ pub struct OutputsPanel {
 #[derive(Debug)]
 pub enum OutputsInput {
     /// A fresh snapshot; the cards are rebuilt from it.
-    Refresh(Arc<AppSnapshot>),
+    Refresh(SnapshotRefresh),
 }
 
 #[derive(Debug)]
@@ -74,7 +73,7 @@ impl SimpleComponent for OutputsPanel {
 
     fn update(&mut self, message: Self::Input, sender: ComponentSender<Self>) {
         match message {
-            OutputsInput::Refresh(snapshot) => self.refresh(&snapshot, &sender),
+            OutputsInput::Refresh(snapshot) => self.refresh(&snapshot.read(), &sender),
         }
     }
 }

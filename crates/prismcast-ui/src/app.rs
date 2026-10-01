@@ -2,15 +2,14 @@
 //! place that talks to the core.
 //!
 //! Every user action becomes a [`Command`] dispatched through
-//! [`AppHandle`] (as a Relm4 *command* whose result lands in
-//! [`AppModel::update_cmd`]); every UI update flows from the core's event
-//! stream — pumped in as [`AppMsg::Pump`] by [`CoreBridge`] — which triggers a
-//! fresh [`AppSnapshot`] read pushed down to the panels. The UI never mutates
+//! [`prismcast_app::AppHandle`] (as a Relm4 *command* whose result lands in
+//! [`AppModel::update_cmd`]); every UI update flows from the core's
+//! snapshot watch — coalesced into [`AppMsg::Pump`] by [`CoreBridge`] — which
+//! triggers latest [`AppSnapshot`] reads in the root and panels. The UI never mutates
 //! domain state directly (AGENTS.md central invariant, PLAN.md §76).
 
 use std::cell::Cell;
 use std::rc::Rc;
-use std::sync::Arc;
 
 use adw::prelude::*;
 use prismcast_app::{AppSnapshot, CommandResponse, HandleError};
@@ -22,7 +21,7 @@ use relm4::component::{AsyncComponent, AsyncComponentParts};
 use relm4::{AsyncComponentSender, Component, ComponentController, Controller};
 use tracing::{debug, info, warn};
 
-use crate::bridge::{CoreBridge, PumpEvent};
+use crate::bridge::{CoreBridge, SnapshotRefresh};
 use crate::components::outputs::{OutputsInput, OutputsOutput, OutputsPanel};
 use crate::components::scenes::{ScenesInput, ScenesOutput, ScenesPanel};
 use crate::components::sources::{SourcesInput, SourcesOutput, SourcesPanel};
@@ -34,11 +33,11 @@ const SOURCE_KIND_CHOICES: [(SourceKind, &str); 2] = [
     (SourceKind::Color, "Solid Color"),
 ];
 
-/// Root component inputs: user intents plus pumped core events.
+/// Root component inputs: user intents plus coalesced snapshot wakeups.
 #[derive(Debug)]
 pub enum AppMsg {
-    /// An item from the core event stream (sent cross-thread by the pump).
-    Pump(PumpEvent),
+    /// A latest-snapshot wakeup (sent cross-thread by the pump).
+    Pump(SnapshotRefresh),
     /// The user selected a scene in the scenes panel.
     SelectScene(SceneId),
     /// Scene edit forwarded to the shared command dispatcher.
@@ -79,6 +78,10 @@ pub enum AppCmd {
 /// and the widgets it updates directly — presentation state only.
 pub struct AppModel {
     bridge: CoreBridge,
+    snapshot_pump: tokio::task::JoinHandle<()>,
+    scene_refresh: SnapshotRefresh,
+    source_refresh: SnapshotRefresh,
+    output_refresh: SnapshotRefresh,
     scenes: Controller<ScenesPanel>,
     sources: Controller<SourcesPanel>,
     outputs: Controller<OutputsPanel>,
@@ -89,7 +92,7 @@ pub struct AppModel {
     toast_overlay: adw::ToastOverlay,
     /// True while the dropdown is being synced from a snapshot, so the
     /// `selected` handler does not echo a `SetTransition` command back.
-    syncing_transition: Cell<bool>,
+    syncing_transition: Rc<Cell<bool>>,
 }
 
 impl AppModel {
@@ -105,12 +108,18 @@ impl AppModel {
     /// and transition selector.
     fn publish_snapshot(&self) {
         let snapshot = self.bridge.handle().snapshot();
-        self.scenes
-            .emit(ScenesInput::Refresh(Arc::clone(&snapshot)));
-        self.sources
-            .emit(SourcesInput::Refresh(Arc::clone(&snapshot)));
-        self.outputs
-            .emit(OutputsInput::Refresh(Arc::clone(&snapshot)));
+        self.scene_refresh.notify(|wake| {
+            self.scenes.emit(ScenesInput::Refresh(wake));
+            true
+        });
+        self.source_refresh.notify(|wake| {
+            self.sources.emit(SourcesInput::Refresh(wake));
+            true
+        });
+        self.output_refresh.notify(|wake| {
+            self.outputs.emit(OutputsInput::Refresh(wake));
+            true
+        });
         self.sync_header(&snapshot);
         self.sync_transition(&snapshot);
     }
@@ -389,11 +398,16 @@ impl AsyncComponent for AppModel {
         toolbar_view.set_content(Some(&toast_overlay));
         root.set_content(Some(&toolbar_view));
 
-        // Transition selector → SetTransition command.
+        let syncing_transition = Rc::new(Cell::new(false));
+        // Suppress rendering notifications in the signal callback, before
+        // they become queued messages and outlive the synchronization flag.
         {
             let input = sender.input_sender().clone();
+            let syncing = Rc::clone(&syncing_transition);
             transition_dropdown.connect_selected_notify(move |dropdown| {
-                input.emit(AppMsg::TransitionSelected(dropdown.selected()));
+                if !syncing.get() {
+                    input.emit(AppMsg::TransitionSelected(dropdown.selected()));
+                }
             });
         }
 
@@ -419,11 +433,18 @@ impl AsyncComponent for AppModel {
             });
         }
 
-        // Core event stream → AppMsg::Pump on the GTK main loop.
-        bridge.spawn_event_pump(sender.input_sender().clone(), AppMsg::Pump);
+        // Committed snapshot publication → coalesced GTK wakeup.
+        let snapshot_pump = bridge.spawn_snapshot_pump(sender.input_sender().clone(), AppMsg::Pump);
+        let scene_refresh = SnapshotRefresh::new(bridge.handle().clone());
+        let source_refresh = SnapshotRefresh::new(bridge.handle().clone());
+        let output_refresh = SnapshotRefresh::new(bridge.handle().clone());
 
         let model = Self {
             bridge,
+            snapshot_pump,
+            scene_refresh,
+            source_refresh,
+            output_refresh,
             scenes,
             sources,
             outputs,
@@ -432,7 +453,7 @@ impl AsyncComponent for AppModel {
             status_label,
             transition_dropdown,
             toast_overlay,
-            syncing_transition: Cell::new(false),
+            syncing_transition,
         };
         model.publish_snapshot();
         AsyncComponentParts { model, widgets: () }
@@ -445,19 +466,12 @@ impl AsyncComponent for AppModel {
         root: &Self::Root,
     ) {
         match message {
-            AppMsg::Pump(pump) => match pump {
-                PumpEvent::Event { seq, event } => {
-                    debug!(seq, ?event, "core event");
-                    self.publish_snapshot();
-                }
-                PumpEvent::Lagged { dropped } => {
-                    warn!(dropped, "event stream lagged; resyncing from snapshot");
-                    self.publish_snapshot();
-                }
-                PumpEvent::Closed => {
-                    info!("core event stream closed");
-                }
-            },
+            AppMsg::Pump(refresh) => {
+                // Acknowledge before reading; watch changes racing this read
+                // either appear now or leave another refresh queued.
+                let _ = refresh.read();
+                self.publish_snapshot();
+            }
             AppMsg::SceneCommand(command) => self.dispatch(&sender, command),
             AppMsg::SelectScene(scene_id) => {
                 self.dispatch(&sender, Command::SetCurrentScene { scene_id });
@@ -519,5 +533,11 @@ impl AsyncComponent for AppModel {
                     .add_toast(adw::Toast::new(&format!("Command failed: {error}")));
             }
         }
+    }
+}
+
+impl Drop for AppModel {
+    fn drop(&mut self) {
+        self.snapshot_pump.abort();
     }
 }

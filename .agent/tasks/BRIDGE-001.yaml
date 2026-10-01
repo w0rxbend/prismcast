@@ -1,18 +1,24 @@
 id: BRIDGE-001
-title: Media-owner bridge (tracked as MEDIA-004)
-goal: >
-  Umbrella pointer: the app<->media<->GTK bridge is implemented by MEDIA-004
-  (application media owner + GTK preview adapter). See .agent/tasks/MEDIA-004.yaml.
-depends_on:
-- MEDIA-003
-- UI-001
+title: Correct core runtime startup and coalesce UI snapshots
+goal: Boot the core inside Tokio and bound snapshot notifications to each UI consumer.
+depends_on: [CORE-001, CORE-003, UI-001]
 allowed_scope:
-  - crates/prismcast-media-gst/
-  - crates/prismcast-media/
-  - crates/prismcast-app/
   - crates/prismcast-ui/
+  - docs/adr/ADR-0012-ui-snapshot-wakeups.md
+  - .agent/tasks/BRIDGE-001.yaml
 acceptance:
-  - see MEDIA-004
+  - CoreBridge boots from a thread without a Tokio context and supports dispatch/shutdown.
+  - Rendering reacts to committed snapshot publication, without event-before-snapshot races.
+  - Root and each panel retain at most one refresh wakeup with latest-value reads.
+  - Snapshot pump is cancelled on component destruction.
+  - Programmatic transition synchronization does not dispatch a command.
 validation:
-  - see MEDIA-004
-status: blocked
+  - cargo test -p prismcast-ui
+  - just ci
+  - just deny
+status: done
+verification:
+  just_ci: pass
+  just_deny: pass
+  ui_tests: 10 pass (5 bridge regressions)
+  gtk_display_smoke: pending integration
