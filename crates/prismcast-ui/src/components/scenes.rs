@@ -107,6 +107,28 @@ impl SimpleComponent for ScenesPanel {
             empty,
             snapshot: None,
         };
+        let keys = gtk::EventControllerKey::new();
+        keys.connect_key_pressed({
+            let list = model.list.clone();
+            let order = model.order.clone();
+            let input = sender.input_sender().clone();
+            move |_, key, _, _| {
+                if key != gtk::gdk::Key::Delete {
+                    return gtk::glib::Propagation::Proceed;
+                }
+                if let Some(scene_id) = list
+                    .selected_row()
+                    .and_then(|row| usize::try_from(row.index()).ok())
+                    .and_then(|index| order.borrow().get(index).copied())
+                {
+                    input.emit(ScenesInput::Remove(scene_id));
+                    gtk::glib::Propagation::Stop
+                } else {
+                    gtk::glib::Propagation::Proceed
+                }
+            }
+        });
+        model.list.add_controller(keys);
         model.list.connect_row_selected({
             let order = model.order.clone();
             let restoring = model.restoring.clone();
@@ -146,45 +168,11 @@ impl SimpleComponent for ScenesPanel {
                 else {
                     return;
                 };
-                let dialog = adw::Dialog::new();
-                dialog.set_title("Rename Scene");
-                dialog.set_content_width(360);
-                let content = gtk::Box::new(gtk::Orientation::Vertical, 12);
-                content.set_margin_top(12);
-                content.set_margin_bottom(12);
-                content.set_margin_start(12);
-                content.set_margin_end(12);
-                let entry = gtk::Entry::new();
-                entry.set_text(&scene.name);
-                entry.set_hexpand(true);
-                let button = gtk::Button::with_label("Rename");
-                button.add_css_class("suggested-action");
-                let submit = {
-                    let entry = entry.clone();
-                    let dialog = dialog.clone();
-                    let input = sender.input_sender().clone();
-                    move || {
-                        let name = entry.text().trim().to_owned();
-                        if !name.is_empty() {
-                            input.emit(ScenesInput::RenameSubmitted { scene_id, name });
-                            dialog.close();
-                        }
-                    }
-                };
-                button.connect_clicked({
-                    let submit = submit.clone();
-                    move |_| submit()
+                let input = sender.input_sender().clone();
+                let (dialog, entry, _) = rename_dialog(&scene.name, move |name| {
+                    input.emit(ScenesInput::RenameSubmitted { scene_id, name });
                 });
-                entry.connect_activate(move |_| submit());
-                entry.connect_changed({
-                    let button = button.clone();
-                    move |entry| button.set_sensitive(!entry.text().trim().is_empty())
-                });
-                content.append(&entry);
-                content.append(&button);
-                dialog.set_child(Some(&content));
-                dialog.present(Some(&self.list));
-                entry.grab_focus();
+                present_rename(&dialog, &entry, &self.list);
             }
             ScenesInput::RenameSubmitted { scene_id, name } => {
                 sender.output_sender().emit(ScenesOutput::Command(Box::new(
@@ -192,10 +180,22 @@ impl SimpleComponent for ScenesPanel {
                 )));
             }
             ScenesInput::Remove(scene_id) => {
-                sender.output_sender().emit(ScenesOutput::Command(Box::new(
-                    Command::RemoveScene { scene_id },
-                )));
+                let Some(scene) = self
+                    .snapshot
+                    .as_ref()
+                    .and_then(|snapshot| snapshot.state().scenes.get(&scene_id))
+                else {
+                    return;
+                };
+                let output = sender.output_sender().clone();
+                let dialog = remove_dialog(&scene.name, move || {
+                    output.emit(ScenesOutput::Command(Box::new(Command::RemoveScene {
+                        scene_id,
+                    })));
+                });
+                dialog.present(Some(&self.list));
             }
+
             ScenesInput::Move { scene_id, delta } => {
                 if let Some(new_index) = move_target(&self.order.borrow(), scene_id, delta) {
                     sender.output_sender().emit(ScenesOutput::Command(Box::new(
@@ -224,7 +224,8 @@ impl ScenesPanel {
         self.empty.set_visible(snapshot.scenes().next().is_none());
         let current = snapshot.current_scene();
         let mut current_row = None;
-        for scene in snapshot.scenes() {
+        let scene_count = snapshot.scenes().count();
+        for (index, scene) in snapshot.scenes().enumerate() {
             let label = gtk::Label::new(Some(&scene.name));
             label.set_xalign(0.0);
             label.set_margin_start(6);
@@ -258,6 +259,11 @@ impl ScenesPanel {
                     _ => "document-edit-symbolic",
                 });
                 button.add_css_class("flat");
+                button.set_sensitive(match title {
+                    "↑" => index > 0,
+                    "↓" => index + 1 < scene_count,
+                    _ => true,
+                });
                 button.set_tooltip_text(Some(match title {
                     "↑" => "Move scene up",
                     "↓" => "Move scene down",
@@ -283,6 +289,91 @@ impl ScenesPanel {
     }
 }
 
+/// Labeled editable row and shared validation for button/Enter submission.
+fn rename_dialog(
+    name: &str,
+    send: impl Fn(String) + 'static,
+) -> (adw::Dialog, adw::EntryRow, gtk::Button) {
+    let dialog = adw::Dialog::new();
+    dialog.set_title("Rename Scene");
+    dialog.set_content_width(360);
+    let toolbar = adw::ToolbarView::new();
+    let header = adw::HeaderBar::new();
+    let button = gtk::Button::with_label("Rename");
+    button.add_css_class("suggested-action");
+    header.pack_end(&button);
+    toolbar.add_top_bar(&header);
+    let entry = adw::EntryRow::new();
+    entry.set_title("Scene name");
+    entry.set_text(name);
+    let group = adw::PreferencesGroup::new();
+    group.add(&entry);
+    let clamp = adw::Clamp::new();
+    clamp.set_margin_top(12);
+    clamp.set_margin_bottom(12);
+    clamp.set_margin_start(12);
+    clamp.set_margin_end(12);
+    clamp.set_child(Some(&group));
+    toolbar.set_content(Some(&clamp));
+    dialog.set_child(Some(&toolbar));
+    let submit = {
+        // Signals live on children of the dialog; weak captures avoid keeping
+        // the closed dialog/editor alive through their own signal closures.
+        let entry = entry.downgrade();
+        let dialog = dialog.downgrade();
+        Rc::new(move || {
+            let Some(entry) = entry.upgrade() else {
+                return;
+            };
+            let name = entry.text().trim().to_owned();
+            if !name.is_empty() {
+                send(name);
+                if let Some(dialog) = dialog.upgrade() {
+                    dialog.close();
+                }
+            }
+        })
+    };
+    button.connect_clicked({
+        let submit = submit.clone();
+        move |_| submit()
+    });
+    entry.connect_entry_activated(move |_| submit());
+    button.set_sensitive(!entry.text().trim().is_empty());
+    entry.connect_changed({
+        let button = button.clone();
+        move |entry| button.set_sensitive(!entry.text().trim().is_empty())
+    });
+    (dialog, entry, button)
+}
+
+fn present_rename(dialog: &adw::Dialog, entry: &adw::EntryRow, parent: &impl IsA<gtk::Widget>) {
+    dialog.present(Some(parent));
+    entry.grab_focus();
+    entry.select_region(0, -1);
+}
+
+/// Removal has no undo inverse in the current core; cancel is the safe default.
+fn remove_dialog(name: &str, send: impl Fn() + 'static) -> adw::AlertDialog {
+    let dialog = adw::AlertDialog::new(
+        Some("Remove Scene?"),
+        Some(&format!(
+            "“{name}” and all its items will be removed. This cannot be undone."
+        )),
+    );
+    dialog.add_response("cancel", "Cancel");
+    dialog.add_response("remove", "Remove");
+    dialog.set_response_appearance("remove", adw::ResponseAppearance::Destructive);
+    dialog.set_default_response(Some("cancel"));
+    dialog.set_close_response("cancel");
+    dialog.connect_response(None, move |_, response| {
+        if response == "remove" {
+            send();
+        }
+    });
+    dialog
+}
+
 fn move_target(order: &[SceneId], scene_id: SceneId, delta: isize) -> Option<usize> {
     let index = order.iter().position(|id| *id == scene_id)?;
     let target = index.checked_add_signed(delta)?;
@@ -302,5 +393,52 @@ mod tests {
         assert_eq!(move_target(&order, first, 1), Some(1));
         assert_eq!(move_target(&order, second, -1), Some(0));
         assert_eq!(move_target(&order, SceneId::new(), 1), None);
+    }
+
+    #[test]
+    #[ignore = "requires a real GTK display; run separately with --ignored --test-threads=1"]
+    fn scene_dialog_signals_validate_names_and_require_explicit_removal() {
+        adw::init().unwrap();
+        let window = adw::Window::new();
+        window.set_default_size(400, 300);
+        window.present();
+        let names = Rc::new(RefCell::new(Vec::new()));
+        let captured = names.clone();
+        let (dialog, entry, rename) = rename_dialog("Current scene", move |name| {
+            captured.borrow_mut().push(name)
+        });
+        present_rename(&dialog, &entry, &window);
+        let context = gtk::glib::MainContext::default();
+        for _ in 0..100 {
+            if !context.pending() {
+                break;
+            }
+            context.iteration(false);
+        }
+        assert_eq!(entry.title(), "Scene name");
+        assert_eq!(entry.selection_bounds(), Some((0, 13)));
+        let focus = gtk::prelude::GtkWindowExt::focus(&window).expect("rename entry focus");
+        assert!(
+            focus.is_ancestor(&entry),
+            "focus must be within the labeled editable row"
+        );
+        entry.set_text("  ");
+        assert!(!rename.is_sensitive());
+        entry.emit_by_name::<()>("entry-activated", &[]);
+        assert!(names.borrow().is_empty());
+        entry.set_text("  Renamed scene  ");
+        assert!(rename.is_sensitive());
+        entry.emit_by_name::<()>("entry-activated", &[]);
+        assert_eq!(*names.borrow(), vec!["Renamed scene"]);
+        let removals = Rc::new(Cell::new(0));
+        let captured = removals.clone();
+        let confirmation = remove_dialog("Current scene", move || captured.set(captured.get() + 1));
+        assert_eq!(confirmation.default_response().as_deref(), Some("cancel"));
+        assert_eq!(confirmation.close_response(), "cancel");
+        confirmation.emit_by_name::<()>("response", &[&"cancel"]);
+        assert_eq!(removals.get(), 0);
+        confirmation.emit_by_name::<()>("response", &[&"remove"]);
+        assert_eq!(removals.get(), 1);
+        window.close();
     }
 }
