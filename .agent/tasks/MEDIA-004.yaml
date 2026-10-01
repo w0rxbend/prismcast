@@ -15,6 +15,8 @@ allowed_scope:
 - Cargo.lock
 - docs/adr/
 - docs/testing/
+- crates/prismcast-preview/
+- deny.toml
 acceptance:
 - GStreamer graph mutation stays off GTK and Tokio execution threads
 - GTK objects never cross Send backend traits or cross-thread channels

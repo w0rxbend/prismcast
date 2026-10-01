@@ -1,92 +1,84 @@
 schema_version: 1
-
 project_phase: phase-2-media-prototype
-
-head_commit: 6f69afb
-
+head_commit: a8cb297
 current_objective: Phase 2 media prototype with bounded UI integration
-
 completed:
-  - RESUME-001
-  - SKILL-001
-  - BOOT-001
-  - BOOT-002
-  - BOOT-003
-  - BOOT-004
-  - ARCH-000
-  - ARCH-001
-  - ARCH-002
-  - ARCH-003
-  - ARCH-004
-  - ARCH-005
-  - ARCH-006
-  - ARCH-007
-  - RES-001
-  - RES-002
-  - RES-003
-  - RES-004
-  - RES-005
-  - RES-006
-  - RES-007
-  - CORE-001
-  - CORE-002
-  - CORE-003
-  - CORE-004
-  - IPC-001
-  - IPC-002
-  - WS-001
-  - UI-001
-
+- RESUME-001
+- SKILL-001
+- BOOT-001
+- BOOT-002
+- BOOT-003
+- BOOT-004
+- ARCH-000
+- ARCH-001
+- ARCH-002
+- ARCH-003
+- ARCH-004
+- ARCH-005
+- ARCH-006
+- ARCH-007
+- RES-001
+- RES-002
+- RES-003
+- RES-004
+- RES-005
+- RES-006
+- RES-007
+- CORE-001
+- CORE-002
+- CORE-003
+- CORE-004
+- IPC-001
+- IPC-002
+- WS-001
+- UI-001
+- MEDIA-001
+- UI-003
+- UI-004
+- BRIDGE-001
+- MEDIA-002
 in_progress:
-  - MEDIA-001
-  - UI-003
-  - BRIDGE-001
-
+- MEDIA-003
 blocked: []
-
 next_candidates:
-  - CORE-005
-  - UI-002
-  - UI-003
-  - UI-004
-  - MEDIA-001
-  - WS-002
-
+- CORE-005
+- UI-002
+- UI-003
+- UI-004
+- MEDIA-001
+- WS-002
 decisions:
-  - ADR-0001
-  - ADR-0002
-  - ADR-0003
-  - ADR-0004
-  - ADR-0005
-  - ADR-0006
-  - ADR-0007
-  - ADR-0008
-  - ADR-0009
-  - ADR-0010
-
+- ADR-0001
+- ADR-0002
+- ADR-0003
+- ADR-0004
+- ADR-0005
+- ADR-0006
+- ADR-0007
+- ADR-0008
+- ADR-0009
+- ADR-0010
+- ADR-0011
+- ADR-0012
 verification:
   cargo_fmt: pass
   cargo_clippy: pass
-  cargo_test: pass  # 344 tests workspace-wide
+  cargo_test: pass
   cargo_deny: pass
-
 last_agent:
-  model: kimi
-  session: orchestrated-waves-1-5
-
+  model: codex
+  session: dynamic-phase-2-wave
 open_questions:
-  - Minimum GStreamer floor 1.26 vs target 1.28 (RES-003/RES-005) — ADR when MEDIA work starts
-  - gst-plugins-rs vendoring: isobmff/wpe2/gopbuffer not distro-packaged (RES-003)
-  - Browser source audio gap in wpe2 (RES-006) — revisit at Phase 11
-  - Group domain type missing for PLAN §8 Group/Ungroup (ARCH-003 follow-up)
-  - Scene-nesting cycle check for SourceKind::Scene in apply() (ARCH-003 follow-up)
-  - Wire StateSnapshot lacks revision field (IPC-001 follow-up, protocol schema change)
-  - Broadcaster unsubscribe API missing (IPC-001 workaround: server-wide fanout)
-  - SystemEvent::PersistenceRecovered core variant needed (CORE-004 follow-up)
-  - SaveProject command missing from core Command enum (CORE-004 follow-up)
-  - Encoder/service registries have no domain home; profiles save empty lists (CORE-004)
-  - Hello.auth challenge-response advertisement needs protocol schema change (WS-001)
-  - IPC 4 MiB vs protocol-doc 1 MiB frame limit inconsistency (WS-001)
-
+- gst-plugins-rs vendoring: isobmff/wpe2/gopbuffer not distro-packaged (RES-003)
+- Browser source audio gap in wpe2 (RES-006) — revisit at Phase 11
+- Group domain type missing for PLAN §8 Group/Ungroup (ARCH-003 follow-up)
+- Scene-nesting cycle check for SourceKind::Scene in apply() (ARCH-003 follow-up)
+- Wire StateSnapshot lacks revision field (IPC-001 follow-up, protocol schema change)
+- Broadcaster unsubscribe API missing (IPC-001 workaround: server-wide fanout)
+- SystemEvent::PersistenceRecovered core variant needed (CORE-004 follow-up)
+- SaveProject command missing from core Command enum (CORE-004 follow-up)
+- Encoder/service registries have no domain home; profiles save empty lists (CORE-004)
+- Hello.auth challenge-response advertisement needs protocol schema change (WS-001)
+- IPC 4 MiB vs protocol-doc 1 MiB frame limit inconsistency (WS-001)
 implementation_access:
   ultracode: dynamic agent orchestration (user clarified); available

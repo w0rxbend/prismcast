@@ -1,67 +1,23 @@
 # Current state
 
-Phase 0 complete; Phase 1 skeleton complete including the GTK shell. Phase 2
-(media prototype) is next and is blocked on GStreamer dev packages.
-344 tests green, fmt/clippy/deny clean.
+Phase 2 media prototype is active. Native GStreamer development libraries are installed at 1.28.2. User clarified UltraCode means dynamic multi-agent orchestration.
 
-## Completed (all)
+## Completed in this wave
 
-- BOOT-001..004, RES-001..007, ARCH-000..007 (see git log / BACKLOG.yaml)
-- CORE-001..004: prismcast-app actor/dispatcher/broadcaster/undo + persistence
-  (XDG layout, atomic writes, .bak recovery, schema v1, debounced actor)
-- IPC-001/002: UDS server + prismcast-cli
-- WS-001: WebSocket transport (shared session machinery with IPC, token auth,
-  disabled by default)
-- UI-001: GTK4/Relm4/libadwaita shell (gtk4 0.11/relm4 0.11/adw 0.9) —
-  scenes/sources/outputs panels driven purely by commands + events + snapshots
+- MEDIA-001: isolated GStreamer initialization, capability inventory and headless lifecycle checks (a2a49e2); ADR-0011 sets GStreamer >=1.26, bindings 0.25/GLib 0.22, workspace Rust MSRV 1.93.
+- MEDIA-002: validated test-pattern SourceBackend and reusable RGBA source bin (a8cb297). Six source tests plus three initialization tests pass; independent review fixes cover settings rollback and fatal-error precedence.
+- UI-003: scene selection/rename/removal/reordering through core Commands (0c0c5a6).
+- UI-004: shared sources versus scene placements, visibility/lock/removal/rename, captured-scene create/place commands and partial failure recovery (eabfcba).
+- BRIDGE-001: corrected Tokio startup context; committed-snapshot watch with independent coalesced root/panel notifications, pump ownership, transition signal guard (ef2f191). UI tests pass after combined merge.
 
-## Architecture decisions (recent)
+## Active workflow
 
-- GTK↔tokio bridge: commands via `AsyncComponentSender::oneshot_command`
-  (tokio sync primitives are executor-agnostic); events via pump task →
-  relm4::Sender → snapshot reads (crates/prismcast-ui/src/bridge.rs, app.rs).
-- Remote session logic is generic over FrameReader/FrameWriter; IPC
-  (length-prefixed MessagePack) and WS (JSON text) share one loop.
-- Persistence: envelope structs + retained-document TOML; unknown fields
-  survive everywhere; dirty-classification covers all 49 commands.
+MEDIA-003 compositor is implementing in `.worktrees/media-001` on agent/MEDIA-003. A second agent independently reviews backend lifecycle and pixel evidence. MEDIA-004 GTK paintable adapter design is prepared; implementation follows compositor API. Keep concrete GTK/GStreamer integration outside UI components in a preview adapter crate, graph mutation on a media owner thread, and frames out of Relm4 messages.
 
-## Tests
+## Validation
 
-`cargo test --workspace`: 344 pass. `just ci` green. GUI not yet smoke-tested
-on a real display.
+Per-task `just ci` and `just deny` passed. Combined UI tests: 13 pass. Native backend tests: 9 pass. Final combined full gates remain after preview integration. Real-display smoke test is pending; display environment exists but no application window has been launched during this wave.
 
-## Known issues / blockers
+## Remaining work
 
-- MEDIA-001 blocked: need `libgstreamer1.0-dev libgstreamer-plugins-base-dev`
-  (+video/audio dev). Runtime 1.28.2 already installed.
-- Follow-ups in STATE.yaml open_questions (PersistenceRecovered event,
-  SaveProject command, encoder/service registry home, frame-limit mismatch).
-
-## Exact next task
-
-After gstreamer dev packages: MEDIA-001 (gst init + backend crate
-prismcast-media-gst) → MEDIA-002 (test pattern source) → MEDIA-003
-(compositor) → MEDIA-004 (preview paintable bridge into UI-001's placeholder)
-per docs/architecture/scene-graph.md. Independent of that: UI-002..004 panel
-polish, CORE-005 undo refinement, WS-002 (rustls wss://).
-
-## Recommended files to read
-
-- .agent/STATE.yaml, .agent/JOURNAL.md
-- docs/architecture/scene-graph.md (compositor mapping for MEDIA-003)
-- crates/prismcast-ui/src/app.rs (UI integration point)
-- crates/prismcast-remote/src/session.rs (shared transport session)
-
-## Commands to reproduce
-
-```bash
-just ci
-cargo run -p prismcast-cli -- ping        # needs a running server
-cargo run -p prismcast                     # needs a display
-```
-
-## Resume audit (2026-10-01, RESUME-001)
-
-MEDIA-001..004 and UI-003/004 now have scoped task files. UI-003/004 are ready; UI-002 still requires MEDIA-004. Baseline `just ci` and `just deny` passed. Implementation awaits requested UltraCode access clarification and native packages: `sudo apt install libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev`. This session cannot authenticate sudo.
-
-Before media implementation resolve the runtime floor/MSRV and preview ownership in ADRs. Add a dedicated media owner; do not run synchronous backend methods on GTK/Tokio threads. Reconcile snapshots after event lag, coalesce UI refresh notifications, and place sources via AddSceneItem so test patterns actually appear. GUI display environment is present, but no window was launched.
+MEDIA-003 -> MEDIA-004 -> UI-002. Other open questions from earlier handoff remain in STATE.yaml. Source/bin builders are in `crates/prismcast-media-gst/src/test_pattern.rs`. MEDIA-004 requires external sink injection, snapshot reconciliation, explicit media shutdown, static gtk4 sink matching current bindings, and documented MPL-2.0 dependency policy.

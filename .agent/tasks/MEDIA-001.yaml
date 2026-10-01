@@ -21,4 +21,4 @@ validation:
 - Focused task tests
 - just ci
 - just deny
-status: blocked
+status: done

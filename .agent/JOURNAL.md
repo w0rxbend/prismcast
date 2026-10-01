@@ -606,3 +606,7 @@ startup wiring `load_*` → `AppHandle::spawn_with_state` (store API is ready).
 2026-10-01 RESUME-001
 
 Read-only media and UI agent audits completed. Created scoped MEDIA-001..004 and UI-003/004 task specs; marked UI-003/004 ready because UI-001 is done. Baseline just ci and just deny passed. Native GStreamer development packages remain absent; sudo requires interactive authentication. UltraCode was requested but is not exposed as a tool/executable; access clarification pending. No application implementation or GUI launch performed. Audit identified missing media owner, source placement gap, unbounded UI event forwarding, and MSRV/binding version decisions to resolve before media work.
+
+2026-10-01 Phase 2 wave, MEDIA-001/UI-003/UI-004/BRIDGE-001
+
+User installed native GStreamer development packages and clarified UltraCode as dynamic multi-agent orchestration. Integrated isolated worktree implementations: GStreamer initialization/capabilities (a2a49e2), scenes (0c0c5a6), runtime startup/coalesced snapshot refresh (ef2f191), and source placements (eabfcba). Per-task CI/deny passed; combined UI tests 13 pass. Scene/source controls and bounded snapshot tokens preserved during conflict resolution. MEDIA-002 now active; MEDIA-003 and MEDIA-004 remain dependent next steps.

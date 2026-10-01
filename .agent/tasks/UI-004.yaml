@@ -18,4 +18,4 @@ validation:
 - Focused task tests
 - just ci
 - just deny
-status: ready
+status: done

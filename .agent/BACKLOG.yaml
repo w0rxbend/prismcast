@@ -135,17 +135,17 @@ tasks:
     title: Initialize GStreamer
     priority: 50
     depends_on: [BOOT-001, RES-003]
-    status: in_progress
+    status: done
   - id: MEDIA-002
     title: Test-pattern source
     priority: 51
     depends_on: [MEDIA-001, ARCH-004]
-    status: blocked
+    status: done
   - id: MEDIA-003
     title: Compositor
     priority: 52
     depends_on: [MEDIA-002]
-    status: blocked
+    status: in_progress
   - id: MEDIA-004
     title: GTK preview bridge (gtk4paintablesink)
     priority: 53
@@ -172,12 +172,12 @@ tasks:
     title: Scene list panel
     priority: 56
     depends_on: [UI-001]
-    status: in_progress
+    status: done
   - id: UI-004
     title: Source list panel
     priority: 57
     depends_on: [UI-001]
-    status: ready
+    status: done
 
   # --- IPC (Phase 1) ---
   - id: IPC-001
