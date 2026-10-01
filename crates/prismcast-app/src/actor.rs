@@ -38,6 +38,10 @@ use prismcast_core::event::Event;
 use prismcast_core::state::{apply, AppState};
 
 use crate::broadcaster::{EventBroadcaster, EventFilter, EventStream};
+use crate::capture::{
+    validate_runtime, CaptureAuthorizationRequest, CaptureOwner, CaptureParentWindow,
+    CaptureRuntimeHandle, CAPTURE_CAPACITY,
+};
 use crate::dispatch::{Permissions, Query, QueryResponse};
 use crate::persistence::PersistenceHandle;
 use crate::snapshot::AppSnapshot;
@@ -45,6 +49,10 @@ use crate::undo::{
     bounded_size, validate_json, validate_structure, UndoEntry, UndoLimits, UndoService,
     DEFAULT_UNDO_CAPACITY,
 };
+use prismcast_core::{
+    CaptureGeneration, CaptureStatus, SourceEvent, SourceId, SourceRuntime, SystemEvent,
+};
+use std::collections::HashMap;
 
 /// Default capacity of the command channel.
 pub const DEFAULT_COMMAND_CAPACITY: usize = 64;
@@ -103,6 +111,8 @@ pub struct CommandEnvelope {
     pub permissions: Permissions,
     /// Identity of the originating controller, independent of permissions.
     pub controller_id: AppControllerId,
+    /// Optional validated local-only parent context, never serialized.
+    pub capture_parent_window: Option<CaptureParentWindow>,
     /// Typed reply: `Ok(CommandResponse)` or the core [`Error`] (validation,
     /// unauthorized, not-found, ...).
     pub reply: oneshot::Sender<Result<CommandResponse, Error>>,
@@ -120,7 +130,18 @@ pub enum HandleError {
     Core(#[from] Error),
 }
 
-enum ActorMessage {
+pub(crate) enum ActorMessage {
+    AttachCaptureOwner {
+        tx: mpsc::Sender<ActorMessage>,
+        snapshots: watch::Receiver<Arc<AppSnapshot>>,
+        reply: oneshot::Sender<Result<CaptureOwner, Error>>,
+    },
+    CaptureRuntime {
+        owner_id: uuid::Uuid,
+        source_id: SourceId,
+        runtime: SourceRuntime,
+        reply: oneshot::Sender<Result<(), Error>>,
+    },
     Command(Box<CommandEnvelope>),
     Undo {
         permissions: Permissions,
@@ -196,6 +217,9 @@ impl AppHandle {
             snapshot_tx,
             rx,
             persistence,
+            capture: None,
+            capture_runtime: HashMap::new(),
+            capture_generation: 0,
         };
         tokio::spawn(actor.run());
         Self {
@@ -236,11 +260,53 @@ impl AppHandle {
         command: Command,
         permissions: Permissions,
     ) -> Result<CommandResponse, HandleError> {
+        self.dispatch_context(command, permissions, None).await
+    }
+
+    /// Explicit local authorization with immutable exported parent context.
+    pub async fn authorize_source_capture(
+        &self,
+        source_id: SourceId,
+        parent_window: Option<String>,
+    ) -> Result<CommandResponse, HandleError> {
+        let parent = parent_window.map(CaptureParentWindow::new).transpose()?;
+        self.dispatch_context(
+            Command::AuthorizeSourceCapture { source_id },
+            Permissions::admin(),
+            parent,
+        )
+        .await
+    }
+
+    /// Attaches the single trusted capture owner. Remote interfaces never expose this API.
+    pub async fn attach_capture_owner(&self) -> Result<CaptureOwner, HandleError> {
+        let (reply, result) = oneshot::channel();
+        self.tx
+            .send(ActorMessage::AttachCaptureOwner {
+                tx: self.tx.clone(),
+                snapshots: self.subscribe_snapshots(),
+                reply,
+            })
+            .await
+            .map_err(|_| HandleError::Shutdown)?;
+        result
+            .await
+            .map_err(|_| HandleError::Shutdown)?
+            .map_err(HandleError::Core)
+    }
+
+    async fn dispatch_context(
+        &self,
+        command: Command,
+        permissions: Permissions,
+        capture_parent_window: Option<CaptureParentWindow>,
+    ) -> Result<CommandResponse, HandleError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.tx
             .send(ActorMessage::Command(Box::new(CommandEnvelope {
                 command,
                 controller_id: self.controller_id,
+                capture_parent_window,
                 permissions,
                 reply: reply_tx,
             })))
@@ -435,6 +501,14 @@ struct CoreActor {
     snapshot_tx: watch::Sender<Arc<AppSnapshot>>,
     rx: mpsc::Receiver<ActorMessage>,
     persistence: Option<PersistenceHandle>,
+    capture: Option<CaptureAttachment>,
+    capture_runtime: HashMap<SourceId, SourceRuntime>,
+    capture_generation: u64,
+}
+struct CaptureAttachment {
+    owner_id: uuid::Uuid,
+    requests: mpsc::Sender<CaptureAuthorizationRequest>,
+    closed: oneshot::Receiver<()>,
 }
 
 /// Measures variable payloads before the domain inverse clones them. Transactions
@@ -499,12 +573,41 @@ fn prepare_inverse(
     Ok(inverse)
 }
 
+async fn capture_owner_closed(owner: &mut Option<CaptureAttachment>) {
+    if let Some(owner) = owner {
+        let _ = (&mut owner.closed).await;
+    } else {
+        std::future::pending::<()>().await;
+    }
+}
+
 impl CoreActor {
     #[instrument(name = "core_actor", skip_all)]
     async fn run(mut self) {
         info!("core actor started");
-        while let Some(message) = self.rx.recv().await {
+        loop {
+            let message = tokio::select! {
+                biased;
+                _ = capture_owner_closed(&mut self.capture) => { self.capture_disconnected(); continue; }
+                message = self.rx.recv() => match message { Some(message) => message, None => break },
+            };
             match message {
+                ActorMessage::AttachCaptureOwner {
+                    tx,
+                    snapshots,
+                    reply,
+                } => {
+                    let result = self.attach_capture(tx, snapshots);
+                    let _ = reply.send(result);
+                }
+                ActorMessage::CaptureRuntime {
+                    owner_id,
+                    source_id,
+                    runtime,
+                    reply,
+                } => {
+                    let _ = reply.send(self.report_capture(owner_id, source_id, runtime));
+                }
                 ActorMessage::Command(envelope) => self.handle_command(envelope),
                 ActorMessage::Undo { permissions, reply } => {
                     let _ = reply.send(self.handle_undo(permissions));
@@ -557,15 +660,202 @@ impl CoreActor {
         info!("core actor stopped");
     }
 
+    fn attach_capture(
+        &mut self,
+        tx: mpsc::Sender<ActorMessage>,
+        snapshots: watch::Receiver<Arc<AppSnapshot>>,
+    ) -> Result<CaptureOwner, Error> {
+        if self.capture.is_some() {
+            return Err(Error::InvalidInput(
+                "capture owner is already attached".into(),
+            ));
+        }
+        let owner_id = uuid::Uuid::new_v4();
+        let (requests, rx) = mpsc::channel(CAPTURE_CAPACITY);
+        let (liveness, closed) = oneshot::channel();
+        self.capture = Some(CaptureAttachment {
+            owner_id,
+            requests,
+            closed,
+        });
+        Ok(CaptureOwner {
+            requests: rx,
+            runtime: CaptureRuntimeHandle { tx, owner_id },
+            snapshots,
+            _liveness: liveness,
+        })
+    }
+
+    fn authorize_capture(
+        &mut self,
+        source_id: SourceId,
+        parent: Option<CaptureParentWindow>,
+    ) -> Result<CommandResponse, Error> {
+        let command = Command::AuthorizeSourceCapture { source_id };
+        let mut events = apply(&mut self.state, &command)?;
+        if !self.capture_runtime.contains_key(&source_id)
+            && self.capture_runtime.len() >= CAPTURE_CAPACITY
+        {
+            return Err(Error::InvalidInput(
+                "capture runtime capacity exhausted".into(),
+            ));
+        }
+        let owner = self
+            .capture
+            .as_ref()
+            .ok_or_else(|| Error::InvalidInput("capture owner is unavailable".into()))?;
+        let permit = owner.requests.clone().try_reserve_owned().map_err(|_| {
+            Error::InvalidInput("capture request receiver is full or unavailable".into())
+        })?;
+        self.capture_generation = self
+            .capture_generation
+            .checked_add(1)
+            .ok_or_else(|| Error::InvalidInput("capture generation exhausted".into()))?;
+        let generation = CaptureGeneration::new(self.capture_generation);
+        let runtime = SourceRuntime {
+            generation,
+            status: CaptureStatus::Authorizing,
+            dimensions: None,
+            message: None,
+        };
+        self.capture_runtime.insert(source_id, runtime.clone());
+        events.push(Event::Source(SourceEvent::RuntimeChanged {
+            source_id,
+            runtime: Some(runtime),
+        }));
+        let events = self.commit(events);
+        // Reserved admission cannot be lost to queue saturation; publish first
+        // so the receiver sees this generation in its initial snapshot read.
+        permit.send(CaptureAuthorizationRequest {
+            source_id,
+            generation,
+            parent_window: parent.map(|p| p.0),
+        });
+        Ok(CommandResponse {
+            label: command.label(),
+            events,
+        })
+    }
+
+    fn report_capture(
+        &mut self,
+        owner_id: uuid::Uuid,
+        source_id: SourceId,
+        runtime: SourceRuntime,
+    ) -> Result<(), Error> {
+        if self.capture.as_ref().map(|o| o.owner_id) != Some(owner_id) {
+            return Err(Error::Unauthorized(
+                "capture owner capability is stale".into(),
+            ));
+        }
+        validate_runtime(&runtime)?;
+        let source = self
+            .state
+            .source(source_id)
+            .ok_or_else(|| Error::NotFound(format!("source {source_id}")))?;
+        if !source.enabled
+            || !matches!(
+                source.kind,
+                prismcast_core::SourceKind::PipeWireDisplay
+                    | prismcast_core::SourceKind::PipeWireWindow
+            )
+        {
+            return Err(Error::InvalidInput("capture source is inactive".into()));
+        }
+        let previous = self
+            .capture_runtime
+            .get(&source_id)
+            .ok_or_else(|| Error::InvalidInput("capture request is no longer current".into()))?;
+        if previous.generation != runtime.generation {
+            return Err(Error::InvalidInput("capture generation is stale".into()));
+        }
+        if *previous == runtime {
+            return Ok(());
+        }
+        if !matches!(
+            previous.status,
+            CaptureStatus::Authorizing | CaptureStatus::Active
+        ) {
+            return Err(Error::InvalidInput(
+                "capture generation is already terminal".into(),
+            ));
+        }
+        self.capture_runtime.insert(source_id, runtime.clone());
+        self.commit(vec![Event::Source(SourceEvent::RuntimeChanged {
+            source_id,
+            runtime: Some(runtime),
+        })]);
+        Ok(())
+    }
+
+    fn capture_disconnected(&mut self) {
+        self.capture = None;
+        let mut events = Vec::new();
+        for (source_id, runtime) in &mut self.capture_runtime {
+            if matches!(
+                runtime.status,
+                CaptureStatus::Authorizing | CaptureStatus::Active
+            ) {
+                runtime.status = CaptureStatus::Failed;
+                runtime.dimensions = None;
+                runtime.message =
+                    Some("Capture service disconnected; authorize again to retry".into());
+                events.push(Event::Source(SourceEvent::RuntimeChanged {
+                    source_id: *source_id,
+                    runtime: Some(runtime.clone()),
+                }));
+            }
+        }
+        if !events.is_empty() {
+            self.commit(events);
+        }
+    }
+
+    fn invalidate_capture(&mut self, events: &mut Vec<Event>) {
+        let clear_all = events.iter().any(|e| {
+            matches!(
+                e,
+                Event::System(
+                    SystemEvent::ProfileSelected { .. } | SystemEvent::CollectionSelected { .. }
+                )
+            )
+        });
+        let mut ids = Vec::new();
+        if clear_all {
+            ids.extend(self.capture_runtime.keys().copied());
+        } else {
+            for event in events.iter() {
+                if let Event::Source(
+                    SourceEvent::Removed { source_id }
+                    | SourceEvent::SettingsChanged { source_id }
+                    | SourceEvent::EnabledChanged { source_id, .. },
+                ) = event
+                {
+                    ids.push(*source_id);
+                }
+            }
+        }
+        for source_id in ids {
+            if self.capture_runtime.remove(&source_id).is_some() {
+                events.push(Event::Source(SourceEvent::RuntimeChanged {
+                    source_id,
+                    runtime: None,
+                }));
+            }
+        }
+    }
+
     fn handle_command(&mut self, envelope: Box<CommandEnvelope>) {
         let CommandEnvelope {
             command,
             controller_id,
+            capture_parent_window,
             permissions,
             reply,
         } = *envelope;
         debug!(command = command.label(), %permissions, "dispatching command");
-        let result = self.apply_authorized(&command, &permissions, controller_id);
+        let result =
+            self.apply_authorized(&command, &permissions, controller_id, capture_parent_window);
         if reply.send(result).is_err() {
             debug!("caller dropped reply channel before command completed");
         }
@@ -576,10 +866,14 @@ impl CoreActor {
         command: &Command,
         permissions: &Permissions,
         controller_id: AppControllerId,
+        capture_parent_window: Option<CaptureParentWindow>,
     ) -> Result<CommandResponse, Error> {
         // Authorization checkpoint: reject before touching state (ADR-0005).
         validate_structure(command, self.undo_limits)?;
         permissions.check(command)?;
+        if let Command::AuthorizeSourceCapture { source_id } = command {
+            return self.authorize_capture(*source_id, capture_parent_window);
+        }
         let label = command.label();
         // Inverse must be computed against the pre-application state (PLAN §59).
         let inverse = prepare_inverse(&self.state, command, self.undo_limits)?;
@@ -710,7 +1004,8 @@ impl CoreActor {
 
     /// Broadcasts committed events (with sequence numbers) and publishes the
     /// post-command snapshot. Called only after a successful apply.
-    fn commit(&mut self, events: Vec<Event>) -> Vec<Event> {
+    fn commit(&mut self, mut events: Vec<Event>) -> Vec<Event> {
+        self.invalidate_capture(&mut events);
         for event in &events {
             self.broadcaster.publish(self.next_seq, event);
             self.next_seq += 1;
@@ -719,7 +1014,11 @@ impl CoreActor {
         // Receivers that lag see only the latest snapshot — by design.
         if self
             .snapshot_tx
-            .send(AppSnapshot::new(self.revision, self.state.clone()))
+            .send(AppSnapshot::with_runtime(
+                self.revision,
+                self.state.clone(),
+                self.capture_runtime.clone(),
+            ))
             .is_err()
         {
             debug!("no snapshot receivers");

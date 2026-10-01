@@ -42,7 +42,7 @@ use prismcast_protocol::data::{
 use prismcast_protocol::request::RequestKind;
 use uuid::Uuid;
 
-/// All 49 core command variants paired with their wire representation.
+/// All 50 core command variants paired with their wire representation.
 /// Field values are identical on both sides so representability — not just
 /// name alignment — is exercised.
 fn command_pairs() -> Vec<(Command, RequestKind)> {
@@ -288,6 +288,10 @@ fn command_pairs() -> Vec<(Command, RequestKind)> {
                 source_id: source,
                 settings: serde_json::json!({"device": "/dev/video0"}),
             },
+        ),
+        (
+            Command::AuthorizeSourceCapture { source_id },
+            RequestKind::AuthorizeSourceCapture { source_id: source },
         ),
         (
             Command::SetSourceEnabled {
@@ -553,9 +557,9 @@ fn command_pairs() -> Vec<(Command, RequestKind)> {
 fn every_core_command_is_representable_as_a_request() {
     let pairs = command_pairs();
 
-    // Pin the current command surface: 49 variants today. When core adds a
+    // Pin the current command surface: 50 variants today. When core adds a
     // command, extend `command_pairs` and bump this count in the same commit.
-    assert_eq!(pairs.len(), 49, "core command surface changed");
+    assert_eq!(pairs.len(), 50, "core command surface changed");
 
     let mut core_tags = BTreeSet::new();
     let mut wire_tags = BTreeSet::new();
