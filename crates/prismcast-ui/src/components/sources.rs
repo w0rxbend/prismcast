@@ -154,31 +154,16 @@ impl SourcesPanel {
                 let row = source_row(&source.name, source_kind_label(&source.kind));
                 let scene_id = scene.id;
                 let item_id = item.id;
-                for (label, active, command) in [
-                    (
-                        "Visible",
-                        item.visible,
-                        Command::SetSceneItemVisible {
-                            scene_id,
-                            item_id,
-                            visible: !item.visible,
-                        },
-                    ),
-                    (
-                        "Locked",
-                        item.locked,
-                        Command::SetSceneItemLocked {
-                            scene_id,
-                            item_id,
-                            locked: !item.locked,
-                        },
-                    ),
+                for (label, active, field) in [
+                    ("Visible", item.visible, ItemToggle::Visible),
+                    ("Locked", item.locked, ItemToggle::Locked),
                 ] {
                     let toggle = gtk::CheckButton::with_label(label);
+                    // Render before connecting so snapshot initialization emits no command.
                     toggle.set_active(active);
                     let input = sender.input_sender().clone();
-                    toggle.connect_toggled(move |_| {
-                        input.emit(SourcesInput::Command(Box::new(command.clone())))
+                    connect_item_toggle(&toggle, scene_id, item_id, field, move |command| {
+                        input.emit(SourcesInput::Command(Box::new(command)));
                     });
                     row.append(&toggle);
                 }
@@ -236,6 +221,38 @@ impl SourcesPanel {
     }
 }
 
+#[derive(Clone, Copy)]
+enum ItemToggle {
+    Visible,
+    Locked,
+}
+
+/// Read the signal's current value: multiple user toggles can occur before the
+/// next committed snapshot refresh and must not reuse its stale inverse.
+fn connect_item_toggle(
+    toggle: &gtk::CheckButton,
+    scene_id: prismcast_core::SceneId,
+    item_id: prismcast_core::SceneItemId,
+    field: ItemToggle,
+    send: impl Fn(Command) + 'static,
+) {
+    toggle.connect_toggled(move |toggle| {
+        let active = toggle.is_active();
+        send(match field {
+            ItemToggle::Visible => Command::SetSceneItemVisible {
+                scene_id,
+                item_id,
+                visible: active,
+            },
+            ItemToggle::Locked => Command::SetSceneItemLocked {
+                scene_id,
+                item_id,
+                locked: active,
+            },
+        });
+    });
+}
+
 fn source_row(name: &str, kind: &str) -> gtk::Box {
     let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     let label = gtk::Label::new(Some(name));
@@ -264,4 +281,68 @@ fn command_button(
     let input = sender.input_sender().clone();
     button.connect_clicked(move |_| input.emit(SourcesInput::Command(Box::new(command.clone()))));
     row.append(&button);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{cell::RefCell, rc::Rc};
+
+    #[test]
+    #[ignore = "requires a real GTK display; run with --ignored --test-threads=1"]
+    fn rapid_visible_and_locked_toggles_keep_final_signal_value() {
+        gtk::init().unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let handle = prismcast_app::AppHandle::spawn(prismcast_app::CoreConfig::default());
+            handle
+                .dispatch(Command::AddScene {
+                    name: "Toggle target".into(),
+                })
+                .await
+                .unwrap();
+            let scene_id = handle.snapshot().current_scene().unwrap();
+            handle
+                .dispatch(Command::AddSource {
+                    kind: prismcast_core::SourceKind::TestPattern,
+                    name: "Pattern".into(),
+                })
+                .await
+                .unwrap();
+            let source_id = handle.snapshot().sources().next().unwrap().id;
+            handle
+                .dispatch(Command::AddSceneItem {
+                    scene_id,
+                    source_id,
+                })
+                .await
+                .unwrap();
+            let item_id = handle.snapshot().state().scenes[&scene_id].items[0].id;
+            let pending = Rc::new(RefCell::new(Vec::new()));
+            for (field, initial) in [(ItemToggle::Visible, true), (ItemToggle::Locked, false)] {
+                let toggle = gtk::CheckButton::new();
+                toggle.set_active(initial);
+                let commands = pending.clone();
+                connect_item_toggle(&toggle, scene_id, item_id, field, move |command| {
+                    commands.borrow_mut().push(command)
+                });
+                // Deliberately do not dispatch or render between the two GTK signals.
+                toggle.set_active(!initial);
+                toggle.set_active(initial);
+            }
+            let commands: Vec<_> = pending.borrow_mut().drain(..).collect();
+            assert_eq!(commands.len(), 4);
+            for command in commands {
+                handle.dispatch(command).await.unwrap();
+            }
+            let snapshot = handle.snapshot();
+            let item = &snapshot.state().scenes[&scene_id].items[0];
+            assert!(item.visible, "second visibility signal must win");
+            assert!(!item.locked, "second lock signal must win");
+            handle.shutdown().await;
+        });
+    }
 }
