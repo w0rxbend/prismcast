@@ -4,6 +4,7 @@ members = [
     "crates/prismcast-core",
     "crates/prismcast-app",
     "crates/prismcast-media",
+    "crates/prismcast-capture",
     "crates/prismcast-media-gst",
     "crates/prismcast-compositor",
     "crates/prismcast-audio",
