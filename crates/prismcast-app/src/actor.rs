@@ -49,9 +49,7 @@ use crate::undo::{
     bounded_size, validate_json, validate_structure, UndoEntry, UndoLimits, UndoService,
     DEFAULT_UNDO_CAPACITY,
 };
-use prismcast_core::{
-    CaptureGeneration, CaptureStatus, SourceEvent, SourceId, SourceRuntime, SystemEvent,
-};
+use prismcast_core::{CaptureGeneration, CaptureStatus, SourceEvent, SourceId, SourceRuntime};
 use std::collections::HashMap;
 
 /// Default capacity of the command channel.
@@ -575,7 +573,10 @@ fn prepare_inverse(
 
 async fn capture_owner_closed(owner: &mut Option<CaptureAttachment>) {
     if let Some(owner) = owner {
-        let _ = (&mut owner.closed).await;
+        tokio::select! {
+            _ = &mut owner.closed => {},
+            _ = owner.requests.closed() => {},
+        }
     } else {
         std::future::pending::<()>().await;
     }
@@ -812,27 +813,17 @@ impl CoreActor {
     }
 
     fn invalidate_capture(&mut self, events: &mut Vec<Event>) {
-        let clear_all = events.iter().any(|e| {
-            matches!(
-                e,
-                Event::System(
-                    SystemEvent::ProfileSelected { .. } | SystemEvent::CollectionSelected { .. }
-                )
-            )
-        });
+        // Profile/collection selection currently changes only an active ID;
+        // existing shared source grants survive canvas/scene graph rebuilds.
         let mut ids = Vec::new();
-        if clear_all {
-            ids.extend(self.capture_runtime.keys().copied());
-        } else {
-            for event in events.iter() {
-                if let Event::Source(
-                    SourceEvent::Removed { source_id }
-                    | SourceEvent::SettingsChanged { source_id }
-                    | SourceEvent::EnabledChanged { source_id, .. },
-                ) = event
-                {
-                    ids.push(*source_id);
-                }
+        for event in events.iter() {
+            if let Event::Source(
+                SourceEvent::Removed { source_id }
+                | SourceEvent::SettingsChanged { source_id }
+                | SourceEvent::EnabledChanged { source_id, .. },
+            ) = event
+            {
+                ids.push(*source_id);
             }
         }
         for source_id in ids {
