@@ -45,10 +45,12 @@ completed:
 - CAPTURE-001
 - CAPTURE-002
 - CAPTURE-003
+- WS-002
 in_progress: []
 blocked: []
 next_candidates:
-- WS-002
+- OBSWS-001
+- WS-003
 decisions:
 - ADR-0001
 - ADR-0002
@@ -79,6 +81,8 @@ verification:
   native_display_regressions: pass
   v4l2_camera: live_probe_pass_anker_powerconf_c200_640x480
   v4l2_discovery: live_enumeration_pass_show_all_devices_required
+  ws_auth: challenge_response_ws_ipc_integration_pass
+  cli_auth: password_token_e2e_real_socket_pass
 last_agent:
   model: kimi-code
   session: capture-003-orchestration
@@ -103,7 +107,9 @@ open_questions:
 - SystemEvent::PersistenceRecovered core variant needed (CORE-004 follow-up)
 - SaveProject command missing from core Command enum (CORE-004 follow-up)
 - Encoder/service registries have no domain home; profiles save empty lists (CORE-004)
-- Hello.auth challenge-response advertisement needs protocol schema change (WS-001)
-- IPC 4 MiB vs protocol-doc 1 MiB frame limit inconsistency (WS-001)
+- Broadcaster unsubscribe API missing; server-wide fanout workaround remains (IPC-001/WS-002)
+- Meter event producer absent (media/audio layer); throttling machinery exists but is unexercised against real load
+- TLS wss:// and non-loopback bind deferred to WS-003; msgpack subprotocol reserved but unimplemented
+- obs-websocket 5.x compatibility adapter deferred to OBSWS-001 (ADR-0010; last prerequisite was WS-002 auth)
 implementation_access:
   ultracode: dynamic agent orchestration (user clarified); available

@@ -1,11 +1,61 @@
 # Current state
 
-CAPTURE-003 (V4L2 camera discovery and capture) is implemented and integrated
-on agent/CAPTURE-003 via five delegated worktree agents (capture, core+app,
-media-gst, preview, ui) under kimi-code orchestration, preceded by ADR-0019
-and docs/research/v4l2-gst-device-monitor.md per project rule. CAPTURE-002's
-integrated live window preview remains UNVERIFIED and is the immediate
-follow-up; a raw consumer-frame diagnostic is armed for it.
+WS-002 (challenge-response auth + protocol consistency) is implemented and
+integrated on agent/WS-002 via parallel worktree agents under kimi-code
+orchestration. CAPTURE-003 (V4L2 cameras) shipped before it on main
+(379b6e9). CAPTURE-002's integrated live window preview remains UNVERIFIED
+and is the longest-standing follow-up; a raw consumer-frame diagnostic is
+armed for it.
+
+## Implemented (WS-002)
+
+- AuthConfig::Password { password, salt, permissions }: per-server salt,
+  per-session challenge advertised in Hello.authentication; obs-websocket
+  SHA-256 construction (base64(sha256(base64(sha256(password+salt)) +
+  challenge))) in one shared helper (auth.rs challenge_response). Wrong/
+  missing responses close 4009 via existing machinery. remote.toml `password`
+  key; password+token together is a parse error. AuthConfig Debug redacts
+  secrets. Non-constant-time comparison documented (localhost scope).
+- ClientAuth enum { None, Token(String), Password(String) } in
+  prismcast-remote (client.rs, re-exported at root); IpcClientConfig and
+  WsClientConfig gained `auth` while the legacy `token` field remains with
+  auth-wins-unless-None resolution, so 21 pre-existing integration tests are
+  literally unchanged. Clients answer the Hello challenge; absent challenge
+  with Password config is a client-side decode error.
+- prismcast-cli: --token/--password flags with PRISMCAST_TOKEN/
+  PRISMCAST_PASSWORD env fallbacks (hide_env_values), mutual exclusion is a
+  usage error (exit 2), secrets never printed.
+- native-protocol.md documents implemented challenge-response, per-transport
+  frame limits (IPC 4 MiB trusted local 0600 socket; WS 1 MiB untrusted
+  network), and the pre-identify invalid-subscription close (no request ID
+  exists to answer). No protocol schema change; golden tripwire intact.
+
+## Evidence
+
+just ci green on the integrated branch (fmt, clippy -D warnings, workspace
+tests, deny — sha2/base64/rand admitted; rand duplicate-version warn allowed).
+New: 6 auth unit tests (known vector, salt stability, challenge freshness,
+failure matrix, toml parse, redaction), 6 IPC + 7 WS auth integration tests,
+3 CLI e2e tests over real sockets (password/token success, wrong/missing auth
+4009, no secret leakage). No live hardware or external validation needed.
+
+## Next and remaining limits
+
+Immediate: user-coordinated picker retry for the CAPTURE-002 integrated
+window preview (diagnostic armed; select the small flashing red/blue window
+titled "Prismcast capture test target – select this window"). Next tasks:
+OBSWS-001 obs-websocket adapter (ADR-0010; unblocked now that auth exists) or
+WS-003 TLS wss:// + non-loopback bind. Deferred: meter event producer
+(media/audio layer; throttling machinery unexercised), broadcaster
+unsubscribe API (retires server-wide fanout workaround), msgpack subprotocol,
+general-category event producers, admin kick/session listing. Monitor/KDE/X11
+capture validation and camera unplug UX remain unverified. UI live camera
+preview pixels with real hardware are unverified end-to-end (headless and
+probe evidence only). Wire-exposed camera device listing needs a protocol
+schema change (follow-up). Prior overlapping edits remain archived on
+archive/paused-agent-phase2 (2ce3390); do not reapply wholesale. Worktrees
+.worktrees/ws-002-* and .worktrees/capture-003-* remain reviewable. Never
+persist grants/FDs/device sessions.
 
 ## Implemented (CAPTURE-003)
 
@@ -58,13 +108,3 @@ titled "Prismcast capture test target – select this window" (small flashing
 red/blue 480x270), NOT "Prismcast capture preview" and not a maximized window.
 Do not open another dialog without user confirmation.
 
-## Next and remaining limits
-
-Coordinate the picker retry with the user (raw probe first, then integrated
-test), then WS-002 or monitor/KDE/X11 capture validation. Wire-exposed camera
-device listing needs a protocol schema change (follow-up). UI live camera
-preview pixels with real hardware remain unverified end-to-end (headless and
-probe evidence only). Prior overlapping edits remain archived on
-archive/paused-agent-phase2 (2ce3390); do not reapply wholesale. All wave
-worktrees under .worktrees/capture-003-* remain reviewable. Never persist
-grants/FDs/device sessions.
