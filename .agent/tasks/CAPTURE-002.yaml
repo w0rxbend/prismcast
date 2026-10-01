@@ -31,4 +31,4 @@ acceptance:
 - Appropriate protocol/persistence classification and all controller invariants remain validated
 - Mock interleaving/revocation tests and opt-in actual GNOME window/monitor pixels and shutdown are separately recorded
 validation: [just ci, just deny, separate real-display and portal tests]
-status: ready
+status: in_progress

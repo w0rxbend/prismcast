@@ -1,6 +1,6 @@
 schema_version: 1
 project_phase: phase-3-linux-capture
-head_commit: 2477c4b
+head_commit: 026c823
 current_objective: Integrate command-driven portal authorization and shared capture preview
 completed:
 - RESUME-001
@@ -43,7 +43,8 @@ completed:
 - UI-002
 - CORE-005
 - CAPTURE-001
-in_progress: []
+in_progress:
+- CAPTURE-002
 blocked: []
 next_candidates:
 - CAPTURE-002
@@ -73,7 +74,7 @@ verification:
   portal_capture: awaiting_user_selection
 last_agent:
   model: codex
-  session: dynamic-undo-capture-wave
+  session: dynamic-capture-integration-wave
 open_questions:
 - Canonical Undo/Redo Commands and protocol/UI integration remain follow-up work
 - Destructive Add/Remove undo and persisted history are not implemented
