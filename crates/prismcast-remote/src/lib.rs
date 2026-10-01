@@ -18,13 +18,15 @@
 //!   prefix + MessagePack payloads ([`codec`]); close codes are delivered as
 //!   a synthetic `closing` frame (protocol doc §8). Auth defaults to the
 //!   allow-local policy — filesystem permissions (`0700`/`0600`) are the
-//!   primary control — with an optional bearer token from
-//!   `$XDG_CONFIG_HOME/prismcast/remote.toml` or an injected [`AuthConfig`].
+//!   primary control — with an optional bearer token or password
+//!   (challenge-response) from `$XDG_CONFIG_HOME/prismcast/remote.toml` or an
+//!   injected [`AuthConfig`].
 //! - **WebSocket** (WS-001, PLAN.md §22): [`WsServer`] over a plain
 //!   `TcpListener` (no axum, no TLS yet — both are follow-ups); one JSON text
 //!   frame per protocol message; close codes map to WebSocket close frames in
-//!   the 4000+ range. **Disabled by default** and token auth is mandatory on
-//!   this network transport ([`WsServerConfig`]).
+//!   the 4000+ range. **Disabled by default**; a credential (token or
+//!   password challenge-response, protocol doc §4) is mandatory on this
+//!   network transport ([`WsServerConfig`]).
 //!
 //! Requests map wire `RequestKind`s to `prismcast_core::Command`s or
 //! read-only queries and are dispatched with the session's permissions
@@ -46,7 +48,7 @@ pub mod ws;
 pub mod ws_client;
 
 pub use auth::{AuthConfig, AuthError};
-pub use client::{ClientError, IpcClient, IpcClientConfig};
+pub use client::{ClientAuth, ClientError, IpcClient, IpcClientConfig};
 pub use codec::{ClosingNotice, DEFAULT_MAX_FRAME_SIZE};
 pub use paths::{default_socket_dir, default_socket_path, SOCKET_FILE_NAME};
 pub use server::{IpcError, IpcServer, IpcServerConfig};

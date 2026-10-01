@@ -24,9 +24,9 @@
 //!
 //! The server is **disabled by default**: [`WsServerConfig::enabled`] must be
 //! set explicitly before anything binds, and [`WsServer::bind`] rejects the
-//! local-trust auth policy — a network transport requires a bearer token
-//! ([`AuthConfig::token`], PLAN.md §24), unlike the Unix socket where
-//! filesystem permissions gate access.
+//! local-trust auth policy — a network transport requires a credential
+//! ([`AuthConfig::token`] or [`AuthConfig::password`], PLAN.md §24), unlike
+//! the Unix socket where filesystem permissions gate access.
 
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -70,15 +70,17 @@ pub const DEFAULT_BIND: SocketAddr =
 
 /// Tuning for [`WsServer`]. The default is inert twice over: `enabled` is
 /// `false`, and the placeholder auth policy would be rejected by
-/// [`WsServer::bind`] — enabling the server requires an explicit token.
+/// [`WsServer::bind`] — enabling the server requires an explicit credential
+/// (token or password).
 #[derive(Debug, Clone)]
 pub struct WsServerConfig {
     /// Master switch; nothing binds unless this is `true`.
     pub enabled: bool,
     /// Address to bind (loopback by default; TLS does not exist yet).
     pub bind: SocketAddr,
-    /// Authentication policy. Must be [`AuthConfig::Token`]; the local-trust
-    /// policy is refused on a network transport.
+    /// Authentication policy. Must be [`AuthConfig::Token`] or
+    /// [`AuthConfig::Password`]; the local-trust policy is refused on a
+    /// network transport.
     pub auth: AuthConfig,
     /// Maximum inbound message payload in bytes (bounds per-connection
     /// memory; protocol doc §1).
@@ -135,8 +137,9 @@ pub enum WsError {
     Disabled,
     /// A network transport must not run with the local-trust auth policy.
     #[error(
-        "WebSocket server requires token authentication (AuthConfig::token); \
-         the allow-local policy is only valid on the Unix socket"
+        "WebSocket server requires token or password authentication \
+         (AuthConfig::token / AuthConfig::password); the allow-local policy \
+         is only valid on the Unix socket"
     )]
     AuthRequired,
 }
@@ -154,7 +157,8 @@ impl WsServer {
     /// Binds the listener, starts the accept loop and the event fan-out.
     ///
     /// Fails with [`WsError::Disabled`] when the config is not enabled, and
-    /// with [`WsError::AuthRequired`] when the auth policy is not token-based.
+    /// with [`WsError::AuthRequired`] when the auth policy is the local-trust
+    /// policy.
     pub async fn bind(app: AppHandle, config: WsServerConfig) -> Result<Self, WsError> {
         if !config.enabled {
             return Err(WsError::Disabled);
