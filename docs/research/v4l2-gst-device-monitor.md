@@ -42,6 +42,27 @@ therefore requires a physical webcam or `sudo modprobe v4l2loopback`; mock and
 headless lifecycle tests remain the CI baseline, with any real-camera or
 loopback probe recorded separately per the task's validation rule.
 
+Live hardware findings (2026-10-02, Anker PowerConf C200, uvcvideo):
+- Direct capture works: `v4l2src device=/dev/video2 num-buffers=5 ! fakesink`
+  streamed 5 buffers cleanly with no other process holding the node.
+- UVC cameras expose sibling metadata nodes: `/dev/video3` fails with "not a
+  capture device" (and `/dev/video1`, pre-renumber, with "Cannot identify
+  device"). Enumeration must tolerate non-capture nodes; explicit open maps
+  them to a typed failure.
+- Nodes renumber across replug: the pair moved from video1/video2 to
+  video2/video3 within minutes. Persisted device paths are therefore advisory;
+  a restored path may point at a missing or wrong device and must surface as
+  recoverable "device missing", never auto-opened.
+- Even with hardware present, `gst-device-monitor-1.0 Video/Source` listed the
+  camera only through the PipeWire and libcamera providers; the GStreamer
+  v4l2deviceprovider produced no entries. DeviceMonitor discovery alone cannot
+  be trusted to see every camera; enumeration needs a /dev/video* fallback
+  scan (with capture-capability tolerance) or multi-provider aggregation.
+- A transient "Device failed during initialization / Internal data stream
+  error" was observed while the camera re-enumerated mid-probe; retry after
+  re-enumeration succeeded. Busy/ unplug races are real and must map to typed,
+  retryable statuses.
+
 Verified installed element details (gst-inspect-1.0 v4l2src, GStreamer 1.28.2):
 `device` is readable/writable string, default "/dev/video0"; `device-fd` is a
 read-only integer, -1 until open; `device-name` is a read-only string; io-mode
