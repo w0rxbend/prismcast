@@ -14,6 +14,7 @@ use tokio::sync::{oneshot, watch, Notify, OwnedSemaphorePermit, Semaphore};
 
 mod portal;
 pub mod probe;
+pub mod producer;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CaptureKind {
@@ -40,6 +41,8 @@ pub enum CaptureError {
     Closed,
     #[error("portal capability unsupported: {0}")]
     Unsupported(String),
+    #[error("portal rejected access: {0}")]
+    Denied(String),
     #[error("portal denied or failed: {0}")]
     Portal(String),
     #[error("native capture failed: {0}")]
@@ -141,7 +144,38 @@ impl CaptureBroker {
         self.begin(
             source_id,
             kind,
-            Box::pin(portal::PortalConnection::connect()),
+            Box::pin(portal::PortalConnection::connect(None)),
+        )
+    }
+    /// Local parent context is ephemeral and never a domain source setting.
+    pub fn authorize_with_parent(
+        &self,
+        source_id: SourceId,
+        kind: CaptureKind,
+        parent: Option<String>,
+    ) -> Result<PendingCapture> {
+        let parent = parent
+            .map(|parent| {
+                if parent.len() > 2048
+                    || parent.chars().any(|c| c.is_control() || c.is_whitespace())
+                    || parent
+                        .split_once(':')
+                        .is_none_or(|(_, value)| value.is_empty())
+                {
+                    return Err(CaptureError::Unsupported(
+                        "invalid parent identifier".into(),
+                    ));
+                }
+                parent
+                    .parse::<ashpd::WindowIdentifierType>()
+                    .map(ashpd::WindowIdentifier::from)
+                    .map_err(|_| CaptureError::Unsupported("invalid parent identifier".into()))
+            })
+            .transpose()?;
+        self.begin(
+            source_id,
+            kind,
+            Box::pin(portal::PortalConnection::connect(parent)),
         )
     }
     fn begin<P: Portal + 'static>(

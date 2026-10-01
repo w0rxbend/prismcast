@@ -48,7 +48,7 @@ pub fn capture_frames(
         matches!(lease.status(), CaptureStatus::Ready)
     })
 }
-fn build_source(grant: &crate::CaptureGrant) -> Result<gst::Element> {
+pub(crate) fn build_source(grant: &crate::CaptureGrant) -> Result<gst::Element> {
     let factory = gst::ElementFactory::find("pipewiresrc")
         .ok_or_else(|| native("pipewiresrc plugin unavailable"))?;
     let source = factory.create().build().map_err(native)?;
@@ -78,7 +78,7 @@ fn build_source(grant: &crate::CaptureGrant) -> Result<gst::Element> {
     }
     source.set_property("fd", grant.remote().as_raw_fd());
     source.set_property("path", grant.node_id().to_string());
-    source.set_property("max-buffers", 8i32);
+    source.set_property("max-buffers", 3i32);
     source.set_property_from_str("on-disconnect", "error");
     Ok(source)
 }
