@@ -12,6 +12,7 @@ members = [
     "crates/prismcast-remote",
     "crates/prismcast-web",
     "crates/prismcast-ui",
+    "crates/prismcast-preview",
     "crates/prismcast-plugin-sdk",
     "crates/prismcast-cli",
 ]

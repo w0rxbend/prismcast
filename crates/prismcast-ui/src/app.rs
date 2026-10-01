@@ -17,6 +17,7 @@ use prismcast_core::id::{EncoderId, OutputId, SceneId};
 use prismcast_core::output::{Output, OutputKind};
 use prismcast_core::source::SourceKind;
 use prismcast_core::Command;
+use prismcast_preview::{PreviewSession, PreviewStatus};
 use relm4::component::{AsyncComponent, AsyncComponentParts};
 use relm4::{AsyncComponentSender, Component, ComponentController, Controller};
 use tracing::{debug, info, warn};
@@ -68,6 +69,8 @@ pub enum AppMsg {
     TransitionSelected(u32),
     /// The core actor finished shutting down; the window may close now.
     FinishShutdown,
+    BeginShutdown,
+    PreviewWake,
 }
 
 /// Results of commands dispatched to the core actor.
@@ -87,6 +90,13 @@ pub enum AppCmd {
 /// and the widgets it updates directly — presentation state only.
 pub struct AppModel {
     bridge: CoreBridge,
+    preview_session: Option<PreviewSession>,
+    preview_status: Option<tokio::sync::watch::Receiver<PreviewStatus>>,
+    preview_pump: Option<gtk::glib::JoinHandle<()>>,
+    preview_pending: Rc<Cell<bool>>,
+    preview_stack: gtk::Stack,
+    preview_message: gtk::Label,
+    shutdown_complete: Rc<Cell<bool>>,
     snapshot_pump: tokio::task::JoinHandle<()>,
     scene_refresh: SnapshotRefresh,
     source_refresh: SnapshotRefresh,
@@ -343,23 +353,54 @@ impl AsyncComponent for AppModel {
         let toolbar_view = adw::ToolbarView::new();
         toolbar_view.add_top_bar(&header);
 
-        // --- Central preview placeholder (real paintable: MEDIA-004) ---
+        // GTK-local presentation supplied by the dedicated preview adapter.
         let content = gtk::Box::new(gtk::Orientation::Vertical, 6);
         content.set_margin_start(6);
         content.set_margin_end(6);
         content.set_margin_top(6);
         content.set_margin_bottom(6);
-
-        let preview = gtk::Frame::new(Some("Preview"));
+        let preview = gtk::Frame::new(Some("Program Preview"));
         preview.set_vexpand(true);
         preview.add_css_class("view");
-        let preview_page = adw::StatusPage::new();
-        preview_page.set_title("Preview");
-        preview_page.set_description(Some(
-            "The live compositor paintable arrives with MEDIA-004.",
-        ));
-        preview.set_child(Some(&preview_page));
+        let preview_stack = gtk::Stack::new();
+        let picture = gtk::Picture::new();
+        picture.set_content_fit(gtk::ContentFit::Contain);
+        picture.set_can_shrink(true);
+        let preview_message = gtk::Label::new(Some("Starting preview…"));
+        preview_message.set_wrap(true);
+        preview_message.set_max_width_chars(80);
+        preview_stack.add_named(&picture, Some("video"));
+        preview_stack.add_named(&preview_message, Some("status"));
+        preview_stack.set_visible_child_name("status");
+        preview.set_child(Some(&preview_stack));
         content.append(&preview);
+        let preview_session = match PreviewSession::start(bridge.handle().clone()) {
+            Ok(session) => {
+                picture.set_paintable(Some(session.paintable()));
+                Some(session)
+            }
+            Err(error) => {
+                warn!(%error, "preview attachment failed");
+                preview_message.set_label(&format!("Preview unavailable: {error}"));
+                None
+            }
+        };
+        let preview_status = preview_session
+            .as_ref()
+            .map(PreviewSession::subscribe_status);
+        let preview_pending = Rc::new(Cell::new(false));
+        let preview_pump = preview_status.as_ref().map(|status| {
+            let mut status = status.clone();
+            let pending = preview_pending.clone();
+            let input = sender.input_sender().clone();
+            relm4::spawn_local(async move {
+                while status.changed().await.is_ok() {
+                    if !pending.replace(true) && input.send(AppMsg::PreviewWake).is_err() {
+                        break;
+                    }
+                }
+            })
+        });
 
         // --- Panels: scenes | sources | audio mixer placeholder ---
         let scenes = ScenesPanel::builder()
@@ -429,24 +470,19 @@ impl AsyncComponent for AppModel {
             });
         }
 
-        // Window close → graceful actor shutdown, then actually close. The
-        // flag lives solely in the closure: once set (first close attempt),
-        // the final close after `FinishShutdown` is allowed through.
+        // Repeated close requests remain stopped until both owners finish.
+        let shutdown_complete = Rc::new(Cell::new(false));
         {
             let shutdown_started = Rc::new(Cell::new(false));
-            let handle = bridge.handle().clone();
+            let finished = shutdown_complete.clone();
             let input = sender.input_sender().clone();
             root.connect_close_request(move |_| {
-                if shutdown_started.get() {
+                if finished.get() {
                     return gtk::glib::Propagation::Proceed;
                 }
-                shutdown_started.set(true);
-                let handle = handle.clone();
-                let input = input.clone();
-                relm4::spawn_local(async move {
-                    handle.shutdown().await;
-                    input.emit(AppMsg::FinishShutdown);
-                });
+                if !shutdown_started.replace(true) {
+                    input.emit(AppMsg::BeginShutdown);
+                }
                 gtk::glib::Propagation::Stop
             });
         }
@@ -459,6 +495,13 @@ impl AsyncComponent for AppModel {
 
         let model = Self {
             bridge,
+            preview_session,
+            preview_status,
+            preview_pump,
+            preview_pending,
+            preview_stack,
+            preview_message,
+            shutdown_complete,
             snapshot_pump,
             scene_refresh,
             source_refresh,
@@ -554,7 +597,49 @@ impl AsyncComponent for AppModel {
                     self.dispatch(&sender, Command::SetTransition { transition });
                 }
             }
+            AppMsg::PreviewWake => {
+                self.preview_pending.set(false);
+                let status = self
+                    .preview_status
+                    .as_mut()
+                    .map(|status| status.borrow_and_update().clone());
+                match status {
+                    Some(PreviewStatus::Running) => {
+                        self.preview_stack.set_visible_child_name("video")
+                    }
+                    Some(PreviewStatus::Degraded(message)) => {
+                        self.preview_stack.set_visible_child_name("video");
+                        self.toast_overlay
+                            .add_toast(adw::Toast::new(&format!("Preview warning: {message}")));
+                    }
+                    Some(PreviewStatus::Failed(message)) => {
+                        self.preview_message
+                            .set_label(&format!("Preview unavailable: {message}"));
+                        self.preview_stack.set_visible_child_name("status");
+                    }
+                    Some(PreviewStatus::Stopped) => {
+                        self.preview_message.set_label("Preview stopped");
+                        self.preview_stack.set_visible_child_name("status");
+                    }
+                    _ => {}
+                }
+            }
+            AppMsg::BeginShutdown => {
+                let preview = self.preview_session.take();
+                let handle = self.bridge.handle().clone();
+                let input = sender.input_sender().clone();
+                relm4::spawn_local(async move {
+                    if let Some(preview) = preview {
+                        if let Err(error) = preview.shutdown().await {
+                            warn!(%error, "preview shutdown failed");
+                        }
+                    }
+                    handle.shutdown().await;
+                    input.emit(AppMsg::FinishShutdown);
+                });
+            }
             AppMsg::FinishShutdown => {
+                self.shutdown_complete.set(true);
                 info!("core actor stopped; closing window");
                 root.close();
             }
@@ -594,6 +679,9 @@ impl AsyncComponent for AppModel {
 impl Drop for AppModel {
     fn drop(&mut self) {
         self.snapshot_pump.abort();
+        if let Some(pump) = self.preview_pump.take() {
+            pump.abort();
+        }
     }
 }
 
@@ -688,5 +776,160 @@ mod source_placement_tests {
             assert!(handle.snapshot().state().sources.contains_key(&source_id));
             handle.shutdown().await;
         });
+    }
+}
+
+#[cfg(test)]
+mod shell_display_tests {
+    use super::*;
+    use std::{
+        cell::RefCell,
+        time::{Duration, Instant},
+    };
+
+    fn picture(widget: &gtk::Widget) -> Option<gtk::Picture> {
+        if let Ok(picture) = widget.clone().downcast::<gtk::Picture>() {
+            return Some(picture);
+        }
+        let mut child = widget.first_child();
+        while let Some(widget) = child {
+            if let Some(picture) = picture(&widget) {
+                return Some(picture);
+            }
+            child = widget.next_sibling();
+        }
+        None
+    }
+
+    async fn exercise(
+        app: &adw::Application,
+        handle: &prismcast_app::AppHandle,
+    ) -> Result<(), String> {
+        let profile = prismcast_core::Profile::new(
+            "Shell test",
+            prismcast_core::VideoConfig {
+                width: 1280,
+                height: 720,
+                fps_num: 30,
+                fps_den: 1,
+            },
+        );
+        let profile_id = profile.id;
+        handle
+            .dispatch(Command::AddProfile { profile })
+            .await
+            .map_err(|error| error.to_string())?;
+        handle
+            .dispatch(Command::SelectProfile { profile_id })
+            .await
+            .map_err(|error| error.to_string())?;
+        handle
+            .dispatch(Command::AddScene {
+                name: "Shell smoke".into(),
+            })
+            .await
+            .map_err(|error| error.to_string())?;
+        let scene_id = handle
+            .snapshot()
+            .current_scene()
+            .ok_or("scene not committed")?;
+        let response = handle
+            .dispatch(Command::AddSource {
+                kind: SourceKind::TestPattern,
+                name: "Shell pattern".into(),
+            })
+            .await
+            .map_err(|error| error.to_string())?;
+        let source_id = created_source_id(&response.events).ok_or("source ID missing")?;
+        handle
+            .dispatch(Command::SetSourceSettings {
+                source_id,
+                settings: serde_json::json!({"width":1280,"height":720,"fps":30,"pattern":"red"}),
+            })
+            .await
+            .map_err(|error| error.to_string())?;
+        handle
+            .dispatch(Command::AddSceneItem {
+                scene_id,
+                source_id,
+            })
+            .await
+            .map_err(|error| error.to_string())?;
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let (window, paintable) = loop {
+            if let Some(window) = app.active_window() {
+                if let Some(picture) = picture(window.upcast_ref()) {
+                    if let Some(paintable) = picture.paintable() {
+                        if paintable.intrinsic_width() == 1280
+                            && paintable.intrinsic_height() == 720
+                        {
+                            break (window, paintable);
+                        }
+                    }
+                }
+            }
+            if Instant::now() > deadline {
+                return Err("native shell preview never received a frame".into());
+            }
+            gtk::glib::timeout_future(Duration::from_millis(30)).await;
+        };
+        let invalidations = Rc::new(Cell::new(0));
+        paintable.connect_invalidate_contents({
+            let count = invalidations.clone();
+            move |_| count.set(count.get() + 1)
+        });
+        let item_id = handle.snapshot().state().scenes[&scene_id].items[0].id;
+        handle
+            .dispatch(Command::SetSceneItemVisible {
+                scene_id,
+                item_id,
+                visible: false,
+            })
+            .await
+            .map_err(|error| error.to_string())?;
+        gtk::glib::timeout_future(Duration::from_millis(200)).await;
+        if invalidations.get() == 0 {
+            return Err("shell paintable stopped updating after a command".into());
+        }
+        // Exercise the actual production callback, including repeated close.
+        window.close();
+        window.close();
+        gtk::glib::future_with_timeout(Duration::from_secs(5), handle.closed())
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "requires a real GTK display; run this filter with --ignored --test-threads=1"]
+    fn native_shell_preview_and_window_close_stop_both_owners() {
+        let (bridge, core_thread) = CoreBridge::spawn_background().unwrap();
+        let handle = bridge.handle().clone();
+        let relm_app = relm4::RelmApp::new("io.github.worxbend.prismcast.smoketest")
+            .with_args(vec!["prismcast-smoketest".into()]);
+        relm_app.allow_multiple_instances(true);
+        let app = relm4::main_adw_application();
+        let result = Rc::new(RefCell::new(None));
+        app.connect_activate({
+            let result = result.clone();
+            let handle = handle.clone();
+            move |app| {
+                let app = app.clone();
+                let result = result.clone();
+                let handle = handle.clone();
+                relm4::spawn_local(async move {
+                    let outcome = exercise(&app, &handle).await;
+                    let failed = outcome.is_err();
+                    *result.borrow_mut() = Some(outcome);
+                    if failed {
+                        handle.shutdown().await;
+                        app.quit();
+                    }
+                });
+            }
+        });
+        relm_app.run_async::<AppModel>(bridge);
+        core_thread.join().unwrap();
+        assert_eq!(result.borrow_mut().take(), Some(Ok(())));
     }
 }
