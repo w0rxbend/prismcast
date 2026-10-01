@@ -109,6 +109,20 @@ pub fn source_kind_label(kind: &SourceKind) -> &'static str {
     }
 }
 
+/// Runtime permission/capture state; absence never triggers a permission picker.
+pub fn capture_status_label(runtime: Option<&prismcast_core::SourceRuntime>) -> &'static str {
+    use prismcast_core::CaptureStatus;
+    match runtime.map(|runtime| runtime.status) {
+        None => "Authorization required",
+        Some(CaptureStatus::Authorizing) => "Choose a monitor or window…",
+        Some(CaptureStatus::Active) => "Capturing",
+        Some(CaptureStatus::Cancelled) => "Selection cancelled",
+        Some(CaptureStatus::Denied) => "Permission denied",
+        Some(CaptureStatus::Revoked) => "Capture permission revoked",
+        Some(CaptureStatus::Failed) => "Capture unavailable",
+    }
+}
+
 /// User-facing label for an output's lifecycle state.
 pub fn output_state_label(state: &OutputState) -> String {
     match state {
@@ -142,6 +156,27 @@ pub fn output_can_stop(state: &OutputState) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn capture_statuses_show_explicit_authorization_and_recovery() {
+        use prismcast_core::{CaptureGeneration, CaptureStatus, SourceRuntime};
+        assert_eq!(capture_status_label(None), "Authorization required");
+        for (status, expected) in [
+            (CaptureStatus::Authorizing, "Choose a monitor or window…"),
+            (CaptureStatus::Active, "Capturing"),
+            (CaptureStatus::Cancelled, "Selection cancelled"),
+            (CaptureStatus::Denied, "Permission denied"),
+            (CaptureStatus::Revoked, "Capture permission revoked"),
+            (CaptureStatus::Failed, "Capture unavailable"),
+        ] {
+            let runtime = SourceRuntime {
+                generation: CaptureGeneration::new(1),
+                status,
+                dimensions: None,
+                message: None,
+            };
+            assert_eq!(capture_status_label(Some(&runtime)), expected);
+        }
+    }
 
     #[test]
     fn stream_status_prefers_live_over_transitioning() {

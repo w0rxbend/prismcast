@@ -8,7 +8,7 @@
 //! triggers latest [`AppSnapshot`] reads in the root and panels. The UI never mutates
 //! domain state directly (AGENTS.md central invariant, PLAN.md §76).
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use adw::prelude::*;
@@ -30,9 +30,11 @@ use crate::presentation::{choice_for_transition, transition_for_choice, StreamSt
 use crate::preview_editor::PreviewEditor;
 
 /// Kinds offered by the add-source dialog, in picker order.
-const SOURCE_KIND_CHOICES: [(SourceKind, &str); 2] = [
+const SOURCE_KIND_CHOICES: [(SourceKind, &str); 4] = [
     (SourceKind::TestPattern, "Test Pattern"),
     (SourceKind::Color, "Solid Color"),
+    (SourceKind::PipeWireDisplay, "Monitor Capture"),
+    (SourceKind::PipeWireWindow, "Window Capture"),
 ];
 
 /// Root component inputs: user intents plus coalesced snapshot wakeups.
@@ -45,6 +47,8 @@ pub enum AppMsg {
     /// Scene edit forwarded to the shared command dispatcher.
     SceneCommand(Command),
     SourceCommand(Box<Command>),
+    AuthorizeCapture(prismcast_core::SourceId),
+    CaptureParentReady(Result<(), String>),
     /// The user clicked "+" in the scenes panel.
     AddSceneRequested,
     /// The add-scene dialog was confirmed.
@@ -81,6 +85,7 @@ pub enum AppCmd {
     /// A command dispatch returned (success or rejection).
     Dispatched(Result<CommandResponse, HandleError>),
     PreviewDispatched(Result<CommandResponse, HandleError>),
+    CaptureDispatched(Result<CommandResponse, HandleError>),
     /// Creating a shared source succeeded but placing it failed.
     PlacementFailed {
         source_id: prismcast_core::SourceId,
@@ -92,6 +97,10 @@ pub enum AppCmd {
 /// The root application model. Holds the core bridge, the panel controllers,
 /// and the widgets it updates directly — presentation state only.
 pub struct AppModel {
+    capture_parent: Rc<RefCell<Option<crate::capture_parent::CaptureParent>>>,
+    capture_parent_pending: bool,
+    capture_dispatch_pending: bool,
+    shutting_down: Rc<Cell<bool>>,
     bridge: CoreBridge,
     preview_session: Option<PreviewSession>,
     preview_editor: PreviewEditor,
@@ -432,6 +441,9 @@ impl AsyncComponent for AppModel {
                 .forward(sender.input_sender(), |message| match message {
                     SourcesOutput::AddRequested => AppMsg::AddSourceRequested,
                     SourcesOutput::Command(command) => AppMsg::SourceCommand(command),
+                    SourcesOutput::AuthorizeCapture(source_id) => {
+                        AppMsg::AuthorizeCapture(source_id)
+                    }
                 });
         let outputs =
             OutputsPanel::builder()
@@ -472,6 +484,32 @@ impl AsyncComponent for AppModel {
         toast_overlay.set_child(Some(&content));
         toolbar_view.set_content(Some(&toast_overlay));
         root.set_content(Some(&toolbar_view));
+        // A single GTK-local export per window. This never opens a picker.
+        let capture_parent = Rc::new(RefCell::new(None));
+        let shutting_down = Rc::new(Cell::new(false));
+        root.connect_realize({
+            let parent = Rc::downgrade(&capture_parent);
+            let shutting_down = shutting_down.clone();
+            let input = sender.input_sender().clone();
+            let exported = Cell::new(false);
+            move |window| {
+                if !exported.replace(true) {
+                    let input = input.clone();
+                    let parent = parent.clone();
+                    let shutting_down = shutting_down.clone();
+                    crate::capture_parent::export(window, move |result| {
+                        let result = result.map(|export| {
+                            if !shutting_down.get() {
+                                if let Some(parent) = parent.upgrade() {
+                                    *parent.borrow_mut() = Some(export);
+                                }
+                            }
+                        });
+                        input.emit(AppMsg::CaptureParentReady(result));
+                    });
+                }
+            }
+        });
 
         let syncing_transition = Rc::new(Cell::new(false));
         // Suppress rendering notifications in the signal callback, before
@@ -510,6 +548,10 @@ impl AsyncComponent for AppModel {
         let output_refresh = SnapshotRefresh::new(bridge.handle().clone());
 
         let model = Self {
+            capture_parent,
+            capture_parent_pending: true,
+            capture_dispatch_pending: false,
+            shutting_down,
             bridge,
             preview_session,
             preview_editor,
@@ -561,6 +603,55 @@ impl AsyncComponent for AppModel {
                 self.dispatch(&sender, Command::AddScene { name });
             }
             AppMsg::SourceCommand(command) => self.dispatch(&sender, *command),
+            AppMsg::CaptureParentReady(result) => {
+                self.capture_parent_pending = false;
+                match result {
+                    Ok(()) => {}
+                    Err(error) => warn!(%error, "portal parent export unavailable"),
+                }
+            }
+            AppMsg::AuthorizeCapture(source_id) => {
+                if self.shutting_down.get() || self.capture_dispatch_pending {
+                    self.publish_snapshot();
+                    return;
+                }
+                if self.capture_parent_pending {
+                    self.toast_overlay.add_toast(adw::Toast::new(
+                        "The window is preparing capture authorization. Try again shortly.",
+                    ));
+                    self.publish_snapshot();
+                    return;
+                }
+                let snapshot = self.bridge.handle().snapshot();
+                if !snapshot.source(source_id).is_some_and(|source| {
+                    source.enabled
+                        && matches!(
+                            source.kind,
+                            SourceKind::PipeWireDisplay | SourceKind::PipeWireWindow
+                        )
+                }) || snapshot.source_runtime(source_id).is_some_and(|runtime| {
+                    matches!(
+                        runtime.status,
+                        prismcast_core::CaptureStatus::Authorizing
+                            | prismcast_core::CaptureStatus::Active
+                    )
+                }) {
+                    self.publish_snapshot();
+                    return;
+                }
+                self.capture_dispatch_pending = true;
+                let parent = self
+                    .capture_parent
+                    .borrow()
+                    .as_ref()
+                    .map(|parent| parent.identifier());
+                let handle = self.bridge.handle().clone();
+                sender.oneshot_command(async move {
+                    AppCmd::CaptureDispatched(
+                        handle.authorize_source_capture(source_id, parent).await,
+                    )
+                });
+            }
             AppMsg::AddSourceRequested => {
                 if let Some(scene_id) = self.bridge.handle().snapshot().current_scene() {
                     Self::present_add_source_dialog(root, sender.input_sender().clone(), scene_id);
@@ -652,7 +743,9 @@ impl AsyncComponent for AppModel {
                 }
             }
             AppMsg::BeginShutdown => {
+                self.shutting_down.set(true);
                 let preview = self.preview_session.take();
+                let parent = self.capture_parent.borrow_mut().take();
                 let handle = self.bridge.handle().clone();
                 let input = sender.input_sender().clone();
                 relm4::spawn_local(async move {
@@ -661,11 +754,15 @@ impl AsyncComponent for AppModel {
                             warn!(%error, "preview shutdown failed");
                         }
                     }
+                    // The GTK-local export outlives pending portal/native work,
+                    // even if the component disappears during awaited shutdown.
+                    drop(parent);
                     handle.shutdown().await;
                     input.emit(AppMsg::FinishShutdown);
                 });
             }
             AppMsg::FinishShutdown => {
+                self.capture_parent.borrow_mut().take();
                 self.shutdown_complete.set(true);
                 info!("core actor stopped; closing window");
                 root.close();
@@ -680,6 +777,15 @@ impl AsyncComponent for AppModel {
         _root: &Self::Root,
     ) {
         match message {
+            AppCmd::CaptureDispatched(result) => {
+                self.capture_dispatch_pending = false;
+                if let Err(error) = result {
+                    self.toast_overlay.add_toast(adw::Toast::new(&format!(
+                        "Capture authorization failed: {error}"
+                    )));
+                }
+                self.publish_snapshot();
+            }
             AppCmd::PreviewDispatched(result) => {
                 self.preview_editor
                     .completed(self.bridge.handle().snapshot());
@@ -731,6 +837,15 @@ fn created_source_id(events: &[prismcast_core::Event]) -> Option<prismcast_core:
 
 #[cfg(test)]
 mod source_placement_tests {
+    #[test]
+    fn source_dialog_offers_both_capture_kinds_without_authorizing() {
+        assert!(super::SOURCE_KIND_CHOICES
+            .iter()
+            .any(|(kind, _)| matches!(kind, prismcast_core::SourceKind::PipeWireDisplay)));
+        assert!(super::SOURCE_KIND_CHOICES
+            .iter()
+            .any(|(kind, _)| matches!(kind, prismcast_core::SourceKind::PipeWireWindow)));
+    }
     use super::*;
     #[test]
     fn uses_committed_source_identity_and_handles_missing_creation_event() {
