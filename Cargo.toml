@@ -4,6 +4,7 @@ members = [
     "crates/prismcast-core",
     "crates/prismcast-app",
     "crates/prismcast-media",
+    "crates/prismcast-media-gst",
     "crates/prismcast-compositor",
     "crates/prismcast-audio",
     "crates/prismcast-output",
@@ -18,7 +19,7 @@ members = [
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.93"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/worxbend/prismcast"
 
@@ -47,3 +48,6 @@ uuid = { version = "1", features = ["v4", "serde"] }
 indexmap = { version = "2", features = ["serde"] }
 rmp-serde = "1"
 clap = { version = "4", features = ["derive"] }
+
+# Native backend; GLib 0.22 matches gtk4 0.11.
+gstreamer = { version = "0.25", features = ["v1_26"] }
