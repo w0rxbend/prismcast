@@ -324,22 +324,46 @@ mod display_tests {
         }
     }
 
-    fn pixel(paintable: &gtk::gdk::Paintable, renderer: &gtk::gsk::Renderer) -> Option<[u8; 4]> {
+    fn render(
+        paintable: &gtk::gdk::Paintable,
+        renderer: &gtk::gsk::Renderer,
+    ) -> Option<gtk::gdk::Texture> {
         if paintable.intrinsic_width() <= 0 || paintable.intrinsic_height() <= 0 {
             return None;
         }
         let snapshot = gtk::Snapshot::new();
         paintable.snapshot(&snapshot, 320.0, 180.0);
         let node = snapshot.to_node()?;
-        let texture = renderer.render_texture(
+        Some(renderer.render_texture(
             &node,
             Some(&gtk::graphene::Rect::new(0.0, 0.0, 320.0, 180.0)),
-        );
+        ))
+    }
+
+    fn pixel(paintable: &gtk::gdk::Paintable, renderer: &gtk::gsk::Renderer) -> Option<[u8; 4]> {
+        let texture = render(paintable, renderer)?;
         let stride = texture.width() as usize * 4;
         let mut pixels = vec![0; stride * texture.height() as usize];
         texture.download(&mut pixels, stride);
         let offset = texture.height() as usize / 2 * stride + texture.width() as usize / 2 * 4;
         Some(pixels[offset..offset + 4].try_into().unwrap())
+    }
+
+    fn dump_png(
+        paintable: &gtk::gdk::Paintable,
+        renderer: &gtk::gsk::Renderer,
+        name: &str,
+    ) -> String {
+        let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/tmp");
+        let _ = std::fs::create_dir_all(&directory);
+        let path = directory.join(name);
+        match render(paintable, renderer) {
+            Some(texture) => {
+                texture.save_to_png(&path).unwrap();
+                path.display().to_string()
+            }
+            None => "no texture".into(),
+        }
     }
 
     async fn wait_pixel(
@@ -500,7 +524,7 @@ mod display_tests {
                 let deadline=Instant::now()+Duration::from_secs(10);let mut red_seen=false;let mut blue_seen=false;
                 while !(red_seen&&blue_seen){
                     if let Some(pixel)=pixel(&paintable,&renderer){red_seen|=pixel[2]>200&&pixel[0]<30&&pixel[1]<30;blue_seen|=pixel[0]>200&&pixel[2]<30&&pixel[1]<30;}
-                    if Instant::now()>deadline{return Err(format!("selected window did not show fixture red/blue pixels: {:?}",pixel(&paintable,&renderer)))}
+                    if Instant::now()>deadline{let dump=dump_png(&paintable,&renderer,"capture-preview-failure.png");return Err(format!("selected window did not show fixture red/blue pixels: {:?}, native frames {}, dimensions {dimensions:?}, dump {dump}",pixel(&paintable,&renderer),frames.load(Ordering::SeqCst)-first_count))}
                     gtk::glib::timeout_future(Duration::from_millis(30)).await;
                 }
                 if frames.load(Ordering::SeqCst)<=first_count+2{return Err("no native frames after capture activation".into())}
@@ -524,6 +548,88 @@ mod display_tests {
             let shutdown=gtk::glib::future_with_timeout(Duration::from_secs(15),session.shutdown()).await;
             timer.remove();drop(renderer);target.close();window.close();handle.shutdown().await;
             shutdown.unwrap().unwrap();result.unwrap();
+        });
+    }
+    #[test]
+    #[ignore = "opens one real Window portal picker; select Prismcast capture test target"]
+    fn actual_window_capture_consumer_frames_show_fixture_pixels() {
+        gtk::init().unwrap();
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        gtk::glib::MainContext::default().block_on(async {
+            let target=gtk::Window::new();target.set_title(Some("Prismcast capture test target – select this window"));target.set_default_size(480,270);
+            let area=gtk::DrawingArea::new();let red=Rc::new(Cell::new(true));
+            area.set_draw_func({let red=red.clone();move|_,context,_,_|{if red.get(){context.set_source_rgb(1.0,0.0,0.0)}else{context.set_source_rgb(0.0,0.0,1.0)}let _=context.paint();}});
+            target.set_child(Some(&area));target.present();
+            let timer=gtk::glib::timeout_add_local(Duration::from_millis(250),{let area=area.downgrade();move||{if let Some(area)=area.upgrade(){red.set(!red.get());area.queue_draw();gtk::glib::ControlFlow::Continue}else{gtk::glib::ControlFlow::Break}}});
+            gtk::glib::timeout_future(Duration::from_millis(150)).await;
+            let result:Result<(),String>=async {
+                let _entered=runtime.enter();
+                eprintln!("Portal will open once: choose 'Prismcast capture test target – select this window'.");
+                let broker=prismcast_capture::CaptureBroker::new(prismcast_capture::CaptureConfig::default()).map_err(|error|error.to_string())?;
+                let lease=broker.authorize(prismcast_core::SourceId::new(),prismcast_capture::CaptureKind::Window).map_err(|error|error.to_string())?.wait().await.map_err(|error|error.to_string())?;
+                let mut producer=prismcast_capture::producer::CaptureProducer::start(lease).map_err(|error|error.to_string())?;
+                let feed=producer.feed();
+                let deadline=Instant::now()+Duration::from_secs(15);
+                while feed.dimensions().is_none(){
+                    if let Some(error)=feed.error(){return Err(format!("feed error before dimensions: {error}"))}
+                    if Instant::now()>deadline{return Err("capture negotiated no frame within 15s".into())}
+                    gtk::glib::timeout_future(Duration::from_millis(30)).await;
+                }
+                let dimensions=feed.dimensions().unwrap();
+                let consumer=feed.consumer().map_err(|error|error.to_string())?;
+                let latest=std::sync::Arc::new(std::sync::Mutex::new(None::<(gst::Buffer,gst::Caps)>));
+                let pad=consumer.bin.static_pad("src").ok_or("consumer missing src pad")?;
+                pad.add_probe(gst::PadProbeType::BUFFER,{let latest=latest.clone();move|pad,info|{
+                    if let Some(gst::PadProbeData::Buffer(ref buffer))=info.data{
+                        if let Some(caps)=pad.current_caps(){*latest.lock().unwrap()=Some((buffer.clone(),caps));}
+                    }
+                    gst::PadProbeReturn::Ok
+                }});
+                let sink=gst::ElementFactory::make("fakesink").build().map_err(|error|error.to_string())?;
+                let pipeline=gst::Pipeline::new();
+                pipeline.add_many([consumer.bin.upcast_ref::<gst::Element>(),&sink]).map_err(|error|error.to_string())?;
+                gst::Element::link_many([consumer.bin.upcast_ref::<gst::Element>(),&sink]).map_err(|error|error.to_string())?;
+                pipeline.set_state(gst::State::Playing).map_err(|error|error.to_string())?;
+                let deadline=Instant::now()+Duration::from_secs(10);let mut red_seen=false;let mut blue_seen=false;let mut dumped=false;let mut last_center=None;
+                while !(red_seen&&blue_seen){
+                    let frame=latest.lock().unwrap().clone();
+                    if let Some((buffer,caps))=frame{
+                        let structure=caps.structure(0).ok_or("consumer frame missing caps structure")?;
+                        let width=structure.get::<i32>("width").map_err(|error|error.to_string())? as usize;
+                        let height=structure.get::<i32>("height").map_err(|error|error.to_string())? as usize;
+                        let map=buffer.map_readable().map_err(|error|error.to_string())?;
+                        let offset=(height/2*width+width/2)*4;
+                        let center=[map[offset],map[offset+1],map[offset+2],map[offset+3]];
+                        last_center=Some(center);
+                        red_seen|=center[0]>200&&center[1]<30&&center[2]<30;
+                        blue_seen|=center[2]>200&&center[0]<30&&center[1]<30;
+                        if !dumped{
+                            dumped=true;
+                            let bytes=gtk::glib::Bytes::from_owned(map.as_slice().to_vec());
+                            let texture=gtk::gdk::MemoryTexture::new(width as i32,height as i32,gtk::gdk::MemoryFormat::R8g8b8a8,&bytes,width*4);
+                            let path=std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/tmp/capture-raw-frame.png");
+                            texture.save_to_png(&path).map_err(|error|error.to_string())?;
+                            eprintln!("raw consumer frame dump: {}",path.display());
+                        }
+                    }
+                    if Instant::now()>deadline{return Err(format!("consumer frames did not show fixture red/blue: center {last_center:?}, dimensions {dimensions:?}, received {}",feed.received()))}
+                    gtk::glib::timeout_future(Duration::from_millis(30)).await;
+                }
+                eprintln!("consumer frames verified: dimensions {dimensions:?}, received {}",feed.received());
+                pipeline.set_state(gst::State::Null).map_err(|error|error.to_string())?;
+                drop(consumer);drop(pipeline);
+                producer.shutdown_native().map_err(|error|error.to_string())?;
+                let lease=producer.take_stopped_lease().map_err(|error|error.to_string())?;
+                lease.close().await.map_err(|error|error.to_string())?;
+                broker.shutdown().await.map_err(|error|error.to_string())?;
+                Ok(())
+            }.await;
+            timer.remove();target.close();
+            result.unwrap();
         });
     }
 }

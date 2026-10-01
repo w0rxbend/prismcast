@@ -1,0 +1,36 @@
+id: CAPTURE-003
+title: V4L2 camera discovery and camera capture producer integration
+goal: Discover local cameras and run one persistent lease-free v4l2src producer per SourceId through the established explicit command/runtime and shared preview graph.
+depends_on: [CAPTURE-002]
+allowed_scope:
+- crates/prismcast-core/
+- crates/prismcast-app/
+- crates/prismcast-capture/
+- crates/prismcast-preview/
+- crates/prismcast-media-gst/
+- crates/prismcast-ui/
+- Cargo.toml
+- Cargo.lock
+- docs/adr/
+- docs/research/
+- docs/testing/
+acceptance:
+- V4l2Camera sources capture only through the explicit AuthorizeSourceCapture Core Command with the existing generation-guarded transient runtime; no portal picker, lease, FD or parent window is ever involved
+- Camera identity persists only as a bounded, validated device-path source setting; opening a device never happens on snapshot restore, source enable, scene change, transaction replay or undo
+- Discovery enumerates GStreamer Video/Source devices with bounded metadata and reports add/remove changes as read-only information without mutating Core state
+- One persistent v4l2src producer per SourceId reuses FrameProducer/CaptureFeed and survives compositor rebuilds; negotiated native caps drive runtime dimensions within the existing 8192-axis and 128 MiB bounds
+- Missing device, permission denied, device busy and mid-capture disconnect map to typed runtime statuses with explicit user retry; there are no automatic reopen loops
+- Source removal, disable, device settings change and shutdown stop the native producer and release the device; stale generations cannot revive capture
+- UI offers camera creation with discovered-device selection plus explicit authorize/retry controls with pending/error presentation
+- Mock/headless lifecycle, validation and error-mapping tests pass; opt-in real-camera or v4l2loopback evidence is recorded separately from headless evidence
+validation: [just ci, just deny, focused mock/headless tests, separately recorded opt-in V4L2 hardware probe]
+status: ready
+
+notes:
+- ADR-0019 (lease-free camera capture contract) must be written before implementation per project rules
+- Domain already has SourceKind::V4l2Camera with {"device": "/dev/video0"} settings convention; no new commands/events planned
+- Kind gates to extend: core state admission, app actor report gate, preview capture_owner valid()/authorize()
+- FrameProducer::start(gst::Element) and GstCompositor::sync_capture_feeds are already kind-agnostic extension points
+- Discovery follows the prismcast-media encoder-registry precedent: read-only, outside Core state
+- Research baseline (2026-10-01): v4l2src plugin installed; no /dev/video* nodes and no v4l2loopback module on the validation machine — hardware probe requires v4l2loopback or a physical camera
+- Wire-exposed device listing is a follow-up (protocol schema change), out of scope
