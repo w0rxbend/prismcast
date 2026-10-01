@@ -1,0 +1,20 @@
+id: UI-002
+title: Interactive preview panel with command-driven placement editing
+goal: Add canvas selection and basic move/resize controls over the existing native paintable while committed snapshots remain authoritative.
+depends_on: [UI-001, MEDIA-004]
+allowed_scope:
+- crates/prismcast-ui/
+- Cargo.lock
+- docs/research/
+- docs/testing/
+acceptance:
+- Aspect-correct canvas mapping honors letterboxing and active profile dimensions
+- Selected placement outline uses shared pure compositor geometry and stable SceneItemId; selection is presentation state
+- Hit-testing respects rendered z-order, visibility and current scene; locked placements cannot be edited
+- Move and resize gestures commit existing SetSceneItemTransform Commands, with bounded transient input and snapshot reconciliation
+- Accessible placement selector and numeric/action controls permit editing without pointer gestures, including cardinal rotation and flips
+- Scene/profile/removal changes invalidate stale edits and selection; canceled gestures never mutate domain state
+- No media graph logic or GTK cross-thread access; existing paintable/status/shutdown semantics preserved
+- Headless mapping/edit-intent tests and separate real-display production signal/command test pass
+validation: [just ci, just deny, separate real-display test]
+status: in_progress

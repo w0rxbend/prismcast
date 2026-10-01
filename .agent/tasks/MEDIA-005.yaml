@@ -1,0 +1,22 @@
+id: MEDIA-005
+title: Crop, anchors, bounds and cardinal transforms in CPU compositor
+goal: Implement the scene-graph transform contract with reusable pure geometry and native rendered-pixel evidence.
+depends_on: [MEDIA-003, ARCH-003]
+allowed_scope:
+- crates/prismcast-compositor/
+- crates/prismcast-media-gst/
+- Cargo.lock
+- docs/architecture/scene-graph.md
+- docs/research/
+- docs/adr/
+- docs/testing/
+acceptance:
+- Pure typed layout calculation exposes rendered rectangle for preview hit-testing without GStreamer dependencies
+- All nine anchors, crop clamped to one pixel, zero/signed scales, all BoundsKind modes and alignment follow scene-graph contract
+- Cardinal rotations and signed-scale flips render through per-placement elements while shared sources remain single instances
+- Non-cardinal rotation follows documented quantization and diagnostic policy; unsupported blends stay explicit
+- Invalid/nonfinite/excessive geometry rejects before replacing working graph
+- Actual native pixels verify asymmetric crop/rotation/flip, placement anchors and fitting; teardown remains correct
+- Existing owner, bounded queues and lifecycle tests remain valid; topology rebuild limits documented
+validation: [just ci, just deny, focused native rendered-pixel tests]
+status: in_progress

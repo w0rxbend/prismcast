@@ -39,7 +39,9 @@ completed:
 - MEDIA-002
 - MEDIA-003
 - MEDIA-004
-in_progress: []
+in_progress:
+- MEDIA-005
+- UI-002
 blocked: []
 next_candidates:
 - CORE-005
