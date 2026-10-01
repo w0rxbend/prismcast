@@ -1,0 +1,12 @@
+[package]
+name = "prismcast-media-gst"
+description = "Linux GStreamer media platform implementation"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+gstreamer.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
