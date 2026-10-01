@@ -11,6 +11,7 @@ yanked = "warn"
 version = 2
 allow = [
     "MIT",
+    "MPL-2.0", # gst-plugin-gtk4 static preview sink (ADR-0013)
     "Apache-2.0",
     "Apache-2.0 WITH LLVM-exception",
     "BSD-2-Clause",

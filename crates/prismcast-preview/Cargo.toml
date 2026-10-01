@@ -1,0 +1,22 @@
+[package]
+name = "prismcast-preview"
+description = "GTK-local preview attachment and dedicated media ownership adapter"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+prismcast-app.workspace = true
+prismcast-core.workspace = true
+prismcast-media.workspace = true
+prismcast-media-gst = { path = "../prismcast-media-gst", version = "0.1.0" }
+gstreamer.workspace = true
+gtk = { package = "gtk4", version = "0.11.2" }
+gstgtk4 = { package = "gst-plugin-gtk4", version = "0.15", features = ["static", "waylandegl", "dmabuf"] }
+tokio.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
