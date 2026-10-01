@@ -48,6 +48,7 @@ pub const AVAILABLE_REQUESTS: &[&str] = &[
     "add_scene_collection",
     "add_scene_item",
     "add_source",
+    "authorize_source_capture",
     "duplicate_scene_item",
     "get_audio_state",
     "get_output",
@@ -89,7 +90,6 @@ pub const AVAILABLE_REQUESTS: &[&str] = &[
     "set_scene_item_z_index",
     "set_source_balance",
     "set_source_enabled",
-    "authorize_source_capture",
     "set_source_monitor",
     "set_source_muted",
     "set_source_settings",
@@ -1385,7 +1385,7 @@ mod tests {
         sorted.sort_unstable();
         sorted.dedup();
         assert_eq!(sorted, AVAILABLE_REQUESTS, "list must be sorted, unique");
-        assert_eq!(sorted.len(), 62, "protocol v1 has 62 request kinds");
+        assert_eq!(sorted.len(), 63, "protocol v1 has 63 request kinds");
     }
 
     #[test]
