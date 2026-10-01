@@ -41,6 +41,8 @@ pub enum AppMsg {
     Pump(PumpEvent),
     /// The user selected a scene in the scenes panel.
     SelectScene(SceneId),
+    /// Scene edit forwarded to the shared command dispatcher.
+    SceneCommand(Command),
     /// The user clicked "+" in the scenes panel.
     AddSceneRequested,
     /// The add-scene dialog was confirmed.
@@ -339,6 +341,7 @@ impl AsyncComponent for AppModel {
             .forward(sender.input_sender(), |message| match message {
                 ScenesOutput::Select(scene_id) => AppMsg::SelectScene(scene_id),
                 ScenesOutput::AddRequested => AppMsg::AddSceneRequested,
+                ScenesOutput::Command(command) => AppMsg::SceneCommand(*command),
             });
         let sources =
             SourcesPanel::builder()
@@ -455,6 +458,7 @@ impl AsyncComponent for AppModel {
                     info!("core event stream closed");
                 }
             },
+            AppMsg::SceneCommand(command) => self.dispatch(&sender, command),
             AppMsg::SelectScene(scene_id) => {
                 self.dispatch(&sender, Command::SetCurrentScene { scene_id });
             }
