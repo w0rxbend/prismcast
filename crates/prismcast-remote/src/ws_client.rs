@@ -1,12 +1,13 @@
 //! A minimal WebSocket client for the native protocol (WS-001).
 //!
 //! [`WsClient`] mirrors [`crate::client::IpcClient`] over the `ws://`
-//! transport: it performs the `Hello`/`Identify`/`Identified` handshake (with
-//! the bearer token when configured), then a background reader task routes
-//! `request_response`s to their callers by `request_id` and delivers
-//! `event`s to a bounded channel ([`WsClient::next_event`]). A server close
-//! frame fails all pending requests with [`WsClientError::Closed`] carrying
-//! the numeric close code (protocol doc §8).
+//! transport: it performs the `Hello`/`Identify`/`Identified` handshake
+//! (token or challenge-response per [`ClientAuth`]), then a background
+//! reader task routes `request_response`s to their callers by `request_id`
+//! and delivers `event`s to a bounded channel ([`WsClient::next_event`]). A
+//! server close frame fails all pending requests with
+//! [`WsClientError::Closed`] carrying the numeric close code (protocol doc
+//! §8).
 //!
 //! Used by the integration tests and by future web tooling.
 
@@ -32,15 +33,14 @@ use uuid::Uuid;
 use prismcast_protocol::batch::{RequestBatch, RequestBatchResponse};
 use prismcast_protocol::error::WireError;
 use prismcast_protocol::event::EventMessage;
-use prismcast_protocol::handshake::{
-    AuthResponse, ClientInfo, Hello, Identified, Identify, Permission,
-};
+use prismcast_protocol::handshake::{ClientInfo, Hello, Identified, Identify, Permission};
 use prismcast_protocol::message::{ClientMessage, ServerMessage};
 use prismcast_protocol::request::{Request, RequestKind};
 use prismcast_protocol::response::{RequestResponse, ResponseData};
 use prismcast_protocol::subscription::SubscriptionSet;
 use prismcast_protocol::version;
 
+use crate::client::ClientAuth;
 use crate::ws::{DEFAULT_MAX_MESSAGE_SIZE, SUBPROTOCOL_JSON};
 
 /// Client tuning.
@@ -48,8 +48,12 @@ use crate::ws::{DEFAULT_MAX_MESSAGE_SIZE, SUBPROTOCOL_JSON};
 pub struct WsClientConfig {
     /// Protocol version to request in `Identify`.
     pub protocol_version: u32,
-    /// Bearer token; required by the server (token auth is mandatory on the
-    /// WS transport).
+    /// Credential presented in `Identify` (supersedes `token`); the server
+    /// requires a credential on this transport.
+    pub auth: ClientAuth,
+    /// Legacy bearer-token field, superseded by [`ClientAuth`] (`auth`) and
+    /// consulted only when `auth` is [`ClientAuth::None`]. Kept for source
+    /// compatibility with pre-WS-002 callers.
     pub token: Option<String>,
     /// Initial subscriptions; `None` = server default (all standard
     /// categories), `Some(empty)` = no events.
@@ -71,6 +75,7 @@ impl Default for WsClientConfig {
     fn default() -> Self {
         Self {
             protocol_version: version::PROTOCOL_VERSION,
+            auth: ClientAuth::None,
             token: None,
             subscriptions: None,
             client: None,
@@ -165,14 +170,16 @@ impl WsClient {
 
         // --- handshake (before the reader task exists) ---
         let hello_value = handshake_read(&mut reader, &config).await?;
-        let _hello: Hello = decode_data(&hello_value, "hello")?;
+        let hello: Hello = decode_data(&hello_value, "hello")?;
 
+        let authentication = crate::client::auth_response(
+            &crate::client::effective_auth(&config.auth, &config.token),
+            &hello,
+        )
+        .map_err(WsClientError::Decode)?;
         let identify = ClientMessage::Identify(Identify {
             protocol_version: config.protocol_version,
-            authentication: config
-                .token
-                .clone()
-                .map(|token| AuthResponse::Token { token }),
+            authentication,
             subscriptions: config.subscriptions.clone(),
             client: config.client.clone(),
         });

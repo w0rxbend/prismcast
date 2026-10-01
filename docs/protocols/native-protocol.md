@@ -23,8 +23,12 @@ question 1 answered: JSON-only for v1, the subprotocol name `prismcast.msgpack` 
 On WebSocket the encoding is selected via `Sec-WebSocket-Protocol: prismcast.json` (the default
 when no subprotocol is requested).
 
-Limits (enforced by `prismcast-remote`, not expressible in the type layer): max message size
-**1 MiB** (larger → close `MessageDecodeError`); one in-flight `Identify`; inbound request rate
+Limits (enforced by `prismcast-remote`, not expressible in the type layer): max frame/message
+size is **per-transport** — **4 MiB** on Unix IPC (`codec::DEFAULT_MAX_FRAME_SIZE`) and **1 MiB**
+on WebSocket (`ws::DEFAULT_MAX_MESSAGE_SIZE`); larger → close `MessageDecodeError`. The IPC
+socket is a trusted local path already gated by `0600` filesystem permissions, and large
+snapshots (`get_snapshot`) need the headroom; the WebSocket path is the untrusted network
+surface, so it gets the tighter bound. One in-flight `Identify`; inbound request rate
 limit per session (default 100 req/s, burst 200) — excess → `RateLimited` error responses, then
 close `RateLimited` on sustained abuse.
 
@@ -85,10 +89,20 @@ planned follow-up, RES-007 conclusion 2).
 
 Two methods (`AuthResponse`, tagged `method`):
 
-- `challenge` — SHA-256 challenge-response, same construction as obs-websocket
-  (`base64(sha256(base64(sha256(password + salt)) + challenge))`; salt per server start,
-  challenge per session). For the Unix-IPC and plain-`ws://` local paths where TLS is absent.
-- `token` — configured bearer token (PLAN §24). For TLS-terminated paths.
+- `challenge` — SHA-256 challenge-response (**implemented**), same construction as
+  obs-websocket: `base64(sha256(base64(sha256(password + salt)) + challenge))`. When password
+  auth is configured (the `password` key in `remote.toml`), the server advertises an
+  `AuthChallenge` in `hello.authentication` for every session: the salt is stable per server
+  start, the challenge is freshly generated per session. The client answers in
+  `identify.authentication`; a wrong or missing response closes with `AuthenticationFailed`
+  (4009). For the Unix-IPC and plain-`ws://` local paths where TLS is absent; the IPC server
+  optionally offers the same challenge-response (parity with WebSocket) on top of its
+  filesystem-permission gate.
+- `token` — configured bearer token (PLAN §24), unchanged: the client presents the configured
+  token verbatim in `identify.authentication`. For TLS-terminated paths.
+
+The `password` and `token` keys are mutually exclusive in `remote.toml` — configure exactly one
+server-side credential.
 
 Wrong or missing auth → close `AuthenticationFailed`. Admin "kick" → close `SessionInvalidated`
 (clients must not auto-reconnect).
@@ -195,7 +209,10 @@ Typed set instead of a bitmask (RES-007 weakness 4, conclusion 3):
   within a window the server coalesces to the latest state (safe because events carry full
   snapshots — `item_updated`, `mixer_changed`). For `meter` the interval defaults to 50 ms
   (obs-websocket's cadence) when unset. Invalid sets are rejected with `invalid_subscription`
-  naming the offending entries in `details` — never silently clamped.
+  naming the offending entries in `details` — never silently clamped. Exception: an invalid
+  *initial* set carried by `identify` cannot be answered with a request error (no request ID
+  exists pre-identify), so the session is simply closed instead — close `UnknownReason` (4000)
+  with an explanatory reason, delivered as the closing notice on Unix IPC.
 - Replacement semantics: `update_subscriptions` atomically swaps the whole set and returns the
   applied set; no incremental add/remove in v1.
 

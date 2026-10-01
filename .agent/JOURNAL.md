@@ -727,3 +727,30 @@ UNVERIFIED: three picker grants captured wrong windows (white/dark/black
 composites at constant 6144x3456), one attempt saw no selection; a raw
 consumer-frame diagnostic with PNG dump is armed in prismcast-preview for the
 next coordinated retry. Next: user-coordinated picker retry, then WS-002.
+
+WS-002 challenge-response auth and protocol consistency integrated on
+agent/WS-002 via three parallel worktree agents (remote core, CLI, docs) plus
+a resumed CLI agent for post-merge e2e coverage, under kimi-code
+orchestration. Scoping refuted two stale open questions: batch execution,
+per-client subscriptions with coalescing and permission enforcement were
+already complete from WS-001; the Hello.auth advertisement needed NO schema
+change (AuthChallenge field already existed). Implemented: AuthConfig::Password
+with per-server salt and per-session challenge advertised in
+Hello.authentication, obs-websocket-compatible SHA-256 construction in one
+shared helper, server verification through the existing 4009 close machinery,
+WsServer accepting password auth, ClientAuth enum (None/Token/Password) with a
+legacy token-field compat path so 21 pre-existing integration tests stayed
+literally unchanged, and CLI --token/--password flags with PRISMCAST_TOKEN/
+PRISMCAST_PASSWORD env fallbacks and mutual-exclusion usage errors. Protocol
+doc now records implemented challenge-response, per-transport frame limits
+(IPC 4 MiB trusted local, WS 1 MiB untrusted) and the pre-identify invalid
+subscription close behavior. AuthConfig Debug redacts secrets.
+
+Validation: just ci green on the integrated branch including deny (sha2,
+base64, rand admitted; rand 0.9/0.10 duplicate warns per policy). New: 6 auth
+unit tests with known-vector verification, 6 IPC + 7 WS auth integration
+tests, 3 CLI e2e tests over real sockets (password/token success, wrong and
+missing auth rejected with 4009, no secret leakage on stderr). Protocol golden
+tripwire intact. No live/external validation required; auth is localhost-scope
+and non-constant-time comparison is documented. Next candidates: OBSWS-001
+obs-websocket adapter (ADR-0010, now unblocked) or WS-003 TLS wss://.

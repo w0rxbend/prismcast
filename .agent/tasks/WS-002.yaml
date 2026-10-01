@@ -27,7 +27,14 @@ validation:
 - cargo test -p prismcast-cli
 - cargo clippy --workspace --all-targets -- -D warnings
 - just deny
-status: ready
+status: done
+
+validation_notes:
+- Combined just ci passed on the integrated branch (fmt/clippy -D warnings/workspace tests/deny)
+- Remote: 38 unit (known-vector obs-websocket construction, salt stability, per-session challenge freshness, failure matrix, toml parsing, Debug redaction) + 6 IPC + 7 WS new auth integration tests; 21 pre-existing integration tests unchanged and green
+- CLI: 17/17 including password/token e2e over real sockets (success, wrong password, missing auth, no secret leakage on stderr)
+- No protocol schema change; prismcast-protocol golden tripwire intact
+- cargo deny clean (sha2 0.10.9, base64 0.22.1, rand 0.9.5; rand 0.9/0.10 multiple-versions warn allowed by deny.toml)
 
 notes:
 - crates/prismcast-protocol/ is deliberately out of scope: no wire change needed (Hello.authentication already exists). A golden-test tripwire failure means someone moved the schema — stop and coordinate (PLAN §74).

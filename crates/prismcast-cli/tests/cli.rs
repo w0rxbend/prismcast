@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use prismcast_app::{AppHandle, CoreConfig};
+use prismcast_protocol::handshake::Permission;
 use prismcast_protocol::request::RequestKind;
 use prismcast_protocol::response::ResponseData;
 use prismcast_remote::{AuthConfig, IpcClient, IpcServer, IpcServerConfig};
@@ -22,6 +23,10 @@ struct TestBed {
 
 impl TestBed {
     async fn spawn() -> Self {
+        Self::spawn_with(AuthConfig::allow_local()).await
+    }
+
+    async fn spawn_with(auth: AuthConfig) -> Self {
         let dir = std::env::temp_dir().join(format!("prismcast-cli-test-{}", uuid::Uuid::new_v4()));
         let socket = dir.join("control.sock");
         let app = AppHandle::spawn(CoreConfig::default());
@@ -29,7 +34,7 @@ impl TestBed {
             app.clone(),
             IpcServerConfig {
                 socket_path: Some(socket.clone()),
-                auth: AuthConfig::allow_local(),
+                auth,
                 ..IpcServerConfig::default()
             },
         )
@@ -46,15 +51,25 @@ impl TestBed {
     /// Runs the CLI as a subprocess without blocking the test runtime (the
     /// server tasks live on the same runtime).
     async fn cli(&self, args: &[&str]) -> std::process::Output {
+        self.cli_env(args, &[]).await
+    }
+
+    /// Like [`cli`](Self::cli), with extra environment variables for the
+    /// subprocess (e.g. `PRISMCAST_PASSWORD`).
+    async fn cli_env(&self, args: &[&str], envs: &[(&str, &str)]) -> std::process::Output {
         let socket = self.socket.to_str().expect("utf-8 socket path").to_string();
         let args: Vec<String> = args.iter().map(|a| (*a).to_string()).collect();
+        let envs: Vec<(String, String)> = envs
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect();
         tokio::task::spawn_blocking(move || {
-            Command::new(BIN)
-                .arg("--socket")
-                .arg(&socket)
-                .args(&args)
-                .output()
-                .expect("spawn prismcast-cli")
+            let mut command = Command::new(BIN);
+            command.arg("--socket").arg(&socket).args(&args);
+            for (key, value) in &envs {
+                command.env(key, value);
+            }
+            command.output().expect("spawn prismcast-cli")
         })
         .await
         .expect("join")
@@ -204,4 +219,192 @@ async fn cli_reports_missing_server() {
         .expect("spawn prismcast-cli");
     assert_eq!(output.status.code(), Some(1));
     assert!(stderr(&output).contains("cannot connect"));
+}
+
+/// A socket path that no server listens on, for auth parsing tests that
+/// never reach a server.
+fn missing_socket() -> String {
+    let dir =
+        std::env::temp_dir().join(format!("prismcast-cli-test-auth-{}", uuid::Uuid::new_v4()));
+    dir.join("control.sock")
+        .to_str()
+        .expect("utf-8")
+        .to_string()
+}
+
+#[test]
+fn conflicting_token_and_password_flags_are_a_usage_error() {
+    let output = Command::new(BIN)
+        .arg("--socket")
+        .arg(missing_socket())
+        .arg("--token")
+        .arg("tok-value")
+        .arg("--password")
+        .arg("pw-value")
+        .arg("ping")
+        .output()
+        .expect("spawn prismcast-cli");
+    assert_eq!(output.status.code(), Some(2));
+    let err = stderr(&output);
+    assert!(err.contains("--token"), "unexpected stderr: {err}");
+    assert!(err.contains("--password"), "unexpected stderr: {err}");
+    assert!(!err.contains("tok-value"), "leaked token: {err}");
+    assert!(!err.contains("pw-value"), "leaked password: {err}");
+}
+
+#[test]
+fn conflicting_auth_env_vars_are_a_usage_error() {
+    let output = Command::new(BIN)
+        .arg("--socket")
+        .arg(missing_socket())
+        .arg("ping")
+        .env("PRISMCAST_TOKEN", "tok-value")
+        .env("PRISMCAST_PASSWORD", "pw-value")
+        .output()
+        .expect("spawn prismcast-cli");
+    assert_eq!(output.status.code(), Some(2));
+    let err = stderr(&output);
+    assert!(
+        err.contains("mutually exclusive"),
+        "unexpected stderr: {err}"
+    );
+    assert!(!err.contains("tok-value"), "leaked token: {err}");
+    assert!(!err.contains("pw-value"), "leaked password: {err}");
+}
+
+#[test]
+fn password_flag_and_env_mix_with_token_env_conflicts() {
+    // The flag and the env fallback feed the same mapping: a token from the
+    // environment still conflicts with a --password flag.
+    let output = Command::new(BIN)
+        .arg("--socket")
+        .arg(missing_socket())
+        .arg("--password")
+        .arg("pw-value")
+        .arg("ping")
+        .env("PRISMCAST_TOKEN", "tok-value")
+        .output()
+        .expect("spawn prismcast-cli");
+    assert_eq!(output.status.code(), Some(2));
+    let err = stderr(&output);
+    assert!(
+        err.contains("mutually exclusive"),
+        "unexpected stderr: {err}"
+    );
+}
+
+#[test]
+fn password_flag_is_accepted() {
+    // No server listening: parsing and auth mapping succeeded, the failure
+    // is the transport (exit 1), and the password is not echoed anywhere.
+    let output = Command::new(BIN)
+        .arg("--socket")
+        .arg(missing_socket())
+        .arg("--password")
+        .arg("pw-value")
+        .arg("ping")
+        .output()
+        .expect("spawn prismcast-cli");
+    assert_eq!(output.status.code(), Some(1));
+    let err = stderr(&output);
+    assert!(err.contains("cannot connect"), "unexpected stderr: {err}");
+    assert!(!err.contains("pw-value"), "leaked password: {err}");
+}
+
+#[test]
+fn password_env_is_accepted() {
+    let output = Command::new(BIN)
+        .arg("--socket")
+        .arg(missing_socket())
+        .arg("ping")
+        .env("PRISMCAST_PASSWORD", "pw-value")
+        .output()
+        .expect("spawn prismcast-cli");
+    assert_eq!(output.status.code(), Some(1));
+    let err = stderr(&output);
+    assert!(err.contains("cannot connect"), "unexpected stderr: {err}");
+    assert!(!err.contains("pw-value"), "leaked password: {err}");
+}
+
+// --- WS-002: auth end-to-end over a real socket (protocol doc §4) ---
+
+const CORRECT_PASSWORD: &str = "correct-password";
+const WRONG_PASSWORD: &str = "wrong-password";
+
+#[tokio::test]
+async fn password_auth_succeeds_with_flag_and_env() {
+    let bed = TestBed::spawn_with(AuthConfig::password(
+        CORRECT_PASSWORD,
+        vec![Permission::Admin],
+    ))
+    .await;
+
+    let flag = bed.cli(&["--password", CORRECT_PASSWORD, "ping"]).await;
+    assert!(
+        flag.status.success(),
+        "ping with --password failed: {}",
+        stderr(&flag)
+    );
+    assert!(stdout(&flag).contains("pong"));
+
+    let env = bed
+        .cli_env(&["ping"], &[("PRISMCAST_PASSWORD", CORRECT_PASSWORD)])
+        .await;
+    assert!(
+        env.status.success(),
+        "ping with PRISMCAST_PASSWORD failed: {}",
+        stderr(&env)
+    );
+    assert!(stdout(&env).contains("pong"));
+
+    bed.shutdown().await;
+}
+
+#[tokio::test]
+async fn wrong_password_is_rejected_without_leaking_secrets() {
+    let bed = TestBed::spawn_with(AuthConfig::password(
+        CORRECT_PASSWORD,
+        vec![Permission::Admin],
+    ))
+    .await;
+
+    // Wrong password → server closes with AuthenticationFailed (4009); the
+    // CLI surfaces it as a transport error (exit 1).
+    let output = bed.cli(&["--password", WRONG_PASSWORD, "ping"]).await;
+    assert_eq!(output.status.code(), Some(1));
+    let err = stderr(&output);
+    assert!(err.contains("4009"), "unexpected stderr: {err}");
+    assert!(!err.contains(WRONG_PASSWORD), "leaked password: {err}");
+    assert!(!err.contains(CORRECT_PASSWORD), "leaked password: {err}");
+
+    // No credentials at all → same rejection.
+    let output = bed.cli(&["ping"]).await;
+    assert_eq!(output.status.code(), Some(1));
+    let err = stderr(&output);
+    assert!(err.contains("4009"), "unexpected stderr: {err}");
+    assert!(!err.contains(CORRECT_PASSWORD), "leaked password: {err}");
+
+    bed.shutdown().await;
+}
+
+#[tokio::test]
+async fn token_auth_succeeds_over_socket() {
+    let bed = TestBed::spawn_with(AuthConfig::token("cli-token", vec![Permission::Admin])).await;
+
+    let ok = bed.cli(&["--token", "cli-token", "ping"]).await;
+    assert!(
+        ok.status.success(),
+        "ping with --token failed: {}",
+        stderr(&ok)
+    );
+    assert!(stdout(&ok).contains("pong"));
+
+    let wrong = bed.cli(&["--token", "not-the-token", "ping"]).await;
+    assert_eq!(wrong.status.code(), Some(1));
+    let err = stderr(&wrong);
+    assert!(err.contains("4009"), "unexpected stderr: {err}");
+    assert!(!err.contains("cli-token"), "leaked token: {err}");
+    assert!(!err.contains("not-the-token"), "leaked token: {err}");
+
+    bed.shutdown().await;
 }

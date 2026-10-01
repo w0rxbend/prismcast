@@ -39,12 +39,77 @@ use crate::codec::{self, ClosingNotice, CLOSING_FRAME_TYPE, DEFAULT_MAX_FRAME_SI
 use crate::map;
 use crate::paths::default_socket_path;
 
+/// How a client authenticates to the server (WS-002, protocol doc §4).
+/// Shared by [`IpcClientConfig`] and [`crate::ws_client::WsClientConfig`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum ClientAuth {
+    /// No credential; for servers with the allow-local policy.
+    #[default]
+    None,
+    /// Bearer token (`AuthResponse::Token`).
+    Token(String),
+    /// Password, answered with the SHA-256 challenge-response
+    /// (`AuthResponse::Challenge`); the server's `Hello` must offer a
+    /// challenge, otherwise the handshake fails client-side.
+    Password(String),
+}
+
+impl From<String> for ClientAuth {
+    /// A bare credential string is a bearer token — the back-compat path for
+    /// the former `token: Option<String>` config field.
+    fn from(token: String) -> Self {
+        Self::Token(token)
+    }
+}
+
+/// The credential a client will present: `auth`, falling back to the legacy
+/// `token` field (kept for source compatibility).
+pub(crate) fn effective_auth(auth: &ClientAuth, legacy_token: &Option<String>) -> ClientAuth {
+    match auth {
+        ClientAuth::None => match legacy_token {
+            Some(token) => ClientAuth::Token(token.clone()),
+            None => ClientAuth::None,
+        },
+        other => other.clone(),
+    }
+}
+
+/// Builds the `Identify.authentication` field: a password is answered
+/// against the challenge offered in the server's `Hello` via the shared
+/// [`crate::auth::challenge_response`] construction. A password client
+/// facing a server that offered no challenge is an error (the caller maps
+/// the string to its error type).
+pub(crate) fn auth_response(
+    auth: &ClientAuth,
+    hello: &Hello,
+) -> Result<Option<AuthResponse>, String> {
+    match auth {
+        ClientAuth::None => Ok(None),
+        ClientAuth::Token(token) => Ok(Some(AuthResponse::Token {
+            token: token.clone(),
+        })),
+        ClientAuth::Password(password) => {
+            let challenge = hello.authentication.as_ref().ok_or_else(|| {
+                "password auth configured but the server offered no authentication challenge"
+                    .to_string()
+            })?;
+            Ok(Some(AuthResponse::Challenge {
+                response: crate::auth::challenge_response(password, challenge),
+            }))
+        }
+    }
+}
+
 /// Client tuning.
 #[derive(Debug, Clone)]
 pub struct IpcClientConfig {
     /// Protocol version to request in `Identify`.
     pub protocol_version: u32,
-    /// Bearer token for servers configured with token auth.
+    /// Credential presented in `Identify` (supersedes `token`).
+    pub auth: ClientAuth,
+    /// Legacy bearer-token field, superseded by [`ClientAuth`] (`auth`) and
+    /// consulted only when `auth` is [`ClientAuth::None`]. Kept for source
+    /// compatibility with pre-WS-002 callers.
     pub token: Option<String>,
     /// Initial subscriptions; `None` = server default (all standard
     /// categories), `Some(empty)` = no events.
@@ -66,6 +131,7 @@ impl Default for IpcClientConfig {
     fn default() -> Self {
         Self {
             protocol_version: version::PROTOCOL_VERSION,
+            auth: ClientAuth::None,
             token: None,
             subscriptions: None,
             client: None,
@@ -143,14 +209,13 @@ impl IpcClient {
         let hello_value = read_value(&mut reader, config.max_frame_size, config.handshake_timeout)
             .await?
             .ok_or_else(|| ClientError::Decode("server closed before hello".into()))?;
-        let _hello: Hello = decode_data(&hello_value, "hello")?;
+        let hello: Hello = decode_data(&hello_value, "hello")?;
 
+        let authentication = auth_response(&effective_auth(&config.auth, &config.token), &hello)
+            .map_err(ClientError::Decode)?;
         let identify = ClientMessage::Identify(Identify {
             protocol_version: config.protocol_version,
-            authentication: config
-                .token
-                .clone()
-                .map(|token| AuthResponse::Token { token }),
+            authentication,
             subscriptions: config.subscriptions.clone(),
             client: config.client.clone(),
         });
