@@ -17,4 +17,4 @@ acceptance:
 validation:
   - cargo test -p prismcast-remote
   - cargo clippy -p prismcast-remote --all-targets -- -D warnings
-status: in_progress
+status: done

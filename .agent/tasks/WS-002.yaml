@@ -1,0 +1,37 @@
+id: WS-002
+title: Challenge-response auth + protocol consistency
+goal: >
+  Implement the documented-but-unimplemented SHA-256 challenge-response
+  authentication (docs/protocols/native-protocol.md §4, RES-007 conclusion 5):
+  per-server salt, per-session challenge advertised in Hello.authentication,
+  server-side verification, a password-based AuthConfig, and challenge-answering
+  support in the IPC/WS clients and CLI. Reconcile the IPC 4 MiB vs protocol-doc
+  1 MiB frame-limit inconsistency in one authoritative place. No protocol schema
+  change: Hello.authentication already carries AuthChallenge.
+depends_on: [WS-001]
+allowed_scope:
+- crates/prismcast-remote/
+- crates/prismcast-cli/
+- docs/protocols/native-protocol.md
+- Cargo.toml
+- Cargo.lock
+acceptance:
+- password auth configured (remote.toml `password` key) → Hello carries a per-session AuthChallenge; salt is stable per server start, challenge differs per session
+- correct challenge response authenticates on both WS and IPC; wrong or missing response closes with AuthenticationFailed (4009)
+- token auth and allow-local behavior unchanged; WsServer still rejects allow-local but accepts password auth
+- prismcast-cli can authenticate with a password over IPC
+- frame-size limits consistent between code and native-protocol.md (one documented decision)
+- integration tests over real WS and IPC connections for the challenge flow
+validation:
+- cargo test -p prismcast-remote
+- cargo test -p prismcast-cli
+- cargo clippy --workspace --all-targets -- -D warnings
+- just deny
+status: ready
+
+notes:
+- crates/prismcast-protocol/ is deliberately out of scope: no wire change needed (Hello.authentication already exists). A golden-test tripwire failure means someone moved the schema — stop and coordinate (PLAN §74).
+- ClientAuth shape agreed upfront for parallel agents: enum { None, Token(String), Password(String) } in prismcast-remote, consumed by both clients and the CLI.
+- Frame-limit decision: per-transport limits documented (IPC 4 MiB trusted local, WS 1 MiB untrusted network); no behavior change.
+- Deferred: obs-websocket adapter (OBSWS-001 candidate), TLS wss:// (WS-003), msgpack subprotocol, meter event producer, broadcaster unsubscribe API.
+- New deps sha2/base64/rand must pass just deny.
