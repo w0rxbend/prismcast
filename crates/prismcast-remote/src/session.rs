@@ -276,14 +276,15 @@ async fn handshake<R: FrameReader>(
     out_tx: &mpsc::Sender<Outbound>,
     config: &SessionConfig,
 ) -> Result<Established, SessionExit> {
+    let challenge = config.auth.challenge_for_session();
     out_tx
         .send(Outbound::Message(ServerMessage::Hello(Hello {
             prismcast_version: env!("CARGO_PKG_VERSION").to_string(),
             protocol_version: version::PROTOCOL_VERSION,
             min_protocol_version: version::MIN_PROTOCOL_VERSION,
-            // Token auth needs no challenge; the challenge-response method is
-            // not offered by this server yet.
-            authentication: None,
+            // Password auth advertises a fresh per-session challenge (protocol
+            // doc §4); token and allow-local policies advertise nothing.
+            authentication: challenge.clone(),
         })))
         .await
         .map_err(|_| SessionExit::Silent)?;
@@ -332,7 +333,7 @@ async fn handshake<R: FrameReader>(
 
     let permissions = config
         .auth
-        .authenticate(identify.authentication.as_ref())
+        .authenticate(identify.authentication.as_ref(), challenge.as_ref())
         .ok_or_else(|| {
             SessionExit::notify(CloseCode::AuthenticationFailed, "authentication failed")
         })?;
