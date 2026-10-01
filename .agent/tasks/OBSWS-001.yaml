@@ -1,0 +1,48 @@
+id: OBSWS-001
+title: obs-websocket 5.x compatibility adapter (scenes/inputs/outputs MVP)
+goal: >
+  Deliver the obs-websocket 5.x compatibility adapter of ADR-0010 / PLAN §22/§51
+  as an `obs_ws` module inside prismcast-remote: a second WebSocket server
+  speaking the obs 5.x wire protocol ({op,d} envelopes, opcodes 0/1/2/3/5/6/7/8/9,
+  rpcVersion 1 negotiation, obs close codes, obswebsocket.json subprotocol) and
+  translating requests onto native RequestKind → map::command_from_wire → Core
+  Commands and domain events → obs Event messages. Auth reuses WS-002's
+  SHA-256 challenge-response verbatim (auth::challenge_response is the obs
+  construction). MVP request set: GetVersion, scene/program/preview control,
+  scene-item list/enable/transform, studio mode, input mute/volume/name,
+  transitions, output by-name + stream/record singletons mapped to designated
+  primary outputs, batch (SerialRealtime + haltOnFailure + Sleep), event
+  subscription bitmask → native SubscriptionSet. Unsupported obs surface is
+  answered with typed request-status codes, never silent no-ops.
+depends_on: [WS-002]
+allowed_scope:
+- crates/prismcast-remote/
+- docs/protocols/obs-websocket-adapter.md
+- docs/adr/
+- Cargo.toml
+- Cargo.lock
+acceptance:
+- real obs-websocket handshake over a real socket: Hello(op 0) with obsWebSocketVersion/rpcVersion 1/authentication → Identify(op 1) → Identified(op 2, negotiatedRpcVersion 1); rpcVersion != 1 closes 4010; pre-identify traffic closes 4007; second Identify closes 4008
+- password auth: obs authentication string verifies via AuthConfig::authenticate; wrong/missing closes 4009; AllowLocal policy rejected at bind like WsServer
+- every accepted request mirrors requestType/requestId and returns requestStatus{result,code,comment?} with obs code groups (204 unknown type, 300 missing field, 600 not found, 500/501 output state conflicts)
+- scene switching, scene-item enable, input mute/volume, and output start/stop via obs requests produce the same Core Events as the native protocol (verified against AppHandle event stream)
+- eventSubscriptions bitmask gates Event(op 5) delivery; each event carries the correct eventIntent; Reidentify updates subscriptions without reconnect
+- RequestBatch: serial execution, haltOnFailure stops early, Sleep honored, executionType 1/2 → whole-batch 206 response
+- GetVersion returns obs-shaped fields and an availableRequests list guarded by a drift test (every listed requestType is implemented)
+- stream/record singletons resolve to designated primary outputs; absent primary → typed 600/501 errors; mapping documented in docs/protocols/obs-websocket-adapter.md
+- conformance test with the `obws` crate (dev-dependency): connect with password, GetVersion, list scenes, set program scene, toggle mute
+validation:
+- cargo test -p prismcast-remote
+- cargo clippy --workspace --all-targets -- -D warnings
+- just deny
+status: ready
+
+notes:
+- prismcast-protocol is OUT of scope: the adapter defines its own obs-shaped wire types; native protocol schema untouched (golden tripwire must stay green)
+- session_kit extraction from session.rs must be behavior-neutral and land as its own commit
+- obws maintenance status must be verified at task start (RES-007 open question); scripted tokio-tungstenite fallback client is the critical path, obws is additive
+- name→UUID resolution is stateless via snapshot scan (duplicates: first match + warn); numeric sceneItemId needs a stateful ItemIdMap with eviction on all removal paths
+- stream/record singletons map to designated primary outputs (first Rtmp, fallback Srt/Whip; record = first Recording); absent → typed 600/501
+- version advertisement: obsWebSocketVersion "5.7.4" + accurate availableRequests drift-guarded; lower only if real clients misbehave
+- ADR-0020 (short) records module-in-prismcast-remote placement, ItemIdMap, and advertisement policy before implementation
+- Deferred to OBSWS-002+: MessagePack, SerialFrame/Parallel batches, meter/high-volume events, filters, screenshots, stats, vendor/persistent data, media control, virtualcam/replay, UI-reaching requests, 4.x protocol, TLS (WS-003)
