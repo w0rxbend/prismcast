@@ -17,4 +17,4 @@ acceptance:
 - No media graph logic or GTK cross-thread access; existing paintable/status/shutdown semantics preserved
 - Headless mapping/edit-intent tests and separate real-display production signal/command test pass
 validation: [just ci, just deny, separate real-display test]
-status: in_progress
+status: done

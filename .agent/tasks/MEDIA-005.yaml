@@ -19,4 +19,4 @@ acceptance:
 - Actual native pixels verify asymmetric crop/rotation/flip, placement anchors and fitting; teardown remains correct
 - Existing owner, bounded queues and lifecycle tests remain valid; topology rebuild limits documented
 validation: [just ci, just deny, focused native rendered-pixel tests]
-status: in_progress
+status: done

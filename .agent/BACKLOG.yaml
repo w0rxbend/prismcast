@@ -155,7 +155,7 @@ tasks:
     title: Transform support in compositor
     priority: 54
     depends_on: [MEDIA-003, ARCH-003]
-    status: in_progress
+    status: done
 
   # --- UI shell (Phase 1/2) ---
   - id: UI-001
@@ -167,7 +167,7 @@ tasks:
     title: Preview panel
     priority: 55
     depends_on: [UI-001, MEDIA-004]
-    status: in_progress
+    status: done
   - id: UI-003
     title: Scene list panel
     priority: 56

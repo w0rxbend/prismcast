@@ -1,7 +1,7 @@
 schema_version: 1
 project_phase: phase-2-media-prototype
-head_commit: c9eefdb
-current_objective: Complete preview controls and compositor transforms after native preview milestone
+head_commit: b59f585
+current_objective: Prepare undo refinements and Linux capture after completed Phase 2 prototype
 completed:
 - RESUME-001
 - SKILL-001
@@ -39,14 +39,12 @@ completed:
 - MEDIA-002
 - MEDIA-003
 - MEDIA-004
-in_progress:
 - MEDIA-005
 - UI-002
+in_progress: []
 blocked: []
 next_candidates:
 - CORE-005
-- UI-002
-- MEDIA-005
 - WS-002
 decisions:
 - ADR-0001
@@ -62,6 +60,7 @@ decisions:
 - ADR-0011
 - ADR-0012
 - ADR-0013
+- ADR-0014
 verification:
   cargo_fmt: pass
   cargo_clippy: pass
@@ -69,8 +68,10 @@ verification:
   cargo_deny: pass
 last_agent:
   model: codex
-  session: dynamic-phase-2-wave
+  session: dynamic-preview-transform-wave
 open_questions:
+- Atomic expected-version editing command needed to close snapshot-read to dispatch race (UI-002)
+- Source negotiated dimensions contract needed before preview editing other source kinds (UI-002)
 - gst-plugins-rs vendoring: isobmff/wpe2/gopbuffer not distro-packaged (RES-003)
 - Browser source audio gap in wpe2 (RES-006) — revisit at Phase 11
 - Group domain type missing for PLAN §8 Group/Ungroup (ARCH-003 follow-up)

@@ -1,23 +1,57 @@
 # Current state
 
-The native preview milestone is implemented and validated with dynamic agent orchestration. GStreamer development libraries are installed at 1.28.2. The user stopped a previous overlapping agent; its uncommitted edits remain preserved on `archive/paused-agent-phase2` (2ce3390) and in the named stash. Do not reapply its alternate backend API wholesale.
+The Phase 2 CPU media prototype and interactive preview milestone are complete.
+This wave used separate MEDIA-005/UI-002 implementation worktrees and independent
+review, integrated on agent/TRANSFORM-INTEGRATION before advancing main.
 
 ## Completed in this wave
 
-- MEDIA-001: isolated GStreamer initialization/capabilities and lifecycle checks; ADR-0011 sets GStreamer >=1.26, bindings 0.25/GLib 0.22, Rust MSRV 1.93.
-- MEDIA-002: validated test-pattern backend and reusable RGBA source bin, bounded events, lifecycle/error/settings tests.
-- MEDIA-003: CPU compositor with shared source bins, bounded placement queues, basic move/resize/z-order/visibility, black empty canvas, cleanup and rendered-pixel tests.
-- MEDIA-004: prismcast-preview GTK-local paintable adapter and dedicated media owner, command-driven snapshots, static GTK sink, visible health/failure recovery and joined media shutdown before core shutdown. ADR-0013 documents ownership and GTK >=4.14 floor; MPL-2.0 dependency is explicit in deny policy.
-- UI-003: scene selection/rename/removal/reorder Commands, labeled focused rename editor, boundary sensitivity, confirmation before non-undoable removal (also Delete).
-- UI-004: shared source registry versus placements, show/lock/remove/rename/create/place, partial failure recovery and current checkbox values for rapid toggles.
-- BRIDGE-001: entered Tokio startup context, committed-snapshot watches, independent bounded/coalesced root/panel wakeups, synchronous restoration guards and owned task teardown.
+- MEDIA-005: shared pure prismcast-compositor geometry (5fb0831), then native
+  crop, all anchors, bounds fitting, cardinal rotation, source-axis signed flips
+  and canvas-axis sizing (f1f525c). Geometry handles huge crop edges, zero/subpixel
+  scale and finite/resource validation. Eighteen native backend tests plus six
+  pure geometry tests cover actual asymmetric pixel orientation and cleanup.
+- UI-002: selection outlines and a placement picker, letterbox-aware hit-testing,
+  local move/resize drafts, one Command per gesture, numeric Apply, Rotate90 and
+  Flip X/Y (b59f585). Locked/unavailable placements cannot be edited. Fresh core
+  snapshots, scene/profile/item/source changes, Escape/cancel and allocation
+  changes invalidate stale drafts. Dedicated preview acknowledgements gate
+  pending edits independently of other command responses.
+- Actual GTK main-loop regression caught a picker feedback loop; stable choice
+  models, an explicit placeholder and unchanged-ID notification guards resolve it.
+  The native test waits after gesture begin to prove it survives queued GTK work.
+- ADR-0014 records shared geometry, local drafts and the remaining non-atomic
+  snapshot-read/dispatch boundary. No new core Command, schema or protocol.
 
 ## Validation
 
-Final combined `just ci` passed: 367 tests passed, four display tests ignored by the headless suite. `just deny` passed. Separate real-display tests cover downloaded native paintable pixels, unsupported-source failure/recovery, actual RelmApp frame delivery and repeated production window close, rapid source toggles, and scene dialogs. Reproduction/evidence: docs/testing/native-preview.md, source-toggle-signals.md, ui-scene-list.md.
+Final combined just ci passed: 382 tests, with five display tests ignored by the
+headless suite. just deny passed. Separate real-display tests cover native
+paintable pixels/failure recovery/shutdown, actual RelmApp preview and repeated
+window close, production preview gesture/action signals, scene dialogs and rapid
+source toggles. Commands and evidence are in docs/testing/preview-editor.md,
+cpu-transforms.md, native-preview.md and the scene/source signal notes.
 
 ## Next work and limits
 
-UI-002 and MEDIA-005 are now ready; author scoped task specs before implementing. Native preview is attached, but preview editing overlays/input tools remain UI-002 work. Basic position/scale/z-order work; advanced transforms remain MEDIA-005. Prototype topology changes rebuild behind a NULL barrier and can briefly interrupt frames. Only TestPattern sources are supported; other kinds report an error. GPU acceleration, capture, audio, recording and streaming are later phases and are not validated by this wave.
+Author a scoped CORE-005 task for undo/redo refinements; core already has inverses
+and grouped-undo scaffolding, but open groups can grow without bounds and group
+commands from different controllers are not isolated. UI-002 deliberately sends
+one final gesture command and does not use global BeginUndoGroup. Z-order actions
+need i32-boundary hardening before exposing more editor controls.
 
-Run the application with `cargo run -p prismcast-ui --bin prismcast`. Agent worktrees remain for review. No remote push was requested. Earlier core/protocol open questions remain in STATE.yaml.
+Prepare the Phase 3 Linux capture wave from PLAN §45 and existing capture research:
+portal/PipeWire monitor/window capture, then V4L2 and audio/device discovery. The
+prototype currently renders TestPattern sources; other kinds show a backend error.
+Future preview support needs negotiated source dimensions beyond TestPattern.
+
+Free-angle rotation quantizes to cardinal steps with bounded diagnostics. Only
+Normal blending is supported. Bounds-driven placements can move but pointer
+resize/numeric scale edits are disabled. CPU graph changes retain the NULL barrier
+and can briefly interrupt frames. GPU/capture/audio/output and physical pointer
+recognition are not established by these tests. A future expected-version core
+command is needed for atomic remote-edit protection after client preflight.
+
+Run: cargo run -p prismcast-ui --bin prismcast. Prior overlapping agent edits remain
+preserved on archive/paused-agent-phase2 (2ce3390) and the named stash; do not
+reapply its alternate backend API wholesale. Worktrees remain for review.
