@@ -21,24 +21,151 @@
 //! [`AppState::inverse`], so creations and destructive removals are currently
 //! **not undoable**. They do not clear the existing undo stack, but undoing
 //! across such an operation can fail at apply time (e.g. the inverse targets
-//! an entity that has since been removed); a failed undo drops the entry and
+//! an entity that has since been removed); a failed undo preserves the entry and
 //! surfaces the error. Snapshot-restore-based undo for destructive cascades
 //! is a documented follow-up of the domain crate.
 //!
-//! ## Authorization
-//!
-//! Undo/redo mutate arbitrary domains, so per-domain permission mapping does
-//! not apply. Interim policy: any caller that can control anything
-//! ([`crate::dispatch::Permissions::can_control`]) may undo/redo; read-only
-//! callers may not.
-//! Fine-grained undo authz is left to the follow-up undo task (PLAN.md §61
-//! lists `CORE-005 undo/redo`).
+//! Authorization is checked recursively by the actor before an inverse applies.
+//! Failed undo/redo preserves the entry. Destructive restoration is deferred.
 
 use prismcast_core::error::{Error, Result};
 use prismcast_core::Command;
 
 /// Default maximum number of entries kept on the undo stack (oldest dropped).
 pub const DEFAULT_UNDO_CAPACITY: usize = 100;
+
+/// Explicit undo budgets; serialized bytes are a conservative retained-payload measure.
+#[derive(Debug, Clone, Copy)]
+pub struct UndoLimits {
+    /// Total retained inverse/label bytes, including an open group.
+    pub retained_bytes: usize,
+    /// Maximum inverses in one open group or leaves in a transaction.
+    pub group_members: usize,
+    /// Maximum UTF-8 label bytes.
+    pub label_bytes: usize,
+    /// Maximum nested transaction depth.
+    pub nesting: usize,
+}
+impl Default for UndoLimits {
+    fn default() -> Self {
+        Self {
+            retained_bytes: 8 * 1024 * 1024,
+            group_members: 256,
+            label_bytes: 256,
+            nesting: 16,
+        }
+    }
+}
+fn limit_error() -> Error {
+    Error::InvalidInput("undo history resource limit exceeded".into())
+}
+
+/// Counts serialization bytes with no payload buffer and stops at the budget.
+pub(crate) fn bounded_size(value: &impl serde::Serialize, budget: usize) -> Result<usize> {
+    struct Counter {
+        count: usize,
+        budget: usize,
+    }
+    impl std::io::Write for Counter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            if bytes.len() > self.budget.saturating_sub(self.count) {
+                return Err(std::io::Error::other("undo byte budget exceeded"));
+            }
+            self.count += bytes.len();
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut counter = Counter { count: 0, budget };
+    serde_json::to_writer(&mut counter, value).map_err(|_| limit_error())?;
+    Ok(counter.count)
+}
+fn entry_bytes(entry: &UndoEntry, budget: usize) -> usize {
+    command_bytes(&entry.inverse, budget)
+        .unwrap_or(budget)
+        .saturating_add(entry.label.len())
+        .saturating_add(128)
+}
+/// Bounds recursion and leaf count before recursive authorization/inverse generation.
+pub(crate) fn validate_structure(command: &Command, limits: UndoLimits) -> Result<()> {
+    fn walk(command: &Command, depth: usize, leaves: &mut usize, limits: UndoLimits) -> Result<()> {
+        if depth > limits.nesting.min(64) {
+            return Err(limit_error());
+        }
+        if let Command::Transaction { commands } = command {
+            *leaves = leaves.saturating_add(1);
+            for command in commands {
+                walk(command, depth + 1, leaves, limits)?;
+            }
+        } else {
+            *leaves = leaves.saturating_add(1);
+            match command {
+                Command::SetSourceSettings { settings, .. } => validate_json(settings, limits)?,
+                Command::SetTransition { transition } => {
+                    validate_json(&transition.settings, limits)?
+                }
+                Command::AddProfile { profile } => validate_json(&profile.settings, limits)?,
+                _ => {}
+            }
+        }
+        if *leaves > limits.group_members {
+            return Err(limit_error());
+        }
+        Ok(())
+    }
+    walk(command, 0, &mut 0, limits)
+}
+
+/// JSON recursion is capped before serde traversal or inverse cloning.
+pub(crate) fn validate_json(value: &serde_json::Value, limits: UndoLimits) -> Result<()> {
+    fn walk(
+        value: &serde_json::Value,
+        depth: usize,
+        nodes: &mut usize,
+        limits: UndoLimits,
+    ) -> Result<()> {
+        *nodes = nodes.saturating_add(1);
+        if depth > limits.nesting.min(64) || *nodes > limits.retained_bytes {
+            return Err(limit_error());
+        }
+        match value {
+            serde_json::Value::Array(values) => {
+                for value in values {
+                    walk(value, depth + 1, nodes, limits)?;
+                }
+            }
+            serde_json::Value::Object(values) => {
+                for value in values.values() {
+                    walk(value, depth + 1, nodes, limits)?;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+    walk(value, 0, &mut 0, limits)
+}
+fn command_bytes(command: &Command, budget: usize) -> Result<usize> {
+    let bytes = bounded_size(command, budget)?
+        .saturating_add(command_members(command).saturating_mul(std::mem::size_of::<Command>()));
+    if bytes > budget {
+        return Err(limit_error());
+    }
+    Ok(bytes)
+}
+// Entry bookkeeping plus ample serialized Transaction framing and wrapper storage.
+const GROUP_OVERHEAD: usize = 256 + std::mem::size_of::<Command>();
+
+fn command_members(command: &Command) -> usize {
+    match command {
+        Command::Transaction { commands } => {
+            1usize.saturating_add(commands.iter().map(command_members).sum::<usize>())
+        }
+        _ => 1,
+    }
+}
 
 /// One recorded undoable step.
 #[derive(Debug, Clone)]
@@ -56,22 +183,31 @@ pub struct UndoService {
     redo: Vec<UndoEntry>,
     open_group: Option<OpenGroup>,
     capacity: usize,
+    limits: UndoLimits,
 }
 
 struct OpenGroup {
     label: String,
     /// Inverses in apply order; reversed when the group closes.
     inverses: Vec<Command>,
+    bytes: usize,
+    members: usize,
 }
 
 impl UndoService {
     /// Creates an empty service with the given stack capacity.
     pub fn new(capacity: usize) -> Self {
+        Self::with_limits(capacity, UndoLimits::default())
+    }
+
+    /// Creates history with explicit resource budgets.
+    pub fn with_limits(capacity: usize, limits: UndoLimits) -> Self {
         Self {
             undo: Vec::new(),
             redo: Vec::new(),
             open_group: None,
             capacity: capacity.max(1),
+            limits,
         }
     }
 
@@ -87,10 +223,27 @@ impl UndoService {
                 "a transaction group is already open".into(),
             ));
         }
+        let label = label.into();
+        if label.len() > self.limits.label_bytes
+            || label.len().saturating_add(GROUP_OVERHEAD) > self.limits.retained_bytes
+        {
+            return Err(limit_error());
+        }
         self.open_group = Some(OpenGroup {
-            label: label.into(),
+            bytes: label.len().saturating_add(GROUP_OVERHEAD),
+            label,
             inverses: Vec::new(),
+            members: 0,
         });
+        while self.retained_bytes() > self.limits.retained_bytes {
+            if !self.undo.is_empty() {
+                self.undo.remove(0);
+            } else if !self.redo.is_empty() {
+                self.redo.remove(0);
+            } else {
+                break;
+            }
+        }
         Ok(())
     }
 
@@ -130,12 +283,21 @@ impl UndoService {
     /// (irreversible command) records nothing — see module docs. Recording
     /// any new command clears the redo stack.
     pub fn record(&mut self, label: &str, inverse: Option<Command>) {
+        if self.preflight(label, inverse.as_ref(), true).is_err() {
+            return;
+        }
         self.redo.clear();
         let Some(inverse) = inverse else {
             return;
         };
         if let Some(group) = &mut self.open_group {
+            group.members += command_members(&inverse);
+            group.bytes += 1 + command_bytes(&inverse, self.limits.retained_bytes)
+                .unwrap_or(self.limits.retained_bytes);
             group.inverses.push(inverse);
+            while self.retained_bytes() > self.limits.retained_bytes && !self.undo.is_empty() {
+                self.undo.remove(0);
+            }
         } else {
             self.push_undo(UndoEntry {
                 label: label.to_string(),
@@ -157,11 +319,25 @@ impl UndoService {
     /// Records a successfully applied undo as a redoable step. Does not clear
     /// anything (unlike [`record`](Self::record)).
     pub fn push_redo(&mut self, entry: UndoEntry) {
+        if self
+            .preflight(&entry.label, Some(&entry.inverse), false)
+            .is_err()
+        {
+            return;
+        }
+        self.make_room(&entry);
         self.redo.push(entry);
     }
 
     /// Returns an entry to the undo stack after a failed undo attempt.
     pub fn push_undo_back(&mut self, entry: UndoEntry) {
+        if self
+            .preflight(&entry.label, Some(&entry.inverse), false)
+            .is_err()
+        {
+            return;
+        }
+        self.make_room(&entry);
         self.undo.push(entry);
     }
 
@@ -190,10 +366,87 @@ impl UndoService {
         self.redo.len()
     }
 
+    /// Validates a prospective retained inverse without changing history.
+    /// `joins_group` is false for a successful foreign controller boundary.
+    pub fn preflight(
+        &self,
+        label: &str,
+        inverse: Option<&Command>,
+        joins_group: bool,
+    ) -> Result<()> {
+        if label.len() > self.limits.label_bytes {
+            return Err(limit_error());
+        }
+        let Some(inverse) = inverse else {
+            return Ok(());
+        };
+        validate_structure(inverse, self.limits)?;
+        let bytes = command_bytes(inverse, self.limits.retained_bytes)?;
+        if joins_group {
+            if let Some(group) = &self.open_group {
+                if self.limits.nesting == 0 && !group.inverses.is_empty() {
+                    return Err(limit_error());
+                }
+                let mut grouped_limits = self.limits;
+                grouped_limits.nesting = grouped_limits.nesting.min(64).saturating_sub(1);
+                validate_structure(inverse, grouped_limits)?;
+                if group
+                    .members
+                    .saturating_add(command_members(inverse))
+                    .saturating_add(1)
+                    > self.limits.group_members
+                    || group.bytes.saturating_add(bytes).saturating_add(1)
+                        > self.limits.retained_bytes
+                {
+                    return Err(limit_error());
+                }
+                return Ok(());
+            }
+        }
+        if bytes.saturating_add(label.len()).saturating_add(128) > self.limits.retained_bytes {
+            return Err(limit_error());
+        }
+        Ok(())
+    }
+
+    /// Peeks without taking ownership so failed authorization preserves history.
+    pub fn next_undo(&self) -> Option<&UndoEntry> {
+        self.undo.last()
+    }
+    /// Peeks at the next redo step.
+    pub fn next_redo(&self) -> Option<&UndoEntry> {
+        self.redo.last()
+    }
+    fn retained_bytes(&self) -> usize {
+        self.undo
+            .iter()
+            .chain(&self.redo)
+            .map(|e| entry_bytes(e, self.limits.retained_bytes))
+            .sum::<usize>()
+            + self.open_group.as_ref().map_or(0, |g| g.bytes)
+    }
+    fn make_room(&mut self, entry: &UndoEntry) {
+        let bytes = entry_bytes(entry, self.limits.retained_bytes);
+        while self.retained_bytes().saturating_add(bytes) > self.limits.retained_bytes {
+            if !self.undo.is_empty() {
+                self.undo.remove(0);
+            } else if !self.redo.is_empty() {
+                self.redo.remove(0);
+            } else {
+                break;
+            }
+        }
+    }
+
     fn push_undo(&mut self, entry: UndoEntry) {
-        if self.undo.len() >= self.capacity {
+        let bytes = entry_bytes(&entry, self.limits.retained_bytes);
+        while !self.undo.is_empty()
+            && (self.undo.len() >= self.capacity
+                || self.retained_bytes().saturating_add(bytes) > self.limits.retained_bytes)
+        {
             self.undo.remove(0);
         }
+        self.make_room(&entry);
         self.undo.push(entry);
     }
 }
@@ -212,6 +465,48 @@ mod tests {
             scene_id,
             name: name.into(),
         }
+    }
+
+    #[test]
+    fn zero_nesting_group_remains_closable_after_second_member_rejection() {
+        let limits = UndoLimits {
+            nesting: 0,
+            ..UndoLimits::default()
+        };
+        let mut undo = UndoService::with_limits(10, limits);
+        undo.begin_transaction("single").unwrap();
+        undo.record("first", Some(cmd("one")));
+        assert!(undo.preflight("second", Some(&cmd("two")), true).is_err());
+        undo.end_transaction().unwrap();
+        validate_structure(&undo.next_undo().unwrap().inverse, limits).unwrap();
+    }
+
+    #[test]
+    fn total_byte_budget_is_preserved_while_group_grows_and_closes() {
+        let limits = UndoLimits {
+            retained_bytes: 2500,
+            ..UndoLimits::default()
+        };
+        let mut undo = UndoService::with_limits(10, limits);
+        undo.record("old one", Some(cmd(&"x".repeat(500))));
+        undo.record("old two", Some(cmd(&"x".repeat(500))));
+        undo.begin_transaction("group").unwrap();
+        assert!(undo.retained_bytes() <= limits.retained_bytes);
+        for _ in 0..2 {
+            let inverse = cmd(&"y".repeat(500));
+            undo.preflight("rename scene", Some(&inverse), true)
+                .unwrap();
+            undo.record("rename scene", Some(inverse));
+            assert!(undo.retained_bytes() <= limits.retained_bytes);
+        }
+        let before = undo.retained_bytes();
+        assert!(undo
+            .preflight("rename scene", Some(&cmd(&"z".repeat(2000))), true)
+            .is_err());
+        assert_eq!(undo.retained_bytes(), before);
+        undo.end_transaction().unwrap();
+        assert!(undo.retained_bytes() <= limits.retained_bytes);
+        assert_eq!(undo.undo_label(), Some("group"));
     }
 
     #[test]
