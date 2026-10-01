@@ -237,6 +237,7 @@ pub fn required_permission(command: &Command) -> Permission {
         | C::RemoveSource { .. }
         | C::RenameSource { .. }
         | C::SetSourceSettings { .. }
+        | C::AuthorizeSourceCapture { .. }
         | C::SetSourceEnabled { .. }
         | C::SetStudioModeEnabled { .. }
         | C::SetPreviewScene { .. }
@@ -532,6 +533,10 @@ mod tests {
                     source_id: source,
                     settings: serde_json::json!({}),
                 },
+                Permission::ControlScenes,
+            ),
+            (
+                Command::AuthorizeSourceCapture { source_id: source },
                 Permission::ControlScenes,
             ),
             (

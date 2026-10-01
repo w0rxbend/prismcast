@@ -207,6 +207,12 @@ pub enum RequestKind {
         enabled: bool,
     },
 
+    /// Explicitly initiates or retries display/window portal authorization.
+    AuthorizeSourceCapture {
+        /// Shared source to authorize; parent context stays local.
+        source_id: Uuid,
+    },
+
     // --- Audio (Command mirror) ---
     /// Sets a source's mixer volume.
     SetSourceVolume {
@@ -450,6 +456,7 @@ impl RequestKind {
             Self::RemoveSource { .. } => "remove_source",
             Self::RenameSource { .. } => "rename_source",
             Self::SetSourceSettings { .. } => "set_source_settings",
+            Self::AuthorizeSourceCapture { .. } => "authorize_source_capture",
             Self::SetSourceEnabled { .. } => "set_source_enabled",
             Self::SetSourceVolume { .. } => "set_source_volume",
             Self::SetSourceMuted { .. } => "set_source_muted",
@@ -592,6 +599,7 @@ mod tests {
                 source_id: source,
                 settings: serde_json::json!({"device": "/dev/video0"}),
             },
+            RequestKind::AuthorizeSourceCapture { source_id: source },
             RequestKind::SetSourceEnabled {
                 source_id: source,
                 enabled: false,

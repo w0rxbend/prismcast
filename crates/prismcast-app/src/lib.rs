@@ -44,6 +44,7 @@
 
 pub mod actor;
 pub mod broadcaster;
+pub mod capture;
 pub mod dispatch;
 pub mod persistence;
 pub mod snapshot;
@@ -57,6 +58,7 @@ pub use broadcaster::{
     category_of, primary_entity, EventBroadcaster, EventCategory, EventFilter, EventStream,
     StreamEvent, DEFAULT_SUBSCRIBER_CAPACITY, MIN_SUBSCRIBER_CAPACITY,
 };
+pub use capture::{CaptureAuthorizationRequest, CaptureOwner, CaptureRuntimeHandle};
 pub use dispatch::{required_permission, Permission, Permissions, Query, QueryResponse};
 pub use persistence::{
     dirty_class, DirtyClass, PersistenceConfig, PersistenceEvent, PersistenceHandle,

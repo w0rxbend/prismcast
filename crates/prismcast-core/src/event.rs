@@ -91,6 +91,18 @@ pub enum SceneEvent {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum SourceEvent {
+    /// An explicit authorization command was admitted by the application owner.
+    CaptureAuthorizationRequested {
+        /// Capture source.
+        source_id: SourceId,
+    },
+    /// Transient lifecycle/caps changed; None invalidates prior capture runtime.
+    RuntimeChanged {
+        /// Capture source.
+        source_id: SourceId,
+        /// New transient observation, never a portal grant.
+        runtime: Option<crate::SourceRuntime>,
+    },
     /// A source was added.
     Added {
         /// The added source (full snapshot for controllers).

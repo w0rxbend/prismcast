@@ -70,6 +70,8 @@ impl WireEvent {
                 SourceEvent::Removed { source_id }
                 | SourceEvent::Renamed { source_id, .. }
                 | SourceEvent::SettingsChanged { source_id }
+                | SourceEvent::CaptureAuthorizationRequested { source_id }
+                | SourceEvent::RuntimeChanged { source_id, .. }
                 | SourceEvent::EnabledChanged { source_id, .. } => Some(*source_id),
             },
             Self::Audio(event) => match event {
@@ -163,6 +165,18 @@ pub enum SceneEvent {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum SourceEvent {
+    /// Explicit authorization request was admitted.
+    CaptureAuthorizationRequested {
+        /// Capture source.
+        source_id: Uuid,
+    },
+    /// Transient lifecycle/caps updated; None invalidates prior runtime.
+    RuntimeChanged {
+        /// Capture source.
+        source_id: Uuid,
+        /// Observation without live grants.
+        runtime: Option<crate::data::SourceRuntime>,
+    },
     /// A source was added.
     Added {
         /// The added source (full snapshot).

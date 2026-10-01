@@ -21,6 +21,8 @@
 //! If profiling ever shows clone cost mattering, the internals can switch to a
 //! persistent structure without changing the public read API.
 
+use prismcast_core::SourceRuntime;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use prismcast_core::id::{OutputId, SceneId, SourceId};
@@ -38,12 +40,33 @@ use prismcast_core::state::AppState;
 pub struct AppSnapshot {
     revision: u64,
     state: AppState,
+    runtime: HashMap<SourceId, SourceRuntime>,
 }
 
 impl AppSnapshot {
     /// Wraps a state clone at the given revision. Called by the core actor.
     pub(crate) fn new(revision: u64, state: AppState) -> Arc<Self> {
-        Arc::new(Self { revision, state })
+        Self::with_runtime(revision, state, HashMap::new())
+    }
+
+    pub(crate) fn with_runtime(
+        revision: u64,
+        state: AppState,
+        runtime: HashMap<SourceId, SourceRuntime>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            revision,
+            state,
+            runtime,
+        })
+    }
+    /// Transient capture observation, absent until explicit authorization.
+    pub fn source_runtime(&self, source_id: SourceId) -> Option<&SourceRuntime> {
+        self.runtime.get(&source_id)
+    }
+    /// Current bounded runtime observations, independent of persisted state.
+    pub fn source_runtimes(&self) -> impl Iterator<Item = (SourceId, &SourceRuntime)> {
+        self.runtime.iter().map(|(id, value)| (*id, value))
     }
 
     /// Monotonically increasing publish counter (0 = initial state).
