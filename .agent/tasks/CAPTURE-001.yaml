@@ -21,4 +21,4 @@ acceptance:
 - Opt-in real GNOME Wayland test/probe establishes frames and teardown where user selection is available; absent grant is reported separately from unit evidence
 - Production compositor/core/UI authorization wiring is a separately specified CAPTURE-002 follow-up, not claimed by this foundation
 validation: [just ci, just deny, focused lifecycle/native tests, separately recorded opt-in portal smoke test]
-status: in_progress
+status: done

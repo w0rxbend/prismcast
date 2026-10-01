@@ -1,0 +1,34 @@
+id: CAPTURE-002
+title: Command-driven portal authorization and shared native capture preview
+goal: Connect the CAPTURE-001 lease to the single Core API and current preview graph without persisting live permissions.
+depends_on: [CAPTURE-001, MEDIA-004]
+allowed_scope:
+- crates/prismcast-core/
+- crates/prismcast-app/
+- crates/prismcast-media/
+- crates/prismcast-media-gst/
+- crates/prismcast-compositor/
+- crates/prismcast-capture/
+- crates/prismcast-preview/
+- crates/prismcast-ui/
+- crates/prismcast-protocol/
+- crates/prismcast-remote/
+- Cargo.toml
+- Cargo.lock
+- docs/adr/
+- docs/research/
+- docs/testing/
+- docs/protocols/
+acceptance:
+- Explicit Core Commands initiate or retry authorization; controllers receive Core Events and snapshots for runtime status
+- Restoring snapshots never automatically opens a picker; cancellation and denial leave a clearly recoverable source
+- One capture lease and native shared source per SourceId survive scene-item changes and prototype graph rebuilds
+- Parent-window export stays GTK-local; portal requests and graph mutation stay on their respective owners
+- Owned remote FD and node grants remain ephemeral outside persistence and wire settings
+- Actual negotiated caps update framework-free source dimensions for compositor and preview editing; portal coordinate size is never treated as pixels
+- Revocation/removal/disable/shutdown cancel work and release native graph before voluntary session close; no automatic picker retry loops
+- UI permits monitor/window creation and explicit retry through Commands, with pending/error/revoked presentation
+- Appropriate protocol/persistence classification and all controller invariants remain validated
+- Mock interleaving/revocation tests and opt-in actual GNOME window/monitor pixels and shutdown are separately recorded
+validation: [just ci, just deny, separate real-display and portal tests]
+status: ready

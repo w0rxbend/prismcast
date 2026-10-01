@@ -18,4 +18,4 @@ acceptance:
 - Mixed-controller chronology and mixed-domain authorization have meaningful actor tests
 - Existing meta APIs remain compatible; new UI/wire operations and destructive restoration are explicitly separate follow-ups
 validation: [just ci, just deny, focused actor/history tests]
-status: in_progress
+status: done

@@ -128,7 +128,7 @@ tasks:
     title: Undo/redo
     priority: 40
     depends_on: [CORE-002]
-    status: in_progress
+    status: done
 
   # --- Media prototype (Phase 2) ---
   - id: MEDIA-001
@@ -201,9 +201,9 @@ tasks:
     title: Portal session ownership and native PipeWire capture foundation
     priority: 60
     depends_on: [RES-004, MEDIA-005]
-    status: in_progress
+    status: done
   - id: CAPTURE-002
     title: Command-driven portal authorization and shared capture preview
     priority: 61
     depends_on: [CAPTURE-001, MEDIA-004]
-    status: blocked
+    status: ready

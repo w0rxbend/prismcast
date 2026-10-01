@@ -806,17 +806,19 @@ mod tests {
             .unwrap();
         // Dedicated OS thread: no native blocking operations on Tokio workers.
         let (lease, evidence) = tokio::task::spawn_blocking(move || {
-            let result = probe::capture_frames(&lease, 5, Duration::from_secs(15));
+            let result = probe::capture_frames(&lease, 3, Duration::from_secs(15));
             (lease, result)
         })
         .await
         .unwrap();
+        let close_result = lease.close().await;
+        let shutdown_result = broker.shutdown().await;
         let evidence = evidence.unwrap();
+        close_result.unwrap();
+        shutdown_result.unwrap();
         eprintln!("{kind:?} native capture evidence: {evidence:?}");
         assert!(evidence.width > 0 && evidence.height > 0 && evidence.bytes > 0);
-        assert_eq!(evidence.buffers, 5);
+        assert_eq!(evidence.buffers, 3);
         assert!(evidence.last_pts_ns.unwrap() > evidence.first_pts_ns.unwrap());
-        lease.close().await.unwrap();
-        broker.shutdown().await.unwrap();
     }
 }

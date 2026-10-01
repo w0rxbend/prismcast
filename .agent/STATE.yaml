@@ -1,7 +1,7 @@
 schema_version: 1
 project_phase: phase-3-linux-capture
-head_commit: b59f585
-current_objective: Harden undo ownership and establish portal/PipeWire capture foundations
+head_commit: 2477c4b
+current_objective: Integrate command-driven portal authorization and shared capture preview
 completed:
 - RESUME-001
 - SKILL-001
@@ -41,12 +41,12 @@ completed:
 - MEDIA-004
 - MEDIA-005
 - UI-002
-in_progress:
 - CORE-005
 - CAPTURE-001
+in_progress: []
 blocked: []
 next_candidates:
-- CORE-005
+- CAPTURE-002
 - WS-002
 decisions:
 - ADR-0001
@@ -63,15 +63,21 @@ decisions:
 - ADR-0012
 - ADR-0013
 - ADR-0014
+- ADR-0015
+- ADR-0016
 verification:
   cargo_fmt: pass
   cargo_clippy: pass
   cargo_test: pass
   cargo_deny: pass
+  portal_capture: awaiting_user_selection
 last_agent:
   model: codex
-  session: dynamic-preview-transform-wave
+  session: dynamic-undo-capture-wave
 open_questions:
+- Canonical Undo/Redo Commands and protocol/UI integration remain follow-up work
+- Destructive Add/Remove undo and persisted history are not implemented
+- Z-order boundary overflow and missing neighbor update events need coordinated core fixes
 - Atomic expected-version editing command needed to close snapshot-read to dispatch race (UI-002)
 - Source negotiated dimensions contract needed before preview editing other source kinds (UI-002)
 - gst-plugins-rs vendoring: isobmff/wpe2/gopbuffer not distro-packaged (RES-003)

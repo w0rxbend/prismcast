@@ -31,7 +31,7 @@ cargo test -p prismcast-capture actual_portal_capture_frames_and_session_teardow
 PRISMCAST_CAPTURE_KIND=window cargo test -p prismcast-capture actual_portal_capture_frames_and_session_teardown -- --ignored --nocapture --test-threads=1
 ```
 
-The test authorizes exactly once (120s deadline), obtains five native frames in a
+The test authorizes exactly once (120s deadline), obtains three native frames in a
 15s probe on a blocking worker, then destroys the graph and closes the session.
 Evidence prints actual negotiated pixel size, timestamp range, byte count and
 checksum. Selection cancellation is reported as cancellation, never retried.

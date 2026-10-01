@@ -626,3 +626,28 @@ Completed dynamic implementation/review wave. Integrated pure geometry (5fb0831)
 Final combined just ci passed: 382 tests, five ignored display tests. just deny passed (existing unmatched license allowance warnings only). All five separate real-display regressions passed on the integrated tree with Cairo GSK and fatal GTK criticals: native paintable pixels/failure recovery/shutdown, actual RelmApp preview/repeated close, production preview gestures/actions including an 80 ms GTK loop interval, scene dialogs, and rapid source toggles. No GTK criticals occurred. Tests do not simulate physical pointer devices or establish GPU/capture/output paths.
 
 ADR-0014 records shared framework-free geometry and single-command local drafts; future atomic expected-version core edits and negotiated source dimensions remain follow-ups. Task statuses/state/handoff updated; next work is CORE-005 undo refinement and scoped PLAN §45 Linux capture. Prototype NULL-barrier, Normal-only blending, cardinal quantization, and bounds-resize limitations remain documented.
+
+## 2026-10-01 — CORE-005 / CAPTURE-001 coordinated wave
+
+Integrated independently implemented/reviewed undo hardening (f8b4137), portal
+capture foundations (f724c04), and full-group no-op regression fix (2477c4b).
+Undo controller ownership, payload/member/nesting bounds and inverse permission
+checks preserve history on failure; no-op commands remain accepted at group caps.
+Capture has bounded portal lease ownership, ephemeral FD/node grants, cancellation,
+revocation, registered probe cleanup and runtime/property validation. Fourteen
+capture tests passed, including actual headless RGBA caps/buffer evidence.
+
+Final combined just ci passed: 406 passed, six opt-in tests ignored. just deny
+passed. Five separately run real-display tests passed with cairo renderer and
+fatal GTK criticals: native_preview_commands, native_shell_preview,
+production_preview_gesture, scene_dialog_signals_validate_names_and_require_explicit_removal,
+and rapid_visible_and_locked_toggles. Independent final reviews found no blockers.
+Real portal frames remain unverified pending user sharing-target selection; no
+portal dialog was opened. Opt-in probe reads three frames and explicitly closes
+lease/broker before reporting a failed probe. Headless evidence is not live capture.
+
+Marked CORE-005/CAPTURE-001 done and authored ready CAPTURE-002 scope for command-driven
+authorization, shared capture preview, negotiated dimensions and revocation cleanup.
+Canonical undo commands/UI/wire and destructive history remain follow-ups. Recorded
+z-order overflow/missing neighbor events for a coordinated core change. Commits
+are local only; no remote push authorized. Existing archive/stash/worktrees retained.

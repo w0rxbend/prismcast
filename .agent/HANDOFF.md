@@ -1,57 +1,52 @@
 # Current state
 
-The Phase 2 CPU media prototype and interactive preview milestone are complete.
-This wave used separate MEDIA-005/UI-002 implementation worktrees and independent
-review, integrated on agent/TRANSFORM-INTEGRATION before advancing main.
+CORE-005 undo hardening and CAPTURE-001 portal/PipeWire foundations are complete.
+Separate task worktrees and independent reviews were integrated on
+agent/CAPTURE-INTEGRATION. No remote push was requested or performed.
 
-## Completed in this wave
+## Completed
 
-- MEDIA-005: shared pure prismcast-compositor geometry (5fb0831), then native
-  crop, all anchors, bounds fitting, cardinal rotation, source-axis signed flips
-  and canvas-axis sizing (f1f525c). Geometry handles huge crop edges, zero/subpixel
-  scale and finite/resource validation. Eighteen native backend tests plus six
-  pure geometry tests cover actual asymmetric pixel orientation and cleanup.
-- UI-002: selection outlines and a placement picker, letterbox-aware hit-testing,
-  local move/resize drafts, one Command per gesture, numeric Apply, Rotate90 and
-  Flip X/Y (b59f585). Locked/unavailable placements cannot be edited. Fresh core
-  snapshots, scene/profile/item/source changes, Escape/cancel and allocation
-  changes invalidate stale drafts. Dedicated preview acknowledgements gate
-  pending edits independently of other command responses.
-- Actual GTK main-loop regression caught a picker feedback loop; stable choice
-  models, an explicit placeholder and unchanged-ID notification guards resolve it.
-  The native test waits after gesture begin to prove it survives queued GTK work.
-- ADR-0014 records shared geometry, local drafts and the remaining non-atomic
-  snapshot-read/dispatch boundary. No new core Command, schema or protocol.
+- CORE-005 (f8b4137, 2477c4b): typed controller identities, isolated remote
+  controllers, bounded undo payloads/groups/labels/nesting, chronological foreign
+  mutation boundaries, actor-side inverse authorization and failure-preserving
+  history. Own/foreign no-op commands preserve group and redo history, including
+  when an open group has reached its admission limit. ADR-0015 records the scope.
+- CAPTURE-001 (f724c04): new GTK-independent prismcast-capture crate owns portal
+  session authorization, ephemeral PipeWire FD/node grants, bounded lease/probe
+  capacity, cancellation/revocation and orderly worker/session cleanup. Native
+  RGBA probe validates caps, buffers and timestamps; runtime/property checks return
+  typed errors. ADR-0016 and docs/research/capture-lease-native.md explain ownership.
+- Fourteen capture tests cover mocked lifecycle and real headless GStreamer buffer
+  evidence. Real portal capture remains unverified: the user was offered a window
+  or monitor test, but no target selection has arrived and no dialog was opened.
+  The opt-in test reads three frames and closes the session even on probe failure.
 
 ## Validation
 
-Final combined just ci passed: 382 tests, with five display tests ignored by the
-headless suite. just deny passed. Separate real-display tests cover native
-paintable pixels/failure recovery/shutdown, actual RelmApp preview and repeated
-window close, production preview gesture/action signals, scene dialogs and rapid
-source toggles. Commands and evidence are in docs/testing/preview-editor.md,
-cpu-transforms.md, native-preview.md and the scene/source signal notes.
+Combined just ci passed: 406 tests passed, six opt-in tests ignored. just deny
+passed. Five separate real-display regressions cover preview, shell, gesture,
+scene dialogs and rapid source toggles; see the journal for final results.
+Portal test instructions: docs/testing/portal-capture.md. Undo evidence:
+docs/testing/undo-history.md. Headless probe evidence does not establish actual
+monitor/window capture or UI integration.
 
-## Next work and limits
+## Next task and limits
 
-Author a scoped CORE-005 task for undo/redo refinements; core already has inverses
-and grouped-undo scaffolding, but open groups can grow without bounds and group
-commands from different controllers are not isolated. UI-002 deliberately sends
-one final gesture command and does not use global BeginUndoGroup. Z-order actions
-need i32-boundary hardening before exposing more editor controls.
+CAPTURE-002 is ready with a concrete spec in .agent/tasks/CAPTURE-002.yaml:
+Core Commands authorize/retry, Core Events/snapshots expose runtime status,
+GTK exports the local parent window, and the media graph shares one capture lease
+per source across rebuilds. Negotiate source dimensions, support revocation and
+cleanup, and require explicit authorization rather than opening pickers from
+restored state. Production compositor/UI currently still supports TestPattern;
+CAPTURE-001 alone does not add a screen/window source to the application.
 
-Prepare the Phase 3 Linux capture wave from PLAN §45 and existing capture research:
-portal/PipeWire monitor/window capture, then V4L2 and audio/device discovery. The
-prototype currently renders TestPattern sources; other kinds show a backend error.
-Future preview support needs negotiated source dimensions beyond TestPattern.
+Undo/redo remain existing application metadata APIs; canonical Commands and
+UI/protocol controls, destructive Add/Remove restoration and persisted history
+are follow-ups. Z-order i32 boundary overflow and missing neighbor update events
+need a coordinated core change. Existing preview non-atomic edit preflight,
+cardinal rotation/Normal blend limitations and CPU rebuild frame interruption
+remain. Capture lease caps are bounded; v6 portal serial targeting is deferred.
 
-Free-angle rotation quantizes to cardinal steps with bounded diagnostics. Only
-Normal blending is supported. Bounds-driven placements can move but pointer
-resize/numeric scale edits are disabled. CPU graph changes retain the NULL barrier
-and can briefly interrupt frames. GPU/capture/audio/output and physical pointer
-recognition are not established by these tests. A future expected-version core
-command is needed for atomic remote-edit protection after client preflight.
-
-Run: cargo run -p prismcast-ui --bin prismcast. Prior overlapping agent edits remain
-preserved on archive/paused-agent-phase2 (2ce3390) and the named stash; do not
-reapply its alternate backend API wholesale. Worktrees remain for review.
+Prior overlapping edits remain preserved on archive/paused-agent-phase2 (2ce3390)
+and its named stash. Do not reapply the alternate backend API wholesale.
+Worktrees remain available for review. No secrets or portal grants are persisted.
