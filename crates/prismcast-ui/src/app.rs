@@ -43,6 +43,7 @@ pub enum AppMsg {
     SelectScene(SceneId),
     /// Scene edit forwarded to the shared command dispatcher.
     SceneCommand(Command),
+    SourceCommand(Box<Command>),
     /// The user clicked "+" in the scenes panel.
     AddSceneRequested,
     /// The add-scene dialog was confirmed.
@@ -53,6 +54,8 @@ pub enum AppMsg {
     AddSourceSubmitted {
         /// Chosen source kind.
         kind: SourceKind,
+        /// Scene captured when the dialog was opened.
+        scene_id: SceneId,
         /// Chosen source name.
         name: String,
     },
@@ -73,6 +76,12 @@ pub enum AppMsg {
 pub enum AppCmd {
     /// A command dispatch returned (success or rejection).
     Dispatched(Result<CommandResponse, HandleError>),
+    /// Creating a shared source succeeded but placing it failed.
+    PlacementFailed {
+        source_id: prismcast_core::SourceId,
+        error: HandleError,
+    },
+    SourceEventMissing,
 }
 
 /// The root application model. Holds the core bridge, the panel controllers,
@@ -172,7 +181,11 @@ impl AppModel {
     }
 
     /// Shows a dialog asking for a new source's kind and name.
-    fn present_add_source_dialog(root: &adw::ApplicationWindow, sender: relm4::Sender<AppMsg>) {
+    fn present_add_source_dialog(
+        root: &adw::ApplicationWindow,
+        sender: relm4::Sender<AppMsg>,
+        scene_id: SceneId,
+    ) {
         let dialog = adw::Dialog::new();
         dialog.set_title("Add Source");
         dialog.set_content_width(360);
@@ -224,7 +237,11 @@ impl AppModel {
                     .map(|(kind, _)| *kind)
                     .unwrap_or(SourceKind::TestPattern);
                 if !name.is_empty() {
-                    sender.emit(AppMsg::AddSourceSubmitted { kind, name });
+                    sender.emit(AppMsg::AddSourceSubmitted {
+                        kind,
+                        name,
+                        scene_id,
+                    });
                     dialog.close();
                 }
             }
@@ -348,6 +365,7 @@ impl AsyncComponent for AppModel {
                 .launch(())
                 .forward(sender.input_sender(), |message| match message {
                     SourcesOutput::AddRequested => AppMsg::AddSourceRequested,
+                    SourcesOutput::Command(command) => AppMsg::SourceCommand(command),
                 });
         let outputs =
             OutputsPanel::builder()
@@ -468,11 +486,41 @@ impl AsyncComponent for AppModel {
             AppMsg::AddSceneSubmitted(name) => {
                 self.dispatch(&sender, Command::AddScene { name });
             }
+            AppMsg::SourceCommand(command) => self.dispatch(&sender, *command),
             AppMsg::AddSourceRequested => {
-                Self::present_add_source_dialog(root, sender.input_sender().clone());
+                if let Some(scene_id) = self.bridge.handle().snapshot().current_scene() {
+                    Self::present_add_source_dialog(root, sender.input_sender().clone(), scene_id);
+                } else {
+                    self.toast_overlay.add_toast(adw::Toast::new(
+                        "Add or select a scene before creating a source.",
+                    ));
+                }
             }
-            AppMsg::AddSourceSubmitted { kind, name } => {
-                self.dispatch(&sender, Command::AddSource { kind, name });
+            AppMsg::AddSourceSubmitted {
+                kind,
+                name,
+                scene_id,
+            } => {
+                let handle = self.bridge.handle().clone();
+                sender.oneshot_command(async move {
+                    let response = match handle.dispatch(Command::AddSource { kind, name }).await {
+                        Ok(response) => response,
+                        Err(error) => return AppCmd::Dispatched(Err(error)),
+                    };
+                    let Some(source_id) = created_source_id(&response.events) else {
+                        return AppCmd::SourceEventMissing;
+                    };
+                    match handle
+                        .dispatch(Command::AddSceneItem {
+                            scene_id,
+                            source_id,
+                        })
+                        .await
+                    {
+                        Ok(response) => AppCmd::Dispatched(Ok(response)),
+                        Err(error) => AppCmd::PlacementFailed { source_id, error },
+                    }
+                });
             }
             AppMsg::AddOutputRequested => {
                 let output = Output::new(OutputKind::Recording, "Recording", EncoderId::new());
@@ -506,6 +554,13 @@ impl AsyncComponent for AppModel {
         _root: &Self::Root,
     ) {
         match message {
+            AppCmd::PlacementFailed { source_id, error } => {
+                warn!(%source_id, %error, "shared source created but placement failed");
+                self.toast_overlay.add_toast(adw::Toast::new(&format!("Source was created, but could not be placed: {error}. Place it from Shared sources.")));
+            }
+            AppCmd::SourceEventMissing => {
+                self.toast_overlay.add_toast(adw::Toast::new("Source creation returned no source ID; inspect Shared sources before retrying."));
+            }
             AppCmd::Dispatched(Ok(response)) => {
                 debug!(
                     label = response.label,
@@ -519,5 +574,99 @@ impl AsyncComponent for AppModel {
                     .add_toast(adw::Toast::new(&format!("Command failed: {error}")));
             }
         }
+    }
+}
+
+fn created_source_id(events: &[prismcast_core::Event]) -> Option<prismcast_core::SourceId> {
+    events.iter().find_map(|event| match event {
+        prismcast_core::Event::Source(prismcast_core::SourceEvent::Added { source }) => {
+            Some(source.id)
+        }
+        _ => None,
+    })
+}
+
+#[cfg(test)]
+mod source_placement_tests {
+    use super::*;
+    #[test]
+    fn uses_committed_source_identity_and_handles_missing_creation_event() {
+        let source = prismcast_core::Source::new(SourceKind::TestPattern, "Pattern");
+        let id = source.id;
+        assert_eq!(created_source_id(&[]), None);
+        assert_eq!(
+            created_source_id(&[prismcast_core::Event::Source(
+                prismcast_core::SourceEvent::Added {
+                    source: Box::new(source)
+                }
+            )]),
+            Some(id)
+        );
+    }
+    #[test]
+    fn placement_uses_captured_scene_and_preserves_source_on_missing_scene() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let handle = prismcast_app::AppHandle::spawn(prismcast_app::CoreConfig::default());
+            handle
+                .dispatch(Command::AddScene {
+                    name: "Target".into(),
+                })
+                .await
+                .unwrap();
+            let target = handle.snapshot().scenes().next().unwrap().id;
+            handle
+                .dispatch(Command::AddScene {
+                    name: "Other".into(),
+                })
+                .await
+                .unwrap();
+            let other = handle
+                .snapshot()
+                .scenes()
+                .find(|scene| scene.id != target)
+                .unwrap()
+                .id;
+            handle
+                .dispatch(Command::SetCurrentScene { scene_id: other })
+                .await
+                .unwrap();
+            let response = handle
+                .dispatch(Command::AddSource {
+                    kind: SourceKind::TestPattern,
+                    name: "Pattern".into(),
+                })
+                .await
+                .unwrap();
+            let source_id = created_source_id(&response.events).unwrap();
+            handle
+                .dispatch(Command::AddSceneItem {
+                    scene_id: target,
+                    source_id,
+                })
+                .await
+                .unwrap();
+            assert_eq!(
+                handle.snapshot().state().scenes[&target].items[0].source_id,
+                source_id
+            );
+            assert!(handle.snapshot().state().scenes[&other].items.is_empty());
+            handle
+                .dispatch(Command::RemoveScene { scene_id: target })
+                .await
+                .unwrap();
+            assert!(handle
+                .dispatch(Command::AddSceneItem {
+                    scene_id: target,
+                    source_id
+                })
+                .await
+                .is_err());
+            assert!(handle.snapshot().state().sources.contains_key(&source_id));
+            handle.shutdown().await;
+        });
     }
 }
