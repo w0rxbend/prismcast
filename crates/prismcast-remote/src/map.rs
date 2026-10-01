@@ -1364,6 +1364,76 @@ mod tests {
     use prismcast_protocol::subscription::{Subscription, SubscriptionSet};
     use uuid::Uuid;
 
+    #[tokio::test]
+    async fn capture_command_runtime_snapshot_and_events_are_grant_free_wire_types() {
+        use prismcast_core::{CaptureStatus, SourceDimensions};
+        let mut state = AppState::new();
+        let source = Source::new(SourceKind::PipeWireDisplay, "screen");
+        let source_id = source.id;
+        state.sources.insert(source_id, source);
+        let app =
+            prismcast_app::AppHandle::spawn_with_state(state, prismcast_app::CoreConfig::default());
+        let mut owner = app.attach_capture_owner().await.unwrap();
+        let wire_request: RequestKind = serde_json::from_value(serde_json::json!({"request":"authorize_source_capture", "source_id":source_id.as_uuid()})).unwrap();
+        assert_eq!(
+            command_from_wire(wire_request).unwrap(),
+            Command::AuthorizeSourceCapture { source_id }
+        );
+        let response = app
+            .authorize_source_capture(source_id, Some("x11:abc123".into()))
+            .await
+            .unwrap();
+        let request = owner.requests.recv().await.unwrap();
+        owner
+            .runtime
+            .report(
+                source_id,
+                request.generation,
+                CaptureStatus::Active,
+                Some(SourceDimensions {
+                    width: 6144,
+                    height: 3456,
+                }),
+                None,
+            )
+            .await
+            .unwrap();
+        let snapshot = snapshot_to_wire(&app.snapshot());
+        assert_eq!(snapshot.source_runtime.len(), 1);
+        let observation = &snapshot.source_runtime[0];
+        assert_eq!(observation.source_id, *source_id.as_uuid());
+        assert_eq!(observation.runtime.generation, request.generation.value());
+        assert_eq!(observation.runtime.status, data::CaptureStatus::Active);
+        assert_eq!(
+            observation.runtime.dimensions,
+            Some(data::SourceDimensions {
+                width: 6144,
+                height: 3456
+            })
+        );
+        let json = serde_json::to_value(&snapshot).unwrap();
+        assert!(!json.to_string().contains("abc123"));
+        assert!(json["sources"][0].get("runtime").is_none());
+        assert!(json["sources"][0]["settings"].is_null());
+        let roundtrip: data::StateSnapshot = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(roundtrip, snapshot);
+        // Older wire snapshots omit the additive observation map.
+        let mut older = json;
+        older.as_object_mut().unwrap().remove("source_runtime");
+        assert!(serde_json::from_value::<data::StateSnapshot>(older)
+            .unwrap()
+            .source_runtime
+            .is_empty());
+        for event in response.events {
+            let wire = event_to_wire(&event);
+            assert_eq!(wire.primary_entity(), Some(*source_id.as_uuid()));
+            let encoded = serde_json::to_value(&wire).unwrap();
+            assert!(!encoded.to_string().contains("abc123"));
+            assert_eq!(serde_json::from_value::<WireEvent>(encoded).unwrap(), wire);
+        }
+        app.shutdown().await;
+    }
+
     #[test]
     fn available_requests_are_real_tags() {
         // Drift guard: every listed tag must be a known `RequestKind` serde
