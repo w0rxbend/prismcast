@@ -110,16 +110,39 @@ pub fn source_kind_label(kind: &SourceKind) -> &'static str {
 }
 
 /// Runtime permission/capture state; absence never triggers a permission picker.
-pub fn capture_status_label(runtime: Option<&prismcast_core::SourceRuntime>) -> &'static str {
+/// The Authorizing label is kind-aware in presentation only (ADR-0019): the
+/// core CaptureStatus vocabulary is untouched.
+pub fn capture_status_label(
+    kind: &SourceKind,
+    runtime: Option<&prismcast_core::SourceRuntime>,
+) -> &'static str {
     use prismcast_core::CaptureStatus;
     match runtime.map(|runtime| runtime.status) {
         None => "Authorization required",
-        Some(CaptureStatus::Authorizing) => "Choose a monitor or window…",
+        Some(CaptureStatus::Authorizing) => match kind {
+            SourceKind::V4l2Camera => "Opening camera…",
+            _ => "Choose a monitor or window…",
+        },
         Some(CaptureStatus::Active) => "Capturing",
         Some(CaptureStatus::Cancelled) => "Selection cancelled",
         Some(CaptureStatus::Denied) => "Permission denied",
         Some(CaptureStatus::Revoked) => "Capture permission revoked",
         Some(CaptureStatus::Failed) => "Capture unavailable",
+    }
+}
+
+/// Label for the explicit capture control. Cameras have no portal picker or
+/// lease, so their control starts the device rather than authorizing a portal
+/// session (ADR-0019); presentation only.
+pub fn capture_button_label(
+    kind: &SourceKind,
+    runtime: Option<&prismcast_core::SourceRuntime>,
+) -> &'static str {
+    match (kind, runtime) {
+        (SourceKind::V4l2Camera, None) => "Start Camera",
+        (SourceKind::V4l2Camera, Some(_)) => "Retry Camera",
+        (_, None) => "Authorize Capture",
+        (_, Some(_)) => "Retry Authorization",
     }
 }
 
@@ -159,7 +182,8 @@ mod tests {
     #[test]
     fn capture_statuses_show_explicit_authorization_and_recovery() {
         use prismcast_core::{CaptureGeneration, CaptureStatus, SourceRuntime};
-        assert_eq!(capture_status_label(None), "Authorization required");
+        let kind = SourceKind::PipeWireDisplay;
+        assert_eq!(capture_status_label(&kind, None), "Authorization required");
         for (status, expected) in [
             (CaptureStatus::Authorizing, "Choose a monitor or window…"),
             (CaptureStatus::Active, "Capturing"),
@@ -174,8 +198,39 @@ mod tests {
                 dimensions: None,
                 message: None,
             };
-            assert_eq!(capture_status_label(Some(&runtime)), expected);
+            assert_eq!(capture_status_label(&kind, Some(&runtime)), expected);
         }
+    }
+
+    #[test]
+    fn camera_presentation_is_kind_aware_without_touching_status_vocabulary() {
+        use prismcast_core::{CaptureGeneration, CaptureStatus, SourceRuntime};
+        let camera = SourceKind::V4l2Camera;
+        let authorizing = SourceRuntime {
+            generation: CaptureGeneration::new(1),
+            status: CaptureStatus::Authorizing,
+            dimensions: None,
+            message: None,
+        };
+        assert_eq!(
+            capture_status_label(&camera, None),
+            "Authorization required"
+        );
+        assert_eq!(
+            capture_status_label(&camera, Some(&authorizing)),
+            "Opening camera…"
+        );
+        assert_eq!(capture_button_label(&camera, None), "Start Camera");
+        assert_eq!(
+            capture_button_label(&camera, Some(&authorizing)),
+            "Retry Camera"
+        );
+        let portal = SourceKind::PipeWireWindow;
+        assert_eq!(capture_button_label(&portal, None), "Authorize Capture");
+        assert_eq!(
+            capture_button_label(&portal, Some(&authorizing)),
+            "Retry Authorization"
+        );
     }
 
     #[test]

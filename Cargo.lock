@@ -1608,6 +1608,7 @@ dependencies = [
  "gtk4",
  "libadwaita",
  "prismcast-app",
+ "prismcast-capture",
  "prismcast-compositor",
  "prismcast-core",
  "prismcast-preview",
