@@ -22,6 +22,7 @@ prismcast-preview = { path = "../prismcast-preview", version = "0.1.0" }
 # relm4 0.11 pairs with gtk4-rs 0.11; libadwaita 0.9 targets libadwaita 1.9
 # and the same gtk4 0.11 line. `v1_5` unlocks adw::Dialog.
 gtk = { package = "gtk4", version = "0.11.2" }
+gdk4-wayland = { version = "0.11", features = ["v4_12"] }
 adw = { package = "libadwaita", version = "0.9.2", features = ["v1_5"] }
 relm4 = { version = "0.11.0", features = ["libadwaita"] }
 

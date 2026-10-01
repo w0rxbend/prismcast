@@ -26,4 +26,5 @@ pub mod bridge;
 pub mod components;
 pub mod presentation;
 
+mod capture_parent;
 pub mod preview_editor;

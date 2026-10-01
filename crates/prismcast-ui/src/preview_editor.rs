@@ -1,7 +1,7 @@
 //! GTK-local preview selection/drafts. Only completed intents leave as Commands.
 use gtk::prelude::*;
 use prismcast_app::AppSnapshot;
-use prismcast_compositor::{anchor_fractions, layout_item, test_pattern_source_size, ItemLayout};
+use prismcast_compositor::{anchor_fractions, layout_item, ItemLayout, SourceSize};
 use prismcast_core::{
     BoundsKind, Command, SceneId, SceneItem, SceneItemId, Source, Transform, VideoConfig,
 };
@@ -70,17 +70,33 @@ fn video(snapshot: &AppSnapshot) -> VideoConfig {
 fn rotate90(rotation: f32) -> f32 {
     ((rotation.rem_euclid(360.0) / 90.0).round() * 90.0 + 90.0).rem_euclid(360.0)
 }
-fn geometry(item: &SceneItem, source: &Source) -> Option<ItemLayout> {
+fn source_size(snapshot: Option<&AppSnapshot>, source: &Source) -> Option<SourceSize> {
+    let negotiated = snapshot
+        .and_then(|snapshot| snapshot.source_runtime(source.id))
+        .filter(|runtime| runtime.status == prismcast_core::CaptureStatus::Active)
+        .and_then(|runtime| runtime.dimensions)
+        .map(|dimensions| SourceSize {
+            width: dimensions.width,
+            height: dimensions.height,
+        });
+    prismcast_compositor::source_size(source, negotiated).ok()
+}
+fn geometry(
+    item: &SceneItem,
+    source: &Source,
+    snapshot: Option<&AppSnapshot>,
+) -> Option<ItemLayout> {
     if !item.visible || item.opacity <= 0.0 || !source.enabled {
         return None;
     }
-    layout_item(item, test_pattern_source_size(source).ok()?).ok()
+    layout_item(item, source_size(snapshot, source)?).ok()
 }
 #[derive(Clone)]
 struct Draft {
     scene_id: SceneId,
     item: SceneItem,
     source: Source,
+    runtime: Option<prismcast_core::SourceRuntime>,
     mapping: Mapping,
     layout: ItemLayout,
     resize: bool,
@@ -144,7 +160,7 @@ impl State {
         let scene = snapshot.scene(snapshot.current_scene()?)?;
         let item = scene.item(self.selected?)?.clone();
         let source = snapshot.source(item.source_id)?.clone();
-        let layout = geometry(&item, &source)?;
+        let layout = geometry(&item, &source, Some(snapshot))?;
         Some((scene.id, item, source, layout))
     }
     fn refresh(&mut self, snapshot: Arc<AppSnapshot>) {
@@ -163,7 +179,8 @@ impl State {
                     .scene(draft.scene_id)
                     .and_then(|scene| scene.item(draft.item.id))
                     == Some(&draft.item)
-                && snapshot.source(draft.source.id) == Some(&draft.source);
+                && snapshot.source(draft.source.id) == Some(&draft.source)
+                && snapshot.source_runtime(draft.source.id) == draft.runtime.as_ref();
             if !unchanged {
                 self.draft = None;
             }
@@ -193,7 +210,7 @@ impl State {
         };
         let hit = scene.items.iter().rev().find_map(|item| {
             let source = snapshot.source(item.source_id)?;
-            let layout = geometry(item, source)?;
+            let layout = geometry(item, source, Some(snapshot))?;
             layout
                 .rect
                 .contains(cx, cy)
@@ -213,6 +230,7 @@ impl State {
             self.draft = Some(Draft {
                 scene_id: scene.id,
                 item,
+                runtime: snapshot.source_runtime(source.id).cloned(),
                 source,
                 mapping,
                 layout,
@@ -235,7 +253,7 @@ impl State {
         }
         let mut candidate = draft.item.clone();
         candidate.transform = draft.transform;
-        geometry(&candidate, &draft.source)?;
+        geometry(&candidate, &draft.source, self.snapshot.as_deref())?;
         self.pending = true;
         Some(Command::SetSceneItemTransform {
             scene_id: draft.scene_id,
@@ -485,7 +503,7 @@ impl Inner {
                         .iter()
                         .filter_map(|item| {
                             let source = s.source(item.source_id)?;
-                            geometry(item, source)?;
+                            geometry(item, source, Some(s))?;
                             Some((
                                 item.id,
                                 format!(
@@ -561,18 +579,25 @@ impl Inner {
     fn action(&self, action: usize) {
         let mut state = self.state.borrow_mut();
         let expected = state.selected();
+        let expected_runtime = expected.as_ref().and_then(|(_, _, source, _)| {
+            state.snapshot.as_ref()?.source_runtime(source.id).cloned()
+        });
         let previous_video = state.snapshot.as_ref().map(|snapshot| video(snapshot));
         let latest = (self.latest)();
         let changed = previous_video != Some(video(&latest));
         state.refresh(latest);
+        let current_runtime = state.selected().as_ref().and_then(|(_, _, source, _)| {
+            state.snapshot.as_ref()?.source_runtime(source.id).cloned()
+        });
         if changed
+            || expected_runtime != current_runtime
             || expected
                 .as_ref()
-                .map(|(scene, item, source, _)| (*scene, item, source))
+                .map(|(scene, item, source, layout)| (*scene, item, source, *layout))
                 != state
                     .selected()
                     .as_ref()
-                    .map(|(scene, item, source, _)| (*scene, item, source))
+                    .map(|(scene, item, source, layout)| (*scene, item, source, *layout))
         {
             drop(state);
             self.sync();
@@ -610,8 +635,11 @@ impl Inner {
         }
         let mut candidate = item.clone();
         candidate.transform = transform;
-        if let Err(error) =
-            test_pattern_source_size(&source).and_then(|size| layout_item(&candidate, size))
+        if let Err(error) = source_size(state.snapshot.as_deref(), &source)
+            .ok_or_else(|| {
+                prismcast_core::Error::InvalidInput("Capture dimensions are unavailable".into())
+            })
+            .and_then(|size| layout_item(&candidate, size))
         {
             self.hint
                 .set_label(&format!("Cannot apply this transform: {error}"));
@@ -643,7 +671,7 @@ impl Inner {
         if let Some(draft) = &state.draft {
             item.transform = draft.transform;
         }
-        let Some(layout) = geometry(&item, &source) else {
+        let Some(layout) = geometry(&item, &source, Some(snapshot)) else {
             return;
         };
         let rect = layout.rect;
@@ -680,6 +708,111 @@ impl Inner {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn capture_geometry_requires_native_caps_and_runtime_changes_cancel_drafts() {
+        use prismcast_core::{CaptureStatus, SourceDimensions, SourceKind};
+        let handle = prismcast_app::AppHandle::spawn(prismcast_app::CoreConfig::default());
+        let mut owner = handle.attach_capture_owner().await.unwrap();
+        handle
+            .dispatch(Command::AddScene {
+                name: "Capture".into(),
+            })
+            .await
+            .unwrap();
+        handle
+            .dispatch(Command::AddSource {
+                kind: SourceKind::PipeWireWindow,
+                name: "Window".into(),
+            })
+            .await
+            .unwrap();
+        let source_id = handle.snapshot().sources().next().unwrap().id;
+        let scene_id = handle.snapshot().current_scene().unwrap();
+        handle
+            .dispatch(Command::AddSceneItem {
+                scene_id,
+                source_id,
+            })
+            .await
+            .unwrap();
+        assert!(
+            owner.requests.try_recv().is_err(),
+            "creation must never open a picker"
+        );
+        let mut state = State {
+            available: true,
+            ..State::default()
+        };
+        state.refresh(handle.snapshot());
+        state.begin(20.0, 20.0, 1280.0, 720.0);
+        assert!(state.draft.is_none(), "capture has no invented dimensions");
+        handle
+            .authorize_source_capture(source_id, Some("wayland:test-parent".into()))
+            .await
+            .unwrap();
+        let request = owner.requests.recv().await.unwrap();
+        assert_eq!(
+            request.parent_window.as_deref(),
+            Some("wayland:test-parent")
+        );
+        owner
+            .runtime
+            .report(
+                source_id,
+                request.generation,
+                CaptureStatus::Active,
+                Some(SourceDimensions {
+                    width: 100,
+                    height: 50,
+                }),
+                None,
+            )
+            .await
+            .unwrap();
+        state.refresh(handle.snapshot());
+        state.begin(20.0, 20.0, 1280.0, 720.0);
+        let draft = state.draft.as_ref().unwrap();
+        assert_eq!(
+            (draft.layout.rect.width, draft.layout.rect.height),
+            (100, 50)
+        );
+        owner
+            .runtime
+            .report(
+                source_id,
+                request.generation,
+                CaptureStatus::Active,
+                Some(SourceDimensions {
+                    width: 200,
+                    height: 100,
+                }),
+                None,
+            )
+            .await
+            .unwrap();
+        state.refresh(handle.snapshot());
+        assert!(
+            state.draft.is_none(),
+            "renegotiated caps invalidate captured gesture geometry"
+        );
+        state.begin(20.0, 20.0, 1280.0, 720.0);
+        assert_eq!(state.draft.as_ref().unwrap().layout.rect.width, 200);
+        owner
+            .runtime
+            .report(
+                source_id,
+                request.generation,
+                CaptureStatus::Revoked,
+                None,
+                Some("Permission revoked".into()),
+            )
+            .await
+            .unwrap();
+        state.refresh(handle.snapshot());
+        assert!(state.finish(10.0, 10.0).is_none());
+        assert!(state.selected.is_none());
+        handle.shutdown().await;
+    }
     #[test]
     fn letterbox_mapping_rejects_margins_and_maps_canvas() {
         assert_eq!(rotate90(-45.0), 90.0);
@@ -703,11 +836,12 @@ mod tests {
         source.settings = serde_json::json!({"width":width,"height":height});
         let mut item = SceneItem::new(source.id, 0);
         item.transform = transform;
-        let layout = geometry(&item, &source).unwrap();
+        let layout = geometry(&item, &source, None).unwrap();
         Draft {
             scene_id: SceneId::new(),
             item,
             source,
+            runtime: None,
             mapping: Mapping {
                 x: 0.0,
                 y: 0.0,
@@ -734,7 +868,7 @@ mod tests {
         draft.update(8191.0, 8191.0);
         let mut item = draft.item.clone();
         item.transform = draft.transform;
-        let final_rect = geometry(&item, &draft.source).unwrap().rect;
+        let final_rect = geometry(&item, &draft.source, None).unwrap().rect;
         assert_eq!((final_rect.x, final_rect.y), (original.x, original.y));
         assert_eq!((final_rect.width, final_rect.height), (64, 64));
     }
@@ -776,7 +910,7 @@ mod tests {
         assert_eq!(draft.transform.scale, prismcast_core::Vec2::new(-2.0, 2.0));
         let mut item = draft.item.clone();
         item.transform = draft.transform;
-        let rect = geometry(&item, &draft.source).unwrap().rect;
+        let rect = geometry(&item, &draft.source, None).unwrap().rect;
         assert_eq!((rect.x, rect.y), (original.x, original.y));
     }
     fn fixture() -> (tokio::runtime::Runtime, prismcast_app::AppHandle, SceneId) {

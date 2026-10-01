@@ -31,6 +31,7 @@ pub enum SourcesInput {
 pub enum SourcesOutput {
     /// The user clicked the add button; the root should ask for kind/name.
     AddRequested,
+    AuthorizeCapture(SourceId),
     Command(Box<Command>),
 }
 
@@ -195,6 +196,23 @@ impl SourcesPanel {
         self.list.append(&header);
         for source in snapshot.sources() {
             let row = source_row(&source.name, source_kind_label(&source.kind));
+            if matches!(
+                source.kind,
+                prismcast_core::SourceKind::PipeWireDisplay
+                    | prismcast_core::SourceKind::PipeWireWindow
+            ) {
+                let runtime = snapshot.source_runtime(source.id);
+                let status =
+                    gtk::Label::new(Some(crate::presentation::capture_status_label(runtime)));
+                status.set_wrap(true);
+                status.set_tooltip_text(runtime.and_then(|runtime| runtime.message.as_deref()));
+                row.append(&status);
+                let output = sender.output_sender().clone();
+                let button = capture_button(source.id, source.enabled, runtime, move |source_id| {
+                    output.emit(SourcesOutput::AuthorizeCapture(source_id));
+                });
+                row.append(&button);
+            }
             if let Some(scene) = scene {
                 command_button(
                     &row,
@@ -219,6 +237,38 @@ impl SourcesPanel {
             self.list.append(&row);
         }
     }
+}
+
+fn capture_button(
+    source_id: SourceId,
+    enabled: bool,
+    runtime: Option<&prismcast_core::SourceRuntime>,
+    send: impl Fn(SourceId) + 'static,
+) -> gtk::Button {
+    let button = gtk::Button::with_label(if runtime.is_some() {
+        "Retry Authorization"
+    } else {
+        "Authorize Capture"
+    });
+    button.set_sensitive(
+        enabled
+            && runtime.is_none_or(|runtime| {
+                !matches!(
+                    runtime.status,
+                    prismcast_core::CaptureStatus::Authorizing
+                        | prismcast_core::CaptureStatus::Active
+                )
+            }),
+    );
+    button.connect_clicked(move |button| {
+        if !button.is_sensitive() {
+            return;
+        }
+        // Gate repeat signals before the command snapshot arrives.
+        button.set_sensitive(false);
+        send(source_id);
+    });
+    button
 }
 
 #[derive(Clone, Copy)]
@@ -287,6 +337,55 @@ fn command_button(
 mod tests {
     use super::*;
     use std::{cell::RefCell, rc::Rc};
+
+    #[test]
+    #[ignore = "requires a real GTK display; opens no portal picker"]
+    fn explicit_capture_button_gates_repeat_signals_and_disabled_sources() {
+        gtk::init().unwrap();
+        let requests = Rc::new(RefCell::new(Vec::new()));
+        let source_id = SourceId::new();
+        let button = capture_button(source_id, true, None, {
+            let requests = requests.clone();
+            move |id| requests.borrow_mut().push(id)
+        });
+        assert_eq!(button.label().as_deref(), Some("Authorize Capture"));
+        assert!(requests.borrow().is_empty(), "rendering never authorizes");
+        button.emit_clicked();
+        button.emit_clicked();
+        assert_eq!(&*requests.borrow(), &[source_id]);
+        let disabled = capture_button(SourceId::new(), false, None, {
+            let requests = requests.clone();
+            move |id| requests.borrow_mut().push(id)
+        });
+        disabled.emit_clicked();
+        assert_eq!(requests.borrow().len(), 1);
+        use prismcast_core::{CaptureGeneration, CaptureStatus, SourceRuntime};
+        for status in [
+            CaptureStatus::Authorizing,
+            CaptureStatus::Active,
+            CaptureStatus::Cancelled,
+            CaptureStatus::Denied,
+            CaptureStatus::Revoked,
+            CaptureStatus::Failed,
+        ] {
+            let runtime = SourceRuntime {
+                generation: CaptureGeneration::new(1),
+                status,
+                dimensions: None,
+                message: None,
+            };
+            let id = SourceId::new();
+            let button = capture_button(id, true, Some(&runtime), {
+                let requests = requests.clone();
+                move |id| requests.borrow_mut().push(id)
+            });
+            let before = requests.borrow().len();
+            assert_eq!(button.label().as_deref(), Some("Retry Authorization"));
+            button.emit_clicked();
+            let recoverable = !matches!(status, CaptureStatus::Authorizing | CaptureStatus::Active);
+            assert_eq!(requests.borrow().len(), before + usize::from(recoverable));
+        }
+    }
 
     #[test]
     #[ignore = "requires a real GTK display; run with --ignored --test-threads=1"]
