@@ -205,3 +205,108 @@ async fn cli_reports_missing_server() {
     assert_eq!(output.status.code(), Some(1));
     assert!(stderr(&output).contains("cannot connect"));
 }
+
+/// A socket path that no server listens on, for auth parsing tests that
+/// never reach a server.
+fn missing_socket() -> String {
+    let dir =
+        std::env::temp_dir().join(format!("prismcast-cli-test-auth-{}", uuid::Uuid::new_v4()));
+    dir.join("control.sock")
+        .to_str()
+        .expect("utf-8")
+        .to_string()
+}
+
+#[test]
+fn conflicting_token_and_password_flags_are_a_usage_error() {
+    let output = Command::new(BIN)
+        .arg("--socket")
+        .arg(missing_socket())
+        .arg("--token")
+        .arg("tok-value")
+        .arg("--password")
+        .arg("pw-value")
+        .arg("ping")
+        .output()
+        .expect("spawn prismcast-cli");
+    assert_eq!(output.status.code(), Some(2));
+    let err = stderr(&output);
+    assert!(err.contains("--token"), "unexpected stderr: {err}");
+    assert!(err.contains("--password"), "unexpected stderr: {err}");
+    assert!(!err.contains("tok-value"), "leaked token: {err}");
+    assert!(!err.contains("pw-value"), "leaked password: {err}");
+}
+
+#[test]
+fn conflicting_auth_env_vars_are_a_usage_error() {
+    let output = Command::new(BIN)
+        .arg("--socket")
+        .arg(missing_socket())
+        .arg("ping")
+        .env("PRISMCAST_TOKEN", "tok-value")
+        .env("PRISMCAST_PASSWORD", "pw-value")
+        .output()
+        .expect("spawn prismcast-cli");
+    assert_eq!(output.status.code(), Some(2));
+    let err = stderr(&output);
+    assert!(
+        err.contains("mutually exclusive"),
+        "unexpected stderr: {err}"
+    );
+    assert!(!err.contains("tok-value"), "leaked token: {err}");
+    assert!(!err.contains("pw-value"), "leaked password: {err}");
+}
+
+#[test]
+fn password_flag_and_env_mix_with_token_env_conflicts() {
+    // The flag and the env fallback feed the same mapping: a token from the
+    // environment still conflicts with a --password flag.
+    let output = Command::new(BIN)
+        .arg("--socket")
+        .arg(missing_socket())
+        .arg("--password")
+        .arg("pw-value")
+        .arg("ping")
+        .env("PRISMCAST_TOKEN", "tok-value")
+        .output()
+        .expect("spawn prismcast-cli");
+    assert_eq!(output.status.code(), Some(2));
+    let err = stderr(&output);
+    assert!(
+        err.contains("mutually exclusive"),
+        "unexpected stderr: {err}"
+    );
+}
+
+#[test]
+fn password_flag_is_accepted() {
+    // No server listening: parsing and auth mapping succeeded, the failure
+    // is the transport (exit 1), and the password is not echoed anywhere.
+    let output = Command::new(BIN)
+        .arg("--socket")
+        .arg(missing_socket())
+        .arg("--password")
+        .arg("pw-value")
+        .arg("ping")
+        .output()
+        .expect("spawn prismcast-cli");
+    assert_eq!(output.status.code(), Some(1));
+    let err = stderr(&output);
+    assert!(err.contains("cannot connect"), "unexpected stderr: {err}");
+    assert!(!err.contains("pw-value"), "leaked password: {err}");
+}
+
+#[test]
+fn password_env_is_accepted() {
+    let output = Command::new(BIN)
+        .arg("--socket")
+        .arg(missing_socket())
+        .arg("ping")
+        .env("PRISMCAST_PASSWORD", "pw-value")
+        .output()
+        .expect("spawn prismcast-cli");
+    assert_eq!(output.status.code(), Some(1));
+    let err = stderr(&output);
+    assert!(err.contains("cannot connect"), "unexpected stderr: {err}");
+    assert!(!err.contains("pw-value"), "leaked password: {err}");
+}
