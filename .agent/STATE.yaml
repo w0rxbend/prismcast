@@ -1,7 +1,7 @@
 schema_version: 1
-project_phase: phase-2-media-prototype
+project_phase: phase-3-linux-capture
 head_commit: b59f585
-current_objective: Prepare undo refinements and Linux capture after completed Phase 2 prototype
+current_objective: Harden undo ownership and establish portal/PipeWire capture foundations
 completed:
 - RESUME-001
 - SKILL-001
@@ -41,7 +41,9 @@ completed:
 - MEDIA-004
 - MEDIA-005
 - UI-002
-in_progress: []
+in_progress:
+- CORE-005
+- CAPTURE-001
 blocked: []
 next_candidates:
 - CORE-005

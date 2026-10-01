@@ -1,0 +1,24 @@
+id: CAPTURE-001
+title: Portal ScreenCast session ownership and native PipeWire capture foundation
+goal: Implement a GTK-independent monitor/window authorization lease and native frame probe as the first scoped Phase 3 slice.
+depends_on: [RES-004, MEDIA-005]
+allowed_scope:
+- crates/prismcast-capture/
+- crates/prismcast-media-gst/
+- Cargo.toml
+- Cargo.lock
+- docs/research/
+- docs/adr/
+- docs/testing/
+acceptance:
+- Explicit async authorization follows CreateSession SelectSources Start OpenPipeWireRemote with runtime capability checks
+- Typed SourceId and monitor/window kind identify a single selected stream; session and owned remote FD are ephemeral and never persisted
+- Cancellation, denial, timeout, portal closure and shutdown release session/requests/FDs; requests and status delivery are bounded
+- No automatic picker loops or dialogs merely from restored snapshots
+- Native pipewiresrc FD ownership/node-targeting verified against installed plugin; grant outlives graph and safe teardown
+- Frame dimensions derive from negotiated native caps rather than portal coordinate size
+- Mock lifecycle tests exercise ordering, early closure, cancellation, stale completion and resource cleanup without portal dialogs
+- Opt-in real GNOME Wayland test/probe establishes frames and teardown where user selection is available; absent grant is reported separately from unit evidence
+- Production compositor/core/UI authorization wiring is a separately specified CAPTURE-002 follow-up, not claimed by this foundation
+validation: [just ci, just deny, focused lifecycle/native tests, separately recorded opt-in portal smoke test]
+status: in_progress

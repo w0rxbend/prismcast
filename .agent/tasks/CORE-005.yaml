@@ -1,0 +1,21 @@
+id: CORE-005
+title: Bounded and controller-safe undo history
+goal: Harden existing application undo/redo APIs without changing persistent or wire schemas.
+depends_on: [CORE-002]
+allowed_scope:
+- crates/prismcast-app/
+- crates/prismcast-remote/
+- Cargo.lock
+- docs/adr/
+- docs/testing/
+acceptance:
+- Typed application controller identity is shared by handle clones; distinct controller handles and remote sessions remain isolated
+- Foreign successful mutations close an open group before recording their own chronological history; foreign End cannot close another controller group
+- Entries, retained command bytes, group members and labels have explicit limits with checks before application
+- Oversized grouped changes reject without mutating state/history/events; explicit group close remains available
+- Undo/redo authorize all inverse operations in the actor against caller permissions before state/history changes
+- Failed authorization/application preserves history entries; redo invalidation and atomic Transaction round-trips remain correct
+- Mixed-controller chronology and mixed-domain authorization have meaningful actor tests
+- Existing meta APIs remain compatible; new UI/wire operations and destructive restoration are explicitly separate follow-ups
+validation: [just ci, just deny, focused actor/history tests]
+status: in_progress
