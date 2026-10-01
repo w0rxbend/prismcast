@@ -1,0 +1,21 @@
+id: UI-001
+title: Relm4 application shell
+goal: >
+  Implement the GTK4/Relm4/libadwaita application shell in prismcast-ui per
+  PLAN §28: header bar (profile/collection/stream status), preview canvas
+  placeholder, scenes panel, sources panel, audio mixer placeholder,
+  transition + outputs/controls bar. Presentation-only: all mutations go
+  through prismcast-app AppHandle as Commands; all UI updates come from
+  Events/Snapshots. No direct media logic.
+depends_on: [BOOT-001, CORE-001]
+allowed_scope:
+  - crates/prismcast-ui/
+acceptance:
+  - cargo build -p prismcast-ui succeeds with gtk4/relm4/libadwaita
+  - scene list reflects AppSnapshot; scene switch sends Command
+  - events from the broadcaster update the UI (no polling)
+  - no media/GStreamer code in UI crate
+validation:
+  - cargo clippy -p prismcast-ui --all-targets -- -D warnings
+  - cargo build -p prismcast-ui
+status: in_progress

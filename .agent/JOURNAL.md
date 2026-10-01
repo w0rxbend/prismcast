@@ -406,3 +406,199 @@ ADRs, domain model + command/event API, architecture wave (5 parallel agents),
 app-core actor, IPC server + CLI. 273 tests green, just ci passes.
 UI-001/MEDIA-001 blocked on missing system packages (libadwaita-1-dev,
 gstreamer dev). STATE.yaml and HANDOFF.md rewritten; BACKLOG statuses synced.
+
+---
+
+## 2026-10-01 — UI-001 (GTK4/Relm4/libadwaita application shell in prismcast-ui)
+
+Scope: `crates/prismcast-ui/` only (deps declared directly in its Cargo.toml;
+root Cargo.toml untouched). System gtk4 4.22.4 / libadwaita-1 1.9.1 are now
+installed, unblocking the task.
+
+**Version choices** (verified against crates.io + crate sources): gtk4 0.11.2
+(crate gtk4 0.11.5 resolved), relm4 0.11.0 (requires gtk4 ^0.11.2, feature
+`libadwaita` so `RelmApp` builds an adw::Application), libadwaita 0.9.2
+(targets libadwaita 1.9, same gtk4 0.11 line) with feature `v1_5` for
+`adw::Dialog`. Deps renamed in the manifest (`gtk = { package = "gtk4" }`,
+`adw = { package = "libadwaita" }`) for idiomatic paths.
+
+**Module layout**: `main.rs` (tracing-subscriber + boot) → `bridge.rs`
+(`CoreBridge`: owns background thread + multi-thread Tokio runtime +
+`AppHandle`) → `app.rs` (root `AsyncComponent`, layout per PLAN §28, dialogs,
+dispatch) → `components/{scenes,sources,outputs}.rs` (`SimpleComponent`
+panels) → `presentation.rs` (pure, GTK-free label/state helpers with unit
+tests).
+
+**GTK↔tokio bridge pattern**: the runtime lives on a background thread and
+parks in `block_on(handle.closed())`, so the thread exits by itself after
+actor shutdown. Commands go out via `AsyncComponentSender::oneshot_command`
+(futures run on the GLib main context; `tokio::sync` mpsc/oneshot/Notify are
+executor-agnostic, so no reactor is needed on the UI side). Events come back
+through a pump task on the runtime that maps `StreamEvent` → `PumpEvent` →
+`AppMsg::Pump` via `relm4::Sender` (flume-based, thread-safe, waker-driven —
+no polling). Every pump message triggers a fresh `Arc<AppSnapshot>` read that
+is pushed into the panels (`Controller::emit`), so widgets always re-render
+from snapshot truth; `Lagged` just triggers the same resync.
+
+**Loop-safety guards**: scene-list rebuild/selection is wrapped in a
+`restoring` flag and a "don't re-dispatch the already-current scene" check;
+transition dropdown sync uses a `Cell<bool>` guard. Output Start/Stop buttons
+are gated on the domain's legal state transitions.
+
+**Shutdown**: window close-request is inhibited once, `AppHandle::shutdown()`
+runs on the main context, `FinishShutdown` closes the window; `main` then
+joins the core thread for clean teardown.
+
+Layout: adw::ApplicationWindow + ToolbarView + HeaderBar (app name, profile,
+collection, stream-status pill derived from output states), preview
+placeholder (Frame + StatusPage, MEDIA-004 fills it), panels row (Scenes /
+Sources / Audio Mixer placeholder), bottom bar (transition DropDown wired to
+`SetTransition`, outputs cards with Start/Stop + add-recording button).
+Add-scene/add-source use adw::Dialog with EntryRow (+ ComboRow kind picker:
+TestPattern/Color). Command rejections surface as adw toasts.
+
+Validation: `cargo build -p prismcast-ui`, `cargo clippy -p prismcast-ui
+--all-targets -- -D warnings`, `cargo fmt` all clean; workspace tests green
+(incl. 4 new presentation unit tests). GUI not launched (no display in this
+environment) — compile+lint is the gate. Not committed (orchestrator
+integrates).
+
+Follow-ups: scene-item/source placement UI (AddSceneItem), remove/rename
+controls, undo/redo keybindings, mixer panel when audio meter events exist
+(CORE-004+), preview paintable (MEDIA-004), UI state persistence (window
+size), smoke test on a real display, accessibility pass.
+
+---
+
+2026-10-01 WS-001
+
+WebSocket transport in `prismcast-remote`, sharing the session machinery with IPC
+instead of duplicating it.
+
+Transport sharing: `session.rs` is now generic over two crate-internal async traits,
+`FrameReader` (read one frame as a `serde_json::Value`; `None` = clean close) and
+`FrameWriter` (`write_message(&ServerMessage)` / `write_close(&ClosingNotice)`).
+Everything past framing — Hello/Identify/Identified state machine, request dispatch
+via `map.rs`, subscription/entity filters, throttle coalescing, per-session `seq`,
+rate limiting, bounded outbound queue with `SlowConsumer` shedding — lives in
+`session.rs` once. IPC implements the traits in `codec.rs` (`split_ipc` → length-
+prefixed MessagePack reader/writer; close = synthetic `closing` frame, unchanged);
+WS implements them in `ws.rs` (JSON text frames; close = real WS close frame carrying
+the 4000+ code). `IpcServerConfig`/`WsServerConfig` convert into a crate-internal
+`SessionConfig`; inbound size limits moved into the transports' readers. IPC behavior
+and tests pass byte-for-byte unchanged (9/9 integration tests green before and after).
+
+WsServer (`ws.rs`): tokio-tungstenite 0.30 over a plain `TcpListener` (no axum —
+`prismcast-web` is a separate future crate; rustls `wss://` is a follow-up).
+Subprotocol negotiation echoes `prismcast.json` when offered; JSON is the default
+and only v1 codec. Binary frames close with `MessageDecodeError` 4002
+(`prismcast.msgpack` reserved). The 1 MiB message limit is enforced by the reader so
+oversized messages close with 4002; tungstenite's own cap is set 4× higher as a
+memory backstop (its automatic close would use the generic 1009).
+
+Config gating: `WsServerConfig { enabled: false by default, bind: 127.0.0.1:4465,
+auth, ... }`. `WsServer::bind` fails with `WsError::Disabled` when not enabled
+(`bind_if_enabled` → `Ok(None)` for embedders) and with `WsError::AuthRequired` when
+auth is allow-local — token auth is mandatory on a network transport, unlike IPC's
+local trust. Wrong/missing token → close 4009; token permissions map to
+`dispatch::Permissions` exactly as IPC. `Hello.authentication` stays `None` for token
+auth: the protocol's `AuthChallenge` type is challenge-response-specific
+(salt/challenge), so the token requirement is out-of-band config knowledge —
+advertising auth methods in `Hello` is a protocol-schema follow-up (PLAN §74 owner).
+
+WsClient (`ws_client.rs`): mirrors `IpcClient` — connect with `prismcast.json`
+subprotocol, handshake/identify with token, `request`/`request_data`,
+`request_batch`, `next_event`, `update_subscriptions`, `close`; server close frames
+surface as `WsClientError::Closed { code, reason }`.
+
+Deps (declared in `crates/prismcast-remote/Cargo.toml` only, per parallel-agent
+rule): `tokio-tungstenite = "0.30"`, `futures-util = "0.3"`.
+
+Tests: 30 remote unit (incl. new: default config disabled, bind requires enabled,
+enabled bind requires token) + 9 IPC integration (unchanged) + 12 WS integration over
+real loopback connections (handshake+identify with token; wrong/missing token → 4009;
+read-only token → 800 on mutation; protocol_version 0 → 4010; create_scene → snapshot
+roundtrip; event delivery with seq 0/1; throttle coalescing latest-wins; serial batch
+of 3 with per-member ids; disabled-by-default (no bind, connect refused);
+oversized message → 4002; binary frame → 4002; unknown request → 202; pre-identify
+request → 4007). Validation: `cargo fmt --check`, `cargo clippy -p prismcast-remote
+--all-targets -- -D warnings`, `cargo test -p prismcast-remote` (51), `cargo test
+--workspace` (295 passed, 0 failed). Not committed (orchestrator integrates).
+
+Follow-ups: rustls `wss://` (and non-loopback bind only then); `prismcast.msgpack`
+subprotocol codec; challenge-response auth + auth advertisement in `Hello` (protocol
+schema); split-stream ping/pong caveat (pongs flush on next write — fine for control
+connections, revisit if keepalive matters); IPC default frame limit (4 MiB) vs
+protocol doc's 1 MiB — reconcile in one place later.
+
+## 2026-10-01 — CORE-004 (Persistence in prismcast-app)
+
+Implemented `crates/prismcast-app/src/persistence/` per
+`docs/architecture/persistence-model.md` + ADR-0008. Only prismcast-app touched; new
+deps declared directly in its Cargo.toml (`toml = "0.9"`, `toml_edit = "0.25"` with
+`serde` feature, `serde_json` promoted from dev-deps, `tempfile = "3"` dev-dep).
+
+Module layout: `paths` (ConfigRoot with XDG resolution + injection, slugify/unique_slug,
+0700 dirs), `atomic` (serialize→temp `O_EXCL` same-dir→write→fsync→rename→dir-fsync;
+stale temp reaping older than process start), `envelope` (`CollectionFileV1` + generic
+`WithExtras<T>` flatten-capture wrappers for scenes/items/sources/transition/audio/
+session — unknown keys survive at every level), `profile` (`ProfileDocument` retained
+`toml_edit` document; saver patches known keys into the retained tree so unknown
+top-level sections + comments survive; `toml` crate renders the hand-editable
+`[video]`/`[[outputs]]` form), `pointer` (retained-doc pointer file, no `.bak`),
+`migrate` (per-family `CURRENT_*_SCHEMA = 1`, version read from raw doc pre-typed-deser,
+stepwise chain scaffolding — empty while V1 is current, bump procedure in module docs),
+`validate` (referential integrity; dangling session refs warn+reset, everything else is
+corruption; scene-nesting cycle detection), `store` (ProjectStore load/save with the
+primary→`.bak`→defaults state machine; `.bak` refreshed only from verified-good loads;
+NewerSchema never falls back and leaves the file byte-identical; quarantine deferred as
+it needs user confirmation), `actor` (`PersistenceHandle`/`PersistenceActor`: bounded
+mpsc, whole-aggregate `DirtyMarks`, 500 ms debounce capped by 5 s max delay, writes in
+`spawn_blocking`, `save_now()`/`flush()`/`shutdown()`, broadcast `PersistenceEvent`s).
+
+CoreActor wiring: `AppHandle::spawn_with_persistence(state, config, handle)`; every
+applied command (including undo/redo inverses) that emitted events calls
+`PersistenceHandle::command_applied` (non-blocking `try_send`; full channel drops with a
+warning — self-healing because snapshots are whole aggregates and shutdown flush is
+awaited). Shutdown performs a final awaited flush. `dirty_class` is an exhaustive match
+over all 49 Command variants: scenes/items/sources/audio/transition/studio → collection;
+AddOutput/RemoveOutput/SetOutputReconnectPolicy → profile; Start/StopOutput → volatile
+(runtime state never persisted); Add/SelectProfile/Add/SelectSceneCollection → pointer;
+RemoveProfile/RemoveSceneCollection → volatile (file deletion is a follow-up; dirs kept
+as orphans); Transaction → union of members.
+
+Decisions worth noting: profile `settings` JSON blob written under a `[settings]` table
+(not scattered top-level) so the domain mapping stays unambiguous; TOML cannot express
+JSON null so null settings keys are stripped on save (documented); known TOML sections
+are rewritten wholesale, so unknowns nested *inside* them are lost — top-level unknowns
+survive (documented trade-off); `Output.state` never persisted, loads as `Stopped`.
+
+Tests: 63 lib unit tests (roundtrips, unknown-field preservation at every JSON level,
+TOML comments/unknown sections, SecretString roundtrip + redaction intact, migration
+chain mechanics, slugify, atomic write mode/reaping, debounce coalescing 100 marks → 1
+write, save_now/shutdown flush, all-49-variant classification) + 13 integration
+(`tests/persistence.rs`: full state → save → load identical incl. scenes/sources/items/
+audio/transitions/studio mode; corrupted primary → FromBackup + restore; corrupted both
+→ Defaults, evidence kept; newer schema → typed error, file byte-identical; broken
+referential integrity → corruption path; stale temp reaping; crash-mid-write leaves old
+file intact; pointer file selects active profile/collection + trivial pointer recovery;
+profile.toml mode 0600; end-to-end CoreActor → 100 rapid commands coalesce to ≤3 writes,
+final state persisted) + 3 golden tests (`tests/golden/{collection-v1.json,
+profile-v1.toml}`, `BLESS_GOLDEN=1` to regenerate; byte-stable load→save both formats).
+
+Validation: `cargo fmt --check`, `cargo clippy -p prismcast-app --all-targets --
+-D warnings`, `cargo test -p prismcast-app`, `cargo test --workspace` (all pass; deny
+licenses/bans ok — pre-existing allowlist warnings only). Not committed (orchestrator
+integrates); JOURNAL only, STATE/HANDOFF left to the integrator to avoid parallel-agent
+conflicts.
+
+Follow-ups (need prismcast-core or cross-crate work): `SystemEvent::PersistenceRecovered
+{ path, reason }` core event (today recovery info is the typed `Recovery` on load
+outcomes + `PersistenceEvent` broadcast); outputs/encoders/services nested under the
+active profile in `AppState` (persisted form already per spec; today outputs are a flat
+map attributed to the active profile, and encoder/service registries have no domain
+home, so app-saved profiles write empty `[[encoders]]`/`[[services]]`); file deletion
+for removed profiles/collections; quarantine flow on total loss (needs user
+confirmation); Secret Service (D-Bus) storage for stream keys; `SaveProject` command in
+the core Command enum (today `save_now()` on the handle is the explicit-save verb);
+startup wiring `load_*` → `AppHandle::spawn_with_state` (store API is ready).

@@ -1,0 +1,21 @@
+id: CORE-004
+title: Persistence
+goal: >
+  Implement persistence in prismcast-app per docs/architecture/persistence-
+  model.md and ADR-0008: ~/.config/prismcast layout, profile TOML + collection
+  JSON envelope structs (NOT domain structs), schemaVersion with migration
+  chain scaffolding, unknown-field preservation, atomic temp+rename writes
+  with fsync, .bak corruption recovery, persistence actor with debounced
+  writes driven by applied commands, SaveProject flush.
+depends_on: [ARCH-006, CORE-001]
+allowed_scope:
+  - crates/prismcast-app/
+acceptance:
+  - roundtrip: state -> files -> load -> identical state
+  - corrupted primary file recovers from .bak with surfaced event
+  - unknown fields preserved through load/save cycle
+  - atomic write leaves no partial file on simulated crash
+validation:
+  - cargo test -p prismcast-app
+  - cargo clippy -p prismcast-app --all-targets -- -D warnings
+status: in_progress

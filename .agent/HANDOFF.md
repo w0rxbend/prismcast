@@ -1,57 +1,61 @@
 # Current state
 
-Phase 0 (research + architecture) complete. Phase 1 (skeleton) mostly complete:
-workspace, domain model, command/event API, application actor, IPC server + CLI
-all implemented and green (273 tests, fmt/clippy/deny clean).
+Phase 0 complete; Phase 1 skeleton complete including the GTK shell. Phase 2
+(media prototype) is next and is blocked on GStreamer dev packages.
+344 tests green, fmt/clippy/deny clean.
 
-## Completed
+## Completed (all)
 
-- BOOT-001..004: workspace (12 crates), tooling (justfile, deny.toml, CI), core error/ID model, agent infra
-- RES-001..007: research notes in docs/research/ (OBS matrix/architecture, GStreamer, capture, encoders, browser, obs-websocket)
-- ARCH-000: ADR-0001..0010 in docs/adr/
-- ARCH-001/002: prismcast-core domain model + 49-variant Command + Event hierarchy + pure apply() (100 tests)
-- ARCH-003/005/006: design docs — scene-graph, output-graph, persistence-model (docs/architecture/)
-- ARCH-004: prismcast-media backend trait surface + mocks (19 tests)
-- ARCH-007: prismcast-protocol wire types + native-protocol.md (47 tests)
-- CORE-001/002/003: prismcast-app — actor, permission dispatcher, broadcaster, undo (39 tests)
-- IPC-001/002: prismcast-remote UDS server + prismcast-cli (ping/status/scene list/switch) (40 tests)
+- BOOT-001..004, RES-001..007, ARCH-000..007 (see git log / BACKLOG.yaml)
+- CORE-001..004: prismcast-app actor/dispatcher/broadcaster/undo + persistence
+  (XDG layout, atomic writes, .bak recovery, schema v1, debounced actor)
+- IPC-001/002: UDS server + prismcast-cli
+- WS-001: WebSocket transport (shared session machinery with IPC, token auth,
+  disabled by default)
+- UI-001: GTK4/Relm4/libadwaita shell (gtk4 0.11/relm4 0.11/adw 0.9) —
+  scenes/sources/outputs panels driven purely by commands + events + snapshots
 
-## Changed
+## Architecture decisions (recent)
 
-- AGENTS.md: prismcast-app added to workspace layout.
-
-## Architecture decisions
-
-- prismcast-* crate naming; prismcast-app is the tokio-allowed services layer; core stays pure.
-- Audio: named bus matrix + TrackMask, not OBS's 6 fixed mixes.
-- IPC: MessagePack (human-readable mode) length-prefixed; local socket default Admin, token auth optional.
-- Undo: inverse commands; Add*/Remove* currently non-undoable (CORE-005 follow-up).
+- GTK↔tokio bridge: commands via `AsyncComponentSender::oneshot_command`
+  (tokio sync primitives are executor-agnostic); events via pump task →
+  relm4::Sender → snapshot reads (crates/prismcast-ui/src/bridge.rs, app.rs).
+- Remote session logic is generic over FrameReader/FrameWriter; IPC
+  (length-prefixed MessagePack) and WS (JSON text) share one loop.
+- Persistence: envelope structs + retained-document TOML; unknown fields
+  survive everywhere; dirty-classification covers all 49 commands.
 
 ## Tests
 
-`cargo test --workspace`: 273 pass. `just ci` green.
+`cargo test --workspace`: 344 pass. `just ci` green. GUI not yet smoke-tested
+on a real display.
 
 ## Known issues / blockers
 
-- UI-001 and MEDIA-001 blocked: missing system dev packages `libadwaita-1` and `gstreamer-1.0` (gtk4 present).
-- Follow-ups recorded in STATE.yaml open_questions.
+- MEDIA-001 blocked: need `libgstreamer1.0-dev libgstreamer-plugins-base-dev`
+  (+video/audio dev). Runtime 1.28.2 already installed.
+- Follow-ups in STATE.yaml open_questions (PersistenceRecovered event,
+  SaveProject command, encoder/service registry home, frame-limit mismatch).
 
 ## Exact next task
 
-CORE-004 (persistence, per docs/architecture/persistence-model.md) or WS-001
-(WebSocket transport reusing prismcast-remote session machinery). After
-`apt install libadwaita-1-dev libgstreamer1.0-dev libgstreamer-plugins-*-dev`:
-UI-001 + MEDIA-001..005 toward the §67 milestone.
+After gstreamer dev packages: MEDIA-001 (gst init + backend crate
+prismcast-media-gst) → MEDIA-002 (test pattern source) → MEDIA-003
+(compositor) → MEDIA-004 (preview paintable bridge into UI-001's placeholder)
+per docs/architecture/scene-graph.md. Independent of that: UI-002..004 panel
+polish, CORE-005 undo refinement, WS-002 (rustls wss://).
 
 ## Recommended files to read
 
-- .agent/STATE.yaml, .agent/BACKLOG.yaml, .agent/JOURNAL.md
-- docs/architecture/*.md, docs/protocols/native-protocol.md
-- crates/prismcast-app/src/actor.rs (the integration point for all controllers)
+- .agent/STATE.yaml, .agent/JOURNAL.md
+- docs/architecture/scene-graph.md (compositor mapping for MEDIA-003)
+- crates/prismcast-ui/src/app.rs (UI integration point)
+- crates/prismcast-remote/src/session.rs (shared transport session)
 
 ## Commands to reproduce
 
 ```bash
 just ci
-cargo run -p prismcast-cli -- ping   # against a running server (see prismcast-remote tests)
+cargo run -p prismcast-cli -- ping        # needs a running server
+cargo run -p prismcast                     # needs a display
 ```

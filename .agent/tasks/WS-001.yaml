@@ -1,0 +1,20 @@
+id: WS-001
+title: WebSocket transport
+goal: >
+  Add a WebSocket transport to prismcast-remote per docs/protocols/native-
+  protocol.md: ws:// server (tokio-tungstenite), same Hello/Identify/session
+  machinery as the IPC transport, JSON codec, auth with token + permissions
+  (PLAN §24), disabled by default (config-gated bind address). Share session
+  logic with the IPC transport rather than duplicating it.
+depends_on: [IPC-001]
+allowed_scope:
+  - crates/prismcast-remote/
+acceptance:
+  - ws client completes handshake, issues requests, receives events
+  - disabled by default; bind address configurable
+  - session logic shared between IPC and WS transports
+  - integration tests over real ws connections
+validation:
+  - cargo test -p prismcast-remote
+  - cargo clippy -p prismcast-remote --all-targets -- -D warnings
+status: in_progress

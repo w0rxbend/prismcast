@@ -123,7 +123,7 @@ tasks:
     title: Persistence
     priority: 35
     depends_on: [ARCH-006]
-    status: ready
+    status: done
   - id: CORE-005
     title: Undo/redo
     priority: 40
@@ -162,7 +162,7 @@ tasks:
     title: Relm4 application shell
     priority: 45
     depends_on: [BOOT-001, CORE-001]
-    status: blocked
+    status: done
   - id: UI-002
     title: Preview panel
     priority: 55
@@ -188,5 +188,10 @@ tasks:
   - id: IPC-002
     title: prismcast-cli ping/status
     priority: 33
+    depends_on: [IPC-001]
+    status: done
+  - id: WS-001
+    title: WebSocket transport
+    priority: 34
     depends_on: [IPC-001]
     status: done
