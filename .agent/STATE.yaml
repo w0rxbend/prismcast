@@ -1,10 +1,10 @@
 schema_version: 1
 
-project_phase: phase-1-skeleton
+project_phase: phase-2-media-prototype
 
 head_commit: 6f69afb
 
-current_objective: null
+current_objective: Phase 2 media prototype with bounded UI integration
 
 completed:
   - RESUME-001
@@ -37,11 +37,12 @@ completed:
   - WS-001
   - UI-001
 
-in_progress: []
+in_progress:
+  - MEDIA-001
+  - UI-003
+  - BRIDGE-001
 
-blocked:
-  - id: MEDIA-001
-    reason: gstreamer-1.0 dev packages missing (runtime 1.28.2 present; need libgstreamer1.0-dev + plugins-base/video/audio dev)
+blocked: []
 
 next_candidates:
   - CORE-005
@@ -88,4 +89,4 @@ open_questions:
   - IPC 4 MiB vs protocol-doc 1 MiB frame limit inconsistency (WS-001)
 
 implementation_access:
-  ultracode: awaiting user access clarification; no exposed tool or executable
+  ultracode: dynamic agent orchestration (user clarified); available

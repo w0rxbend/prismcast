@@ -135,7 +135,7 @@ tasks:
     title: Initialize GStreamer
     priority: 50
     depends_on: [BOOT-001, RES-003]
-    status: blocked
+    status: in_progress
   - id: MEDIA-002
     title: Test-pattern source
     priority: 51
@@ -172,7 +172,7 @@ tasks:
     title: Scene list panel
     priority: 56
     depends_on: [UI-001]
-    status: ready
+    status: in_progress
   - id: UI-004
     title: Source list panel
     priority: 57

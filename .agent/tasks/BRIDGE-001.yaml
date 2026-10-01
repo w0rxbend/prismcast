@@ -1,0 +1,18 @@
+id: BRIDGE-001
+title: Media-owner bridge (tracked as MEDIA-004)
+goal: >
+  Umbrella pointer: the app<->media<->GTK bridge is implemented by MEDIA-004
+  (application media owner + GTK preview adapter). See .agent/tasks/MEDIA-004.yaml.
+depends_on:
+- MEDIA-003
+- UI-001
+allowed_scope:
+  - crates/prismcast-media-gst/
+  - crates/prismcast-media/
+  - crates/prismcast-app/
+  - crates/prismcast-ui/
+acceptance:
+  - see MEDIA-004
+validation:
+  - see MEDIA-004
+status: blocked
