@@ -1526,6 +1526,7 @@ name = "prismcast-media-gst"
 version = "0.1.0"
 dependencies = [
  "gstreamer",
+ "prismcast-capture",
  "prismcast-compositor",
  "prismcast-core",
  "prismcast-media",
@@ -1559,6 +1560,7 @@ dependencies = [
  "gstreamer",
  "gtk4",
  "prismcast-app",
+ "prismcast-capture",
  "prismcast-core",
  "prismcast-media",
  "prismcast-media-gst",

@@ -206,4 +206,10 @@ tasks:
     title: Command-driven portal authorization and shared capture preview
     priority: 61
     depends_on: [CAPTURE-001, MEDIA-004]
-    status: in_progress
+    status: done
+
+  - id: CAPTURE-003
+    title: V4L2 camera discovery and bounded shared capture preview
+    priority: 62
+    depends_on: [CAPTURE-002]
+    status: ready

@@ -31,4 +31,8 @@ acceptance:
 - Appropriate protocol/persistence classification and all controller invariants remain validated
 - Mock interleaving/revocation tests and opt-in actual GNOME window/monitor pixels and shutdown are separately recorded
 validation: [just ci, just deny, separate real-display and portal tests]
-status: in_progress
+status: done
+
+validation_notes:
+- Combined headless/native and GTK regression gates pass
+- Live window baseline frames pass; integrated opt-in preview attempt timed out awaiting selection and cleaned up

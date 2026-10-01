@@ -41,3 +41,16 @@ setting or a wire-provided OS resource.
 Live monitor/window pixels and portal cancellation are opt-in display evidence.
 Headless generators establish graph negotiation and teardown but cannot establish
 actual portal capture. No permission dialog is opened during ordinary CI.
+
+## Live window baseline (2026-10-01)
+
+User selected Window capture test and completed GNOME sharing selection. The
+CAPTURE-001 opt-in test passed on main026c823 in 6.86 seconds, reading three native
+RGBA buffers at negotiated6144x3456 (254803968 total bytes), first/last PTS
+67280338/601632338ns and checksum4363296031715551246. Lease and broker cleanup
+completed before the test returned. This proves live window grant, native frames
+and voluntary session cleanup, but not yet CAPTURE-002 UI integration.
+
+The observed frame is about81MiB; producer and consumer queue limits must bound
+bytes as well as count, avoid per-placement deep copies, and handle these actual
+caps. Portal coordinate metadata is not a substitute for this negotiated size.

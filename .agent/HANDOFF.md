@@ -1,52 +1,62 @@
 # Current state
 
-CORE-005 undo hardening and CAPTURE-001 portal/PipeWire foundations are complete.
-Separate task worktrees and independent reviews were integrated on
-agent/CAPTURE-INTEGRATION. No remote push was requested or performed.
+CAPTURE-002 command-driven monitor/window capture preview is implemented and
+integrated on agent/CAPTURE-002 with separate Core/API, media and UI worktrees
+and independent reviews. Main026c823 was pushed at the user's explicit request
+before this wave; current wave integration/push is recorded in the journal.
 
-## Completed
+## Implemented
 
-- CORE-005 (f8b4137, 2477c4b): typed controller identities, isolated remote
-  controllers, bounded undo payloads/groups/labels/nesting, chronological foreign
-  mutation boundaries, actor-side inverse authorization and failure-preserving
-  history. Own/foreign no-op commands preserve group and redo history, including
-  when an open group has reached its admission limit. ADR-0015 records the scope.
-- CAPTURE-001 (f724c04): new GTK-independent prismcast-capture crate owns portal
-  session authorization, ephemeral PipeWire FD/node grants, bounded lease/probe
-  capacity, cancellation/revocation and orderly worker/session cleanup. Native
-  RGBA probe validates caps, buffers and timestamps; runtime/property checks return
-  typed errors. ADR-0016 and docs/research/capture-lease-native.md explain ownership.
-- Fourteen capture tests cover mocked lifecycle and real headless GStreamer buffer
-  evidence. Real portal capture remains unverified: the user was offered a window
-  or monitor test, but no target selection has arrived and no dialog was opened.
-  The opt-in test reads three frames and closes the session even on probe failure.
+- AuthorizeSourceCapture is an explicit Core Command. A singleton bounded owner
+  receives effects; absent/full/disconnected owners fail admission before changes.
+  Ephemeral parent context is local-only. Transient source runtime lives outside
+  persisted AppState; Core Events and snapshots expose status/actual dimensions.
+  Owner/generation checks prevent stale revival, including retry/remove/disable.
+  Authorization is not replayed by transactions, undo or snapshot restoration.
+- Persistent pipewiresrc producers retain one portal lease per shared SourceId
+  through compositor rebuilds. Bounded RGBA appsink/appsrc consumers share native
+  buffers and tee placements; native caps define geometry. Timelines are rebased
+  across independent producers/consumers. Unavailable captures leave other content
+  visible. Native graph retirement precedes voluntary portal session close.
+- UI offers monitor/window source creation and explicit authorize/retry controls.
+  GTK-local exported parent guard survives asynchronous media shutdown. Pending,
+  terminal and disabled sources gate repeated signals. Negotiated dimensions drive
+  preview editing; caps/generation/revocation changes cancel stale drafts.
+- ADR-0017/0018 and docs/testing/capture-core-runtime.md, capture-ui.md and
+  shared-capture-preview.md document the contract and evidence.
 
-## Validation
+## Evidence and live limitation
 
-Combined just ci passed: 406 tests passed, six opt-in tests ignored. just deny
-passed. Five separate real-display regressions cover preview, shell, gesture,
-scene dialogs and rapid source toggles; see the journal for final results.
-Portal test instructions: docs/testing/portal-capture.md. Undo evidence:
-docs/testing/undo-history.md. Headless probe evidence does not establish actual
-monitor/window capture or UI integration.
+Combined fmt/clippy/workspace tests and dependency audit pass; final count is in
+JOURNAL. Seven separate real Wayland display regressions pass, including source
+buttons and actual parent export; those tests open no permission dialogs.
 
-## Next task and limits
+Actual GNOME window probe passed: three6144x3456 RGBA frames, timestamps and clean
+session shutdown. The integrated animated-window preview test opened one picker
+but received no completed sharing grant; at120seconds it reported Failed with
+"capture authorization timed out" and cleaned up. Integrated live preview pixels
+are therefore unverified. User was asked whether available for one retry; do not
+open another dialog without their reply. Headless native pixels/producer retention
+are tested separately and cannot replace this manual evidence.
 
-CAPTURE-002 is ready with a concrete spec in .agent/tasks/CAPTURE-002.yaml:
-Core Commands authorize/retry, Core Events/snapshots expose runtime status,
-GTK exports the local parent window, and the media graph shares one capture lease
-per source across rebuilds. Negotiate source dimensions, support revocation and
-cleanup, and require explicit authorization rather than opening pickers from
-restored state. Production compositor/UI currently still supports TestPattern;
-CAPTURE-001 alone does not add a screen/window source to the application.
+Run opt-in: GDK_BACKEND=wayland GSK_RENDERER=cairo G_DEBUG=fatal-criticals cargo test
+-p prismcast-preview actual_window_capture_preview_pixels_placement_and_shutdown
+-- --ignored --nocapture --test-threads=1. Select the animated window titled
+"Prismcast capture test target – select this window". The test expects red/blue
+paintable pixels, unchanged grant across hide/show rebuild, source removal and
+shutdown. Capture tests must run in separate processes from other GTK tests.
 
-Undo/redo remain existing application metadata APIs; canonical Commands and
-UI/protocol controls, destructive Add/Remove restoration and persisted history
-are follow-ups. Z-order i32 boundary overflow and missing neighbor update events
-need a coordinated core change. Existing preview non-atomic edit preflight,
-cardinal rotation/Normal blend limitations and CPU rebuild frame interruption
-remain. Capture lease caps are bounded; v6 portal serial targeting is deferred.
+## Next and remaining limits
 
-Prior overlapping edits remain preserved on archive/paused-agent-phase2 (2ce3390)
-and its named stash. Do not reapply the alternate backend API wholesale.
-Worktrees remain available for review. No secrets or portal grants are persisted.
+Coordinate live preview revalidation when user available, then scope CAPTURE-003
+V4L2 discovery/camera producer integration. Monitor, KDE and X11 actual capture
+remain unverified. CPU RGBA producer frames are capped128MiB and axes8192; queues
+are bounded but conversion/composition can copy pixels. No zero-copy claim.
+ScreenCast v5 node IDs are supported; v6 serial targeting remains future work.
+
+Canonical Undo/Redo Commands/UI/wire, destructive Add/Remove history, persisted
+history, z-order boundary overflow/missing neighbor events and atomic expected
+version edits remain follow-ups. Existing cardinal rotation/Normal blend and CPU
+rebuild interruption remain. Prior overlapping edits are preserved on
+archive/paused-agent-phase2 (2ce3390) and its named stash; do not reapply its alternate
+backend API wholesale. Worktrees remain reviewable. Never persist grants/FDs.

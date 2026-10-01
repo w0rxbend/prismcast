@@ -651,3 +651,45 @@ authorization, shared capture preview, negotiated dimensions and revocation clea
 Canonical undo commands/UI/wire and destructive history remain follow-ups. Recorded
 z-order overflow/missing neighbor events for a coordinated core change. Commits
 are local only; no remote push authorized. Existing archive/stash/worktrees retained.
+
+## 2026-10-01 — CAPTURE-002 command-driven shared capture preview
+
+Explicitly pushed main026c823 on user request before starting this wave. Separate
+Core/API, media and UI worktrees plus cross-review integrated on agent/CAPTURE-002:
+439d0c6 geometry/ADR18;5394877 command/runtime capability+ADR17;a569544 protocol
+request sorting;fd9d5bb lifecycle tests;9320c5a UI parent export/controls/editor;
+9c92257 persistent producer/preview owner; c17a86e sample segment normalization.
+
+Explicit authorization uses the single Core API with bounded singleton effect
+admission. Transient runtime snapshots/events, owner+generation guards and
+volatile classification keep live grants outside persistence/wire settings and
+undo replay. Native producers survive placement/canvas changes; bounded RGBA
+bridges share buffers/tee placements, normalize unit-rate TIME segments and rebase
+consumer timestamps. Native cleanup precedes voluntary portal close. GTK export
+ownership survives shutdown; runtime status and negotiated pixels drive controls
+and editor invalidation. Reviews caught publish-before-effect race, unnecessary
+profile/collection invalidation and undrained Error/EOS before rebuild; fixed.
+Independent final Core, owner lifecycle, producer/compositor and segment reviews
+found no blockers. Source segment formats/rates outside supported TIME unit-rate
+fail explicitly. No zero-copy or persistent grants claim.
+
+Final combined just ci passed:426 tests passed,9 opt-in tests ignored. just deny
+passed. Seven separately run real Wayland/GTK regressions passed: preview native,
+actual shell/repeated close, preview gestures, scene dialogs, rapid source toggles,
+actual parent export/drop and explicit authorization button status/signal matrix.
+Shared target build interference in the UI worktree was resolved by isolated target
+rerun; combined gates used that isolated target with no concurrent build there.
+
+Live evidence: user opted into Window capture and the three-frame foundation
+probe passed on main026c823:6144x3456 RGBA,254803968 bytes total, timestamps
+67280338..601632338ns, checksum4363296031715551246, clean session shutdown.
+The integrated animated-window preview test opened one picker but timed out after
+120seconds without a sharing grant; it published Failed and cleaned up. Live
+integrated preview pixels remain UNVERIFIED. User was asked if available for one
+retry; no reply/no second dialog. Failure is recorded separately from headless
+native pixels and prior live probe. Monitor/KDE/X11 capture remains unverified.
+
+Marked implementation CAPTURE-002 done with explicit live validation limitation;
+next is live preview revalidation and scoped CAPTURE-003 V4L2 integration. No
+unrelated task implementation or old archive/stash changes included. Worktrees
+retained for review. No secrets, FD grants or session tokens persisted.
