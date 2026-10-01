@@ -109,6 +109,8 @@ pub fn layout_item(item: &SceneItem, source: SourceSize) -> Result<ItemLayout> {
         || !transform.scale.x.is_finite()
         || !transform.scale.y.is_finite()
         || !transform.rotation.is_finite()
+        || !item.bounds.size.x.is_finite()
+        || !item.bounds.size.y.is_finite()
         || !item.opacity.is_finite()
         || !(0.0..=1.0).contains(&item.opacity)
     {
