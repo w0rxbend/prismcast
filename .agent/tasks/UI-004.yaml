@@ -1,0 +1,21 @@
+id: UI-004
+title: Source list panel
+goal: Implement active-scene item listing and source placement/removal controls through
+  existing core Commands. Capture the target scene and handle partial source-creation/placement
+  failure.
+depends_on:
+- UI-001
+allowed_scope:
+- crates/prismcast-ui/
+- docs/testing/
+acceptance:
+- Adding a source also places it through AddSceneItem when requested
+- Shared SourceId and SceneItemId semantics remain distinct
+- Visibility/lock/removal update from committed snapshots
+- Source creation success followed by placement failure is visible and recoverable
+- No source backend/pipeline calls in UI
+validation:
+- Focused task tests
+- just ci
+- just deny
+status: ready

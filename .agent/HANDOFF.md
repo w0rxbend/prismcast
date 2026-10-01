@@ -59,3 +59,9 @@ just ci
 cargo run -p prismcast-cli -- ping        # needs a running server
 cargo run -p prismcast                     # needs a display
 ```
+
+## Resume audit (2026-10-01, RESUME-001)
+
+MEDIA-001..004 and UI-003/004 now have scoped task files. UI-003/004 are ready; UI-002 still requires MEDIA-004. Baseline `just ci` and `just deny` passed. Implementation awaits requested UltraCode access clarification and native packages: `sudo apt install libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev`. This session cannot authenticate sudo.
+
+Before media implementation resolve the runtime floor/MSRV and preview ownership in ADRs. Add a dedicated media owner; do not run synchronous backend methods on GTK/Tokio threads. Reconcile snapshots after event lag, coalesce UI refresh notifications, and place sources via AddSceneItem so test patterns actually appear. GUI display environment is present, but no window was launched.

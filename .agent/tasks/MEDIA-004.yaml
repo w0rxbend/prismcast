@@ -1,0 +1,30 @@
+id: MEDIA-004
+title: Application media owner and GTK preview adapter
+goal: Connect committed core state to a dedicated media owner and attach a locally
+  obtained GdkPaintable to gtk::Picture. Establish the ownership/attachment contract
+  in an ADR before implementation.
+depends_on:
+- MEDIA-003
+- UI-001
+allowed_scope:
+- crates/prismcast-media-gst/
+- crates/prismcast-media/
+- crates/prismcast-app/
+- crates/prismcast-ui/
+- Cargo.toml
+- Cargo.lock
+- docs/adr/
+- docs/testing/
+acceptance:
+- GStreamer graph mutation stays off GTK and Tokio execution threads
+- GTK objects never cross Send backend traits or cross-thread channels
+- Bounded/coalesced state notifications recover by snapshot after lag
+- Sources added for the demo are placed via AddSceneItem Commands
+- Commands alter actual displayed frames; shutdown releases pipeline and threads
+- Matching gtk/gstreamer Rust binding versions and static sink registration verified
+- Real-display smoke test recorded separately from headless tests
+validation:
+- Focused task tests
+- just ci
+- just deny
+status: blocked

@@ -1,0 +1,20 @@
+id: MEDIA-002
+title: Test-pattern source backend
+goal: Implement SourceBackend for TestPattern with validated settings, stable source
+  identity and deterministic video caps.
+depends_on:
+- MEDIA-001
+- ARCH-004
+allowed_scope:
+- crates/prismcast-media-gst/
+- docs/testing/
+acceptance:
+- Invalid settings fail without partially applying state
+- Actual buffers reach a headless sink
+- Start/stop are idempotent; EOS and errors produce backend events
+- No blocking graph work on GTK or Tokio execution threads
+validation:
+- Focused task tests
+- just ci
+- just deny
+status: blocked

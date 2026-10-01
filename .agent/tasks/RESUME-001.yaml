@@ -1,0 +1,15 @@
+id: RESUME-001
+title: Audit handoff and prepare next implementation wave
+status: done
+depends_on:
+- UI-001
+- CORE-004
+- WS-001
+allowed_scope:
+- .agent/
+acceptance:
+- Current baseline verified
+- Next wave task scopes and blockers documented
+validation:
+- just ci
+- just deny

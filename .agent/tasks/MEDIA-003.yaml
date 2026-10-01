@@ -1,0 +1,23 @@
+id: MEDIA-003
+title: CPU compositor backend
+goal: Implement concrete GStreamer graph behind CompositorBackend; reconcile scene
+  snapshots with shared source bins/tees and bounded per-item queues. Keep full transform
+  support in MEDIA-005.
+depends_on:
+- MEDIA-002
+allowed_scope:
+- crates/prismcast-media-gst/
+- crates/prismcast-compositor/
+- docs/architecture/scene-graph.md
+- docs/testing/
+acceptance:
+- Two test sources produce verifiable composited frames
+- Item add/remove, visibility and z-order affect rendered frames
+- Scene switch and repeated teardown release request pads and branches
+- Unsupported nesting/transform behavior is explicit and bounded
+- No zero-copy claims for the CPU prototype
+validation:
+- Focused task tests
+- just ci
+- just deny
+status: blocked

@@ -1,0 +1,24 @@
+id: MEDIA-001
+title: Initialize isolated GStreamer backend
+goal: Add prismcast-media-gst with fallible initialization and runtime capability
+  discovery. Resolve GStreamer floor, Rust MSRV and backend placement in an ADR before
+  implementation.
+depends_on:
+- BOOT-001
+- RES-003
+allowed_scope:
+- Cargo.toml
+- Cargo.lock
+- crates/prismcast-media-gst/
+- docs/adr/
+- docs/research/
+acceptance:
+- No GTK dependency or GStreamer dependency in prismcast-core
+- Typed init/plugin errors and observed runtime capability inventory
+- Headless finite pipeline produces buffers and cleans up after error/EOS
+- Chosen crate versions and declared MSRV agree
+validation:
+- Focused task tests
+- just ci
+- just deny
+status: blocked

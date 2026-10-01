@@ -7,6 +7,7 @@ head_commit: 6f69afb
 current_objective: null
 
 completed:
+  - RESUME-001
   - SKILL-001
   - BOOT-001
   - BOOT-002
@@ -85,3 +86,6 @@ open_questions:
   - Encoder/service registries have no domain home; profiles save empty lists (CORE-004)
   - Hello.auth challenge-response advertisement needs protocol schema change (WS-001)
   - IPC 4 MiB vs protocol-doc 1 MiB frame limit inconsistency (WS-001)
+
+implementation_access:
+  ultracode: awaiting user access clarification; no exposed tool or executable

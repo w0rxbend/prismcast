@@ -172,12 +172,12 @@ tasks:
     title: Scene list panel
     priority: 56
     depends_on: [UI-001]
-    status: blocked
+    status: ready
   - id: UI-004
     title: Source list panel
     priority: 57
     depends_on: [UI-001]
-    status: blocked
+    status: ready
 
   # --- IPC (Phase 1) ---
   - id: IPC-001

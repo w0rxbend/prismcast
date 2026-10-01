@@ -1,0 +1,19 @@
+id: UI-003
+title: Scene list panel
+goal: Implement scene selection, rename, removal and reordering using existing core
+  Commands and snapshot-driven presentation.
+depends_on:
+- UI-001
+allowed_scope:
+- crates/prismcast-ui/
+- docs/testing/
+acceptance:
+- Every scene mutation dispatches an existing core Command
+- Selection and ordering reflect committed snapshots
+- Errors, long names, keyboard focus and empty states handled
+- No media graph ownership in components
+validation:
+- Focused task tests
+- just ci
+- just deny
+status: ready

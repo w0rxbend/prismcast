@@ -602,3 +602,7 @@ for removed profiles/collections; quarantine flow on total loss (needs user
 confirmation); Secret Service (D-Bus) storage for stream keys; `SaveProject` command in
 the core Command enum (today `save_now()` on the handle is the explicit-save verb);
 startup wiring `load_*` → `AppHandle::spawn_with_state` (store API is ready).
+
+2026-10-01 RESUME-001
+
+Read-only media and UI agent audits completed. Created scoped MEDIA-001..004 and UI-003/004 task specs; marked UI-003/004 ready because UI-001 is done. Baseline just ci and just deny passed. Native GStreamer development packages remain absent; sudo requires interactive authentication. UltraCode was requested but is not exposed as a tool/executable; access clarification pending. No application implementation or GUI launch performed. Audit identified missing media owner, source placement gap, unbounded UI event forwarding, and MSRV/binding version decisions to resolve before media work.
