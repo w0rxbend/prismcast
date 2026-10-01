@@ -67,8 +67,22 @@ pub fn anchor_fractions(anchor: Anchor) -> (f32, f32) {
     }
 }
 
-/// Resolve the known test-pattern dimensions without depending on native APIs.
-/// Validates dimensions only; the source backend validates the full settings.
+/// Capture requires negotiated pixel dimensions; portal coordinates are not pixels.
+pub fn source_size(source: &Source, negotiated: Option<SourceSize>) -> Result<SourceSize> {
+    match source.kind {
+        SourceKind::TestPattern => test_pattern_source_size(source),
+        SourceKind::PipeWireDisplay | SourceKind::PipeWireWindow => {
+            let size = negotiated.ok_or_else(|| invalid("capture dimensions unavailable"))?;
+            if !(1..=8192).contains(&size.width) || !(1..=8192).contains(&size.height) {
+                return Err(invalid("invalid capture pixel dimensions"));
+            }
+            Ok(size)
+        }
+        _ => Err(invalid("source kind has no supported pixel dimensions")),
+    }
+}
+
+/// Resolve test-pattern dimensions; the native backend validates other settings.
 pub fn test_pattern_source_size(source: &Source) -> Result<SourceSize> {
     if source.kind != SourceKind::TestPattern {
         return Err(invalid(
@@ -539,5 +553,36 @@ mod tests {
             }
         );
         assert!(test_pattern_source_size(&Source::new(SourceKind::Color, "color")).is_err());
+    }
+}
+
+#[cfg(test)]
+mod capture_size_tests {
+    use super::*;
+    #[test]
+    fn capture_requires_negotiated_pixels_and_test_pattern_keeps_defaults() {
+        let source = Source::new(SourceKind::PipeWireWindow, "capture");
+        assert!(source_size(&source, None).is_err());
+        let pixels = SourceSize {
+            width: 6144,
+            height: 3456,
+        };
+        assert_eq!(source_size(&source, Some(pixels)).unwrap(), pixels);
+        assert!(source_size(
+            &source,
+            Some(SourceSize {
+                width: 0,
+                height: 1080
+            })
+        )
+        .is_err());
+        let pattern = Source::new(SourceKind::TestPattern, "test");
+        assert_eq!(
+            source_size(&pattern, Some(pixels)).unwrap(),
+            SourceSize {
+                width: 1920,
+                height: 1080
+            }
+        );
     }
 }
