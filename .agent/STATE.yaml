@@ -1,7 +1,7 @@
 schema_version: 1
 project_phase: phase-2-media-prototype
-head_commit: a8cb297
-current_objective: Phase 2 media prototype with bounded UI integration
+head_commit: c9eefdb
+current_objective: Complete preview controls and compositor transforms after native preview milestone
 completed:
 - RESUME-001
 - SKILL-001
@@ -37,15 +37,14 @@ completed:
 - UI-004
 - BRIDGE-001
 - MEDIA-002
-in_progress:
 - MEDIA-003
+- MEDIA-004
+in_progress: []
 blocked: []
 next_candidates:
 - CORE-005
 - UI-002
-- UI-003
-- UI-004
-- MEDIA-001
+- MEDIA-005
 - WS-002
 decisions:
 - ADR-0001
@@ -60,6 +59,7 @@ decisions:
 - ADR-0010
 - ADR-0011
 - ADR-0012
+- ADR-0013
 verification:
   cargo_fmt: pass
   cargo_clippy: pass

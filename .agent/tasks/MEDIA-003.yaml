@@ -20,4 +20,4 @@ validation:
 - Focused task tests
 - just ci
 - just deny
-status: in_progress
+status: done

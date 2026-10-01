@@ -610,3 +610,11 @@ Read-only media and UI agent audits completed. Created scoped MEDIA-001..004 and
 2026-10-01 Phase 2 wave, MEDIA-001/UI-003/UI-004/BRIDGE-001
 
 User installed native GStreamer development packages and clarified UltraCode as dynamic multi-agent orchestration. Integrated isolated worktree implementations: GStreamer initialization/capabilities (a2a49e2), scenes (0c0c5a6), runtime startup/coalesced snapshot refresh (ef2f191), and source placements (eabfcba). Per-task CI/deny passed; combined UI tests 13 pass. Scene/source controls and bounded snapshot tokens preserved during conflict resolution. MEDIA-002 now active; MEDIA-003 and MEDIA-004 remain dependent next steps.
+
+2026-10-01 Phase 2 native preview milestone
+
+Dynamic agent implementation/review completed MEDIA-002/003/004 plus UI-003/004 and BRIDGE-001. Integrated shared-source CPU compositor (708d5ca), current-value rapid toggles (aa81922), accessible scene dialogs/removal confirmation (4a45a95), and dedicated native preview owner (c9eefdb). Reviewed GTK-local paintable ownership, latest-only watches/coalesced wakeups, fatal-event precedence, graph cleanup, and joined media-before-core close. ADR-0013 sets preview ownership and GTK >=4.14 deployment floor; static gst-plugin-gtk4 0.15.2 uses explicit MPL-2.0 allowance.
+
+Final combined just ci passed: 367 tests passed, four display tests ignored by headless suite. just deny passed (pre-existing unmatched license allowance warnings only). Separate real-display tests validate rendered command changes, unsupported-source failure/recovery, actual RelmApp repeated-close shutdown, rapid source checkbox signals and scene dialogs. Evidence is in docs/testing/native-preview.md, source-toggle-signals.md, and ui-scene-list.md.
+
+After the user stopped an overlapping prior agent, preserved all its edits as archive/paused-agent-phase2 commit 2ce3390 and named stash; retained compatible scene polish without replacing validated backend contracts. UI-002 and MEDIA-005 dependencies are satisfied and their backlog statuses are ready; scoped task specifications still needed. Native CPU preview milestone is complete, advanced preview editing/transforms and later capture/output phases remain.
