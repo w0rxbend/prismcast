@@ -11,8 +11,22 @@ name = "prismcast"
 path = "src/main.rs"
 
 [dependencies]
-# GTK stack — commented out until system libraries are available on build
-# machines. The crate must compile as a skeleton without them.
-# gtk4 = { workspace = true }
-# relm4 = { workspace = true }
-# libadwaita = { workspace = true, features = ["v1_5"] }
+# Internal crates (declared here, not via the root workspace table, so this
+# crate can evolve independently while other agents work in parallel).
+prismcast-core = { path = "../prismcast-core", version = "0.1.0" }
+prismcast-app = { path = "../prismcast-app", version = "0.1.0" }
+
+# GTK stack (system: gtk4 4.22.4, libadwaita-1 1.9.1).
+# relm4 0.11 pairs with gtk4-rs 0.11; libadwaita 0.9 targets libadwaita 1.9
+# and the same gtk4 0.11 line. `v1_5` unlocks adw::Dialog.
+gtk = { package = "gtk4", version = "0.11.2" }
+adw = { package = "libadwaita", version = "0.9.2", features = ["v1_5"] }
+relm4 = { version = "0.11.0", features = ["libadwaita"] }
+
+# The core actor runtime. Only lock-free sync primitives are awaited from the
+# GTK main thread; the runtime itself lives on a background thread.
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"] }
+
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+serde_json = "1.0"

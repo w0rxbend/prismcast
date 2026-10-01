@@ -5,3 +5,23 @@
 //! **Layer: Interfaces (UI).** Relm4 components contain no media logic;
 //! the UI only sends Commands to the application core and renders
 //! Events/Snapshots.
+//!
+//! ## Wiring (PLAN.md §57, §76)
+//!
+//! ```text
+//! GTK main thread                          background thread "prismcast-core"
+//! ┌──────────────────────────────┐         ┌──────────────────────────────┐
+//! │ AppModel (Relm4 root)        │         │ Tokio runtime                │
+//! │  ├─ scenes / sources /       │ Command │  └─ CoreActor (owns AppState)│
+//! │  │  outputs panels           ├────────►│        │                     │
+//! │  └─ header / preview /       │ oneshot │        ▼                     │
+//! │     transition bar           │ command │  EventBroadcaster            │
+//! │           ▲                  │◄────────┤        │                     │
+//! │           │ AppMsg::Pump     │ Sender  │  event pump (tokio task)     │
+//! └──────────────────────────────┘         └──────────────────────────────┘
+//! ```
+
+pub mod app;
+pub mod bridge;
+pub mod components;
+pub mod presentation;
