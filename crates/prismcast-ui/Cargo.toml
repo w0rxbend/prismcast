@@ -15,6 +15,7 @@ path = "src/main.rs"
 # crate can evolve independently while other agents work in parallel).
 prismcast-core = { path = "../prismcast-core", version = "0.1.0" }
 prismcast-app = { path = "../prismcast-app", version = "0.1.0" }
+prismcast-compositor = { path = "../prismcast-compositor", version = "0.1.0" }
 prismcast-preview = { path = "../prismcast-preview", version = "0.1.0" }
 
 # GTK stack (system: gtk4 4.22.4, libadwaita-1 1.9.1).

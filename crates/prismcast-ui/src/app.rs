@@ -27,6 +27,7 @@ use crate::components::outputs::{OutputsInput, OutputsOutput, OutputsPanel};
 use crate::components::scenes::{ScenesInput, ScenesOutput, ScenesPanel};
 use crate::components::sources::{SourcesInput, SourcesOutput, SourcesPanel};
 use crate::presentation::{choice_for_transition, transition_for_choice, StreamStatus};
+use crate::preview_editor::PreviewEditor;
 
 /// Kinds offered by the add-source dialog, in picker order.
 const SOURCE_KIND_CHOICES: [(SourceKind, &str); 2] = [
@@ -71,6 +72,7 @@ pub enum AppMsg {
     FinishShutdown,
     BeginShutdown,
     PreviewWake,
+    PreviewCommand(Box<Command>),
 }
 
 /// Results of commands dispatched to the core actor.
@@ -78,6 +80,7 @@ pub enum AppMsg {
 pub enum AppCmd {
     /// A command dispatch returned (success or rejection).
     Dispatched(Result<CommandResponse, HandleError>),
+    PreviewDispatched(Result<CommandResponse, HandleError>),
     /// Creating a shared source succeeded but placing it failed.
     PlacementFailed {
         source_id: prismcast_core::SourceId,
@@ -91,6 +94,7 @@ pub enum AppCmd {
 pub struct AppModel {
     bridge: CoreBridge,
     preview_session: Option<PreviewSession>,
+    preview_editor: PreviewEditor,
     preview_status: Option<tokio::sync::watch::Receiver<PreviewStatus>>,
     preview_pump: Option<gtk::glib::JoinHandle<()>>,
     preview_pending: Rc<Cell<bool>>,
@@ -139,6 +143,7 @@ impl AppModel {
             self.outputs.emit(OutputsInput::Refresh(wake));
             true
         });
+        self.preview_editor.refresh(snapshot.clone());
         self.sync_header(&snapshot);
         self.sync_transition(&snapshot);
     }
@@ -369,7 +374,18 @@ impl AsyncComponent for AppModel {
         let preview_message = gtk::Label::new(Some("Starting preview…"));
         preview_message.set_wrap(true);
         preview_message.set_max_width_chars(80);
-        preview_stack.add_named(&picture, Some("video"));
+        let preview_editor = PreviewEditor::new(
+            &picture,
+            {
+                let handle = bridge.handle().clone();
+                move || handle.snapshot()
+            },
+            {
+                let input = sender.input_sender().clone();
+                move |command| input.emit(AppMsg::PreviewCommand(Box::new(command)))
+            },
+        );
+        preview_stack.add_named(preview_editor.widget(), Some("video"));
         preview_stack.add_named(&preview_message, Some("status"));
         preview_stack.set_visible_child_name("status");
         preview.set_child(Some(&preview_stack));
@@ -496,6 +512,7 @@ impl AsyncComponent for AppModel {
         let model = Self {
             bridge,
             preview_session,
+            preview_editor,
             preview_status,
             preview_pump,
             preview_pending,
@@ -597,12 +614,22 @@ impl AsyncComponent for AppModel {
                     self.dispatch(&sender, Command::SetTransition { transition });
                 }
             }
+            AppMsg::PreviewCommand(command) => {
+                let handle = self.bridge.handle().clone();
+                sender.oneshot_command(async move {
+                    AppCmd::PreviewDispatched(handle.dispatch(*command).await)
+                });
+            }
             AppMsg::PreviewWake => {
                 self.preview_pending.set(false);
                 let status = self
                     .preview_status
                     .as_mut()
                     .map(|status| status.borrow_and_update().clone());
+                self.preview_editor.set_available(matches!(
+                    status,
+                    Some(PreviewStatus::Running | PreviewStatus::Degraded(_))
+                ));
                 match status {
                     Some(PreviewStatus::Running) => {
                         self.preview_stack.set_visible_child_name("video")
@@ -653,6 +680,14 @@ impl AsyncComponent for AppModel {
         _root: &Self::Root,
     ) {
         match message {
+            AppCmd::PreviewDispatched(result) => {
+                self.preview_editor
+                    .completed(self.bridge.handle().snapshot());
+                if let Err(error) = result {
+                    self.toast_overlay
+                        .add_toast(adw::Toast::new(&format!("Preview edit failed: {error}")));
+                }
+            }
             AppCmd::PlacementFailed { source_id, error } => {
                 warn!(%source_id, %error, "shared source created but placement failed");
                 self.toast_overlay.add_toast(adw::Toast::new(&format!("Source was created, but could not be placed: {error}. Place it from Shared sources.")));

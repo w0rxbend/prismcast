@@ -25,3 +25,5 @@ pub mod app;
 pub mod bridge;
 pub mod components;
 pub mod presentation;
+
+pub mod preview_editor;
