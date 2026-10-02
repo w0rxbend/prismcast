@@ -417,7 +417,7 @@ impl Session {
         out_tx: mpsc::Sender<ObsOutbound>,
         established: Established,
     ) -> Self {
-        let mut events = ObsEventPipe::new(&fanout, established.subscriptions);
+        let mut events = ObsEventPipe::new(&fanout, established.subscriptions, item_ids.clone());
         // Seed name/state memos so renames and removals of pre-existing
         // entities resolve to names, not UUID fallbacks.
         events.translator.seed(&app.snapshot());
@@ -726,12 +726,12 @@ struct ObsEventPipe {
 }
 
 impl ObsEventPipe {
-    fn new(fanout: &EventFanout, set: SubscriptionSet) -> Self {
+    fn new(fanout: &EventFanout, set: SubscriptionSet, item_ids: Arc<ItemIdMap>) -> Self {
         Self {
             rx: (!set.entries.is_empty()).then(|| fanout.subscribe()),
             fanout: fanout.clone(),
             set,
-            translator: translate::EventTranslator::new(),
+            translator: translate::EventTranslator::new(item_ids),
             overflow_strikes: OverflowStrikes::default(),
         }
     }

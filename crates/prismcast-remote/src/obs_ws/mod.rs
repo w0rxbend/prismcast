@@ -60,9 +60,6 @@
 //!   is a Prismcast extension event: upstream only has the singleton
 //!   `StreamStateChanged`/`RecordStateChanged`, which are emitted here only
 //!   when the changing output is the designated primary (ADR-0020 §e).
-//! - Event `sceneItemId` values are stable UUID-derived placeholders until
-//!   the request slice's `ItemIdMap` (sequential per-scene integers,
-//!   ADR-0020 §c) is shared with the event path at integration.
 //! - `eventIntent` is obs-exact, but delivery gating uses native event
 //!   categories (bitmask → `SubscriptionSet`, see [`bitmask`]), which are
 //!   coarser: e.g. `CurrentPreviewSceneChanged` is native `System`, so it is
