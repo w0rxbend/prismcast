@@ -21,12 +21,16 @@
 //!   primary control — with an optional bearer token or password
 //!   (challenge-response) from `$XDG_CONFIG_HOME/prismcast/remote.toml` or an
 //!   injected [`AuthConfig`].
-//! - **WebSocket** (WS-001, PLAN.md §22): [`WsServer`] over a plain
-//!   `TcpListener` (no axum, no TLS yet — both are follow-ups); one JSON text
+//! - **WebSocket** (WS-001/WS-003, PLAN.md §22): [`WsServer`] over a plain
+//!   `TcpListener` (no axum), with optional rustls-terminated `wss://`
+//!   ([`tls`], ADR-0022); one JSON text
 //!   frame per protocol message; close codes map to WebSocket close frames in
 //!   the 4000+ range. **Disabled by default**; a credential (token or
 //!   password challenge-response, protocol doc §4) is mandatory on this
-//!   network transport ([`WsServerConfig`]).
+//!   network transport ([`WsServerConfig`]). [`WsClient`] speaks both
+//!   schemes: [`WsClient::connect_url`] accepts `ws://` and `wss://` URLs,
+//!   with the TLS trust model (native roots, an extra private CA bundle, or
+//!   the warn-logged danger switch) configured through [`ClientTlsConfig`].
 //! - **obs-websocket adapter** (OBSWS-001, ADR-0010/ADR-0020): [`obs_ws`]
 //!   serves the obs-websocket 5.x wire protocol on its own port (4455) for
 //!   OBS-ecosystem clients, translating onto the same Core Command/Event
@@ -50,6 +54,7 @@ mod paths;
 mod server;
 mod session;
 mod session_kit;
+pub mod tls;
 pub mod ws;
 pub mod ws_client;
 
@@ -58,5 +63,6 @@ pub use client::{ClientAuth, ClientError, IpcClient, IpcClientConfig};
 pub use codec::{ClosingNotice, DEFAULT_MAX_FRAME_SIZE};
 pub use paths::{default_socket_dir, default_socket_path, SOCKET_FILE_NAME};
 pub use server::{IpcError, IpcServer, IpcServerConfig};
+pub use tls::{ClientTlsConfig, TlsError, WsTlsConfig};
 pub use ws::{WsError, WsServer, WsServerConfig};
 pub use ws_client::{WsClient, WsClientConfig, WsClientError};

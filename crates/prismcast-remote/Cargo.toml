@@ -14,15 +14,23 @@ base64 = "0.22"
 futures-util = "0.3"
 rand = "0.9"
 rmp-serde.workspace = true
+rustls.workspace = true
+rustls-native-certs.workspace = true
+rustls-pki-types.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2 = "0.10"
 thiserror.workspace = true
 tokio.workspace = true
-tokio-tungstenite = "0.30"
+tokio-rustls.workspace = true
+# rustls-tls-native-roots unlocks Connector::Rustls + connect_async_tls_with_config
+# for WsClient's wss:// arm — required on the main dependency, not just dev,
+# so the crate compiles outside a dev-feature-unified build.
+tokio-tungstenite = { version = "0.30", features = ["rustls-tls-native-roots"] }
 tracing.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
 obws = { version = "0.15", default-features = false }
+rcgen = "0.13"
 tracing-subscriber.workspace = true
