@@ -425,11 +425,11 @@ async fn requests_get_typed_204_stub_mirroring_type_and_id() {
 
     let d = roundtrip_request(
         &mut stream,
-        "GetVersion",
+        "GetStats",
         "f819dcf0-89cc-11eb-8f0d-382c4ac93b9c",
     )
     .await;
-    assert_eq!(d["requestType"], "GetVersion");
+    assert_eq!(d["requestType"], "GetStats");
     assert_eq!(d["requestId"], "f819dcf0-89cc-11eb-8f0d-382c4ac93b9c");
     assert_eq!(d["requestStatus"]["result"], false);
     assert_eq!(d["requestStatus"]["code"], 204);
@@ -461,7 +461,7 @@ async fn reidentify_updates_subscriptions_and_replies_identified() {
     assert_eq!(identified["op"], 2);
 
     // The session is fully usable afterwards.
-    let d = roundtrip_request(&mut stream, "GetSceneList", "after-reidentify").await;
+    let d = roundtrip_request(&mut stream, "GetStats", "after-reidentify").await;
     assert_eq!(d["requestStatus"]["code"], 204);
 
     bed.shutdown().await;
@@ -497,9 +497,9 @@ async fn serial_batch_preserves_request_order() {
         serde_json::json!({
             "requestId": "batch-order",
             "requests": [
-                stub_request("GetVersion"),
-                stub_request("GetSceneList"),
                 stub_request("GetStats"),
+                stub_request("GetProfileList"),
+                stub_request("GetSceneCollectionList"),
             ]
         }),
     )
@@ -510,7 +510,10 @@ async fn serial_batch_preserves_request_order() {
         .iter()
         .map(|r| r["requestType"].as_str().expect("requestType"))
         .collect();
-    assert_eq!(types, ["GetVersion", "GetSceneList", "GetStats"]);
+    assert_eq!(
+        types,
+        ["GetStats", "GetProfileList", "GetSceneCollectionList"]
+    );
     for result in results {
         assert_eq!(result["requestStatus"]["code"], 204);
         assert_eq!(result["requestStatus"]["result"], false);
@@ -531,13 +534,13 @@ async fn halt_on_failure_stops_at_first_failure() {
         serde_json::json!({
             "requestId": "batch-halt",
             "haltOnFailure": true,
-            "requests": [stub_request("GetVersion"), stub_request("GetSceneList")]
+            "requests": [stub_request("GetStats"), stub_request("GetProfileList")]
         }),
     )
     .await;
     let results = d["results"].as_array().expect("results");
     assert_eq!(results.len(), 1, "haltOnFailure stops after the failure");
-    assert_eq!(results[0]["requestType"], "GetVersion");
+    assert_eq!(results[0]["requestType"], "GetStats");
 
     // A succeeding request (Sleep) does not halt the batch.
     let d = roundtrip_batch(
@@ -547,7 +550,7 @@ async fn halt_on_failure_stops_at_first_failure() {
             "haltOnFailure": true,
             "requests": [
                 {"requestType": "Sleep", "requestData": {"sleepMillis": 10}},
-                stub_request("GetVersion"),
+                stub_request("GetStats"),
             ]
         }),
     )

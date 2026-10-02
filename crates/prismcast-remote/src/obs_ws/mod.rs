@@ -22,17 +22,21 @@
 //!   [`SubscriptionSet`](prismcast_protocol::subscription::SubscriptionSet)
 //!   mapping, and the `eventIntent` bit per native event category.
 //!
-//! ## Foundation-slice scope
+//! ## Slice status
 //!
 //! The handshake (Hello/Identify/Identified with obs close codes), auth via
 //! the shared [`AuthConfig`](crate::AuthConfig) (obs's SHA-256
 //! challenge-response *is* [`crate::auth::challenge_response`]), `Reidentify`
-//! subscription updates, event gating by bitmask, and the RequestBatch
+//! subscription updates, event gating by bitmask, the RequestBatch
 //! scaffolding (serial execution, `haltOnFailure`, bounded `Sleep`,
-//! whole-batch 206 for `SerialFrame`/`Parallel`) are real. Per-request
-//! translation is the follow-up slice's job: until then every request is
-//! answered with a typed 204 (`UnknownRequestType`), and no domain event is
-//! translated to an obs event ([`translate::event_to_obs`] is a stub).
+//! whole-batch 206 for `SerialFrame`/`Parallel`), and **request translation**
+//! (`requests`: the advertised MVP request set pivots through native
+//! `RequestKind` → [`map::command_from_wire`](crate::map::command_from_wire)
+//! → Core Commands; queries read snapshots; `names`: stateless name→ID
+//! resolution plus the stateful, eviction-tracked `ItemIdMap` for numeric
+//! `sceneItemId`s) are real. Unknown request types get a typed 204
+//! (`UnknownRequestType`). Domain events are not yet translated to obs
+//! events ([`translate::event_to_obs`] is a stub — the events slice).
 //!
 //! ## Documented divergences from upstream obs-websocket
 //!
@@ -52,7 +56,9 @@
 //! - `obsStudioVersion` is omitted from `Hello` (ADR-0020 §d).
 
 pub mod bitmask;
+mod names;
 pub mod proto;
+mod requests;
 mod server;
 mod session;
 pub(crate) mod translate;
