@@ -21,8 +21,9 @@
 //!   primary control — with an optional bearer token or password
 //!   (challenge-response) from `$XDG_CONFIG_HOME/prismcast/remote.toml` or an
 //!   injected [`AuthConfig`].
-//! - **WebSocket** (WS-001, PLAN.md §22): [`WsServer`] over a plain
-//!   `TcpListener` (no axum, no TLS yet — both are follow-ups); one JSON text
+//! - **WebSocket** (WS-001/WS-003, PLAN.md §22): [`WsServer`] over a plain
+//!   `TcpListener` (no axum), with optional rustls-terminated `wss://`
+//!   ([`tls`], ADR-0022); one JSON text
 //!   frame per protocol message; close codes map to WebSocket close frames in
 //!   the 4000+ range. **Disabled by default**; a credential (token or
 //!   password challenge-response, protocol doc §4) is mandatory on this
@@ -50,6 +51,7 @@ mod paths;
 mod server;
 mod session;
 mod session_kit;
+pub mod tls;
 pub mod ws;
 pub mod ws_client;
 

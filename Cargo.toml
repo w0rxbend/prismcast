@@ -50,6 +50,13 @@ uuid = { version = "1", features = ["v4", "serde"] }
 indexmap = { version = "2", features = ["serde"] }
 rmp-serde = "1"
 clap = { version = "4", features = ["derive", "env"] }
+# rustls with the pure-Rust ring provider: default-features off so the
+# aws-lc-rs C build (rustls 0.23's default provider) never enters the tree
+# (ADR-0022).
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+tokio-rustls = { version = "0.26", default-features = false }
+rustls-pki-types = { version = "1.9", features = ["std"] }
+rustls-native-certs = "0.8"
 
 # Native backend; GLib 0.22 matches gtk4 0.11.
 gstreamer = { version = "0.25", features = ["v1_26"] }

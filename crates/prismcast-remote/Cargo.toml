@@ -14,15 +14,23 @@ base64 = "0.22"
 futures-util = "0.3"
 rand = "0.9"
 rmp-serde.workspace = true
+rustls.workspace = true
+rustls-native-certs.workspace = true
+rustls-pki-types.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2 = "0.10"
 thiserror.workspace = true
 tokio.workspace = true
+tokio-rustls.workspace = true
 tokio-tungstenite = "0.30"
 tracing.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
 obws = { version = "0.15", default-features = false }
+rcgen = "0.13"
+# rustls-tls-native-roots unlocks Connector::Rustls for scripted wss:// test
+# clients (features unify with the main dependency above).
+tokio-tungstenite = { version = "0.30", features = ["rustls-tls-native-roots"] }
 tracing-subscriber.workspace = true
