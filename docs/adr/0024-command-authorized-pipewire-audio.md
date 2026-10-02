@@ -29,11 +29,19 @@ and transient. GStreamer pipewiresrc targets the selected serial; only sink
 monitor mode sets stream.capture.sink. Disable reconnection/default fallback
 and bound native buffers. Revalidate the exact granted identity before graph
 rebuilds; never silently rebind to a replacement object with the same name.
+Bind native source connections to the selected daemon epoch using connected
+Unix socket FDs, retained through NULL teardown. Validate identity after
+connecting and before starting capture against the same explicit endpoint.
+A new implicit connection after validation is insufficient: a restart could
+reuse serials between the check and the first connection. Connected FDs must
+not be reused for fresh protocol handshakes on subsequent graph rebuilds.
 Native discovery/process boundaries have output and time limits.
 
 AudioSession retains an explicit allowlist of granted targets. Restore,
 enable, routing, gain changes and unrelated snapshots create no grant.
 Settings changes, disable/removal and superseding generations revoke grants.
+Stop invalidated native capture before resolving another authorization;
+bounded discovery must not postpone revocation behind a batch of requests.
 Active is reported only after actual measurements. Terminal native failures
 stop the graph, clear measurements and revoke physical grants; reopening
 requires another authorization command. Diagnostic tones retain their
