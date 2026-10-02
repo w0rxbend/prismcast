@@ -256,11 +256,13 @@ through the `OutputStateChanged` extension event.
 
 `Hello` advertises `obsWebSocketVersion: "5.7.4"` (the OBS 32.2.2 baseline, RES-007) and
 `rpcVersion: 1`. `GetVersion` returns `availableRequests` equal to the implemented set (§3),
-`supportedImageFormats: []` (screenshots are OBSWS-002+), `platform: "linux"`, and `obsVersion`
-equal to Prismcast's own version — there is no OBS build behind the field. Clients that enforce a
-minimum `obsStudioVersion` (e.g. `obws`'s default ≥ 30.2 check) must relax that check; the
-conformance test (`tests/obs_ws_obws.rs`) demonstrates this with `skip_studio_version_check` while
-leaving the websocket-version check enabled.
+`supportedImageFormats: []` (screenshots are OBSWS-002+), `platform: "linux"`,
+`platformDescription: "Linux (Prismcast obs-websocket adapter)"`, and `obsVersion: "30.2.0"` —
+a compatibility constant, not Prismcast's own version (ADR-0021). "30.2.0" is the minimum
+`obsStudioVersion` the `obws` client's default gate accepts; advertising the 32.x baseline
+would imply features this adapter answers 204 for. Clients therefore pass both of obws's
+default version checks (studio ≥ 30.2, websocket ^5.5) unskipped; the conformance test
+(`tests/obs_ws_obws.rs`) connects with no `DangerousConnectConfig` overrides.
 
 ## 8. Conformance
 
@@ -310,8 +312,8 @@ Unsupported request types get the typed 204, never a silent no-op.
   bits (see §4.2, e.g. `CurrentPreviewSceneChanged`).
 - **Backpressure** (absent upstream): a bounded outbound queue per session; persistent overflow
   sheds the session with 4000 (`UnknownReason`), since obs defines no slow-consumer code.
-- **`obsStudioVersion` omitted** from `Hello` (ADR-0020 §d); `obsVersion` in `GetVersion` is
-  Prismcast's own version (§7).
+- **`obsStudioVersion` omitted** from `Hello` (ADR-0020 §d); `obsVersion` in `GetVersion` is the
+  compatibility constant `"30.2.0"`, not the real OBS or Prismcast version (§7, ADR-0021).
 - Event `sceneItemId` values are UUID-derived placeholders until the `ItemIdMap` is shared with
   the event path at integration (§6).
 
