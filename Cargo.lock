@@ -1856,9 +1856,11 @@ dependencies = [
  "prismcast-app",
  "prismcast-protocol",
  "prismcast-remote",
+ "rcgen",
  "serde_json",
  "thiserror",
  "tokio",
+ "tokio-tungstenite",
  "uuid",
 ]
 
