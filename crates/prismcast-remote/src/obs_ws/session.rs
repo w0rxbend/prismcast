@@ -26,17 +26,32 @@
 //!    `Identify` closes 4008; any other opcode closes 4006.
 //!
 //! Request translation lives in [`super::requests`]: opcode dispatch,
-//! envelope mirroring of `requestType`/`requestId`, serial batch execution
-//! with `haltOnFailure`, and the whole-batch 206 answer for execution types
-//! 1/2 stay here; per-request semantics (name resolution, RequestKind pivot,
-//! status codes) are there. Genuinely unknown request types still get the
-//! typed 204 (`UnknownRequestType`) stub.
+//! envelope mirroring of `requestType`/`requestId`, and batch execution stay
+//! here — serial (`SerialRealtime`/`SerialFrame`, in order, `haltOnFailure`
+//! honored, `Sleep.sleepFrames` resolved against the active profile's frame
+//! rate under `SerialFrame`) and bounded-concurrency `Parallel` (results in
+//! request order, `haltOnFailure` ignored, like upstream); per-request
+//! semantics (name resolution, RequestKind pivot, status codes) are there.
+//! Genuinely unknown request types still get the typed 204
+//! (`UnknownRequestType`) stub.
+//!
+//! `BroadcastCustomEvent` does not touch the core: the request publishes its
+//! `eventData` verbatim onto a server-wide bounded broadcast bus (capacity
+//! 64), and every session whose subscription set admits the native `General`
+//! category relays it as a `CustomEvent` (op 5, `eventIntent` = obs
+//! `General`) — originator included, per upstream semantics.
 //!
 //! obs-websocket defines no backpressure policy (RES-007 weakness 5); this
 //! engine applies Prismcast's: a bounded outbound queue, drop + strike on
 //! overflow, and session shed after consecutive strikes — closed with 4000
 //! `UnknownReason` since obs has no slow-consumer code (documented
 //! divergence).
+//!
+//! The wire codec ([`super::codec::ObsCodec`], negotiated at the upgrade)
+//! lives exactly at this module's framing boundary: [`run_writer`] encodes
+//! outbound envelopes and [`read_value`] decodes inbound frames. Everything
+//! above — handshake, translation, request dispatch, event gating — works on
+//! `serde_json::Value` envelopes and is codec-agnostic (ADR-0021).
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -44,7 +59,7 @@ use std::time::Duration;
 use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
 use tokio::net::TcpStream;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{broadcast, mpsc, watch};
 use tokio::time::timeout;
 use tokio_tungstenite::tungstenite::protocol::frame::CloseFrame;
 use tokio_tungstenite::tungstenite::{Error as TungsteniteError, Message};
@@ -56,7 +71,7 @@ use prismcast_app::broadcaster::StreamEvent;
 use prismcast_app::snapshot::AppSnapshot;
 use prismcast_app::{AppHandle, Permissions};
 use prismcast_protocol::handshake::AuthResponse;
-use prismcast_protocol::subscription::SubscriptionSet;
+use prismcast_protocol::subscription::{EventCategory, SubscriptionSet};
 
 use crate::auth::AuthConfig;
 use crate::map;
@@ -64,6 +79,7 @@ use crate::server::EventFanout;
 use crate::session_kit::{OverflowStrikes, RateLimiter};
 
 use super::bitmask;
+use super::codec::ObsCodec;
 use super::names::ItemIdMap;
 use super::proto::{self, op, RequestStatus};
 use super::{requests, translate};
@@ -72,6 +88,11 @@ use super::{requests, translate};
 /// protocol's budget (protocol doc §1). obs-websocket has no rate limiting;
 /// excess requests get a typed 702 response instead of a silent drop.
 const REQUEST_BURST: u32 = 200;
+
+/// Maximum in-flight member tasks of a `Parallel` batch (ADR-0021 §d):
+/// bounds core-actor pressure per client without serializing independent
+/// members.
+const PARALLEL_BATCH_MAX_CONCURRENCY: usize = 8;
 
 /// WebSocket close code used when the server shuts down: RFC 6455
 /// `going_away`, matching upstream ("Server stopping.").
@@ -97,6 +118,8 @@ pub(crate) struct ObsSessionConfig {
 pub(crate) struct ObsSessionContext {
     /// Transport-independent tuning.
     pub config: Arc<ObsSessionConfig>,
+    /// The negotiated wire codec (subprotocol at the upgrade; ADR-0021).
+    pub codec: ObsCodec,
     /// Snapshot reads for event translation (name resolution, primary
     /// output designation) and request dispatch — an `Arc` clone out of a
     /// watch cell, never blocking (PLAN.md §57).
@@ -105,6 +128,8 @@ pub(crate) struct ObsSessionContext {
     pub item_ids: Arc<ItemIdMap>,
     /// Server-wide event fan-out.
     pub fanout: EventFanout,
+    /// Server-wide custom-event bus (`BroadcastCustomEvent` → `CustomEvent`).
+    pub custom_events: broadcast::Sender<serde_json::Value>,
     /// Shutdown signal from the owning server.
     pub shutdown: watch::Receiver<()>,
 }
@@ -142,27 +167,30 @@ pub(crate) async fn run_session(
 async fn run_session_inner(stream: WebSocketStream<TcpStream>, context: ObsSessionContext) {
     let ObsSessionContext {
         config,
+        codec,
         app,
         item_ids,
         fanout,
+        custom_events,
         mut shutdown,
     } = context;
     let (writer, mut reader) = stream.split();
     let (out_tx, out_rx) = mpsc::channel::<ObsOutbound>(config.outbound_capacity.max(1));
-    let mut writer_task = tokio::spawn(run_writer(writer, out_rx));
+    let mut writer_task = tokio::spawn(run_writer(writer, out_rx, codec));
 
-    let exit = match handshake(&mut reader, &out_tx, &config).await {
+    let exit = match handshake(&mut reader, &out_tx, &config, codec).await {
         Ok(established) => {
             let session = Session::new(
                 config.clone(),
                 app,
                 item_ids,
                 fanout,
+                custom_events,
                 out_tx.clone(),
                 established,
             );
             session
-                .steady_state(&mut reader, &mut shutdown, config.max_message_size)
+                .steady_state(&mut reader, &mut shutdown, config.max_message_size, codec)
                 .await
         }
         Err(exit) => exit,
@@ -187,21 +215,19 @@ async fn run_session_inner(stream: WebSocketStream<TcpStream>, context: ObsSessi
     }
 }
 
-/// Socket-writing half of a session: drains the bounded outbound queue; a
-/// close item is written as a WebSocket close frame and terminates the task.
+/// Socket-writing half of a session: drains the bounded outbound queue,
+/// encoding each envelope with the session's negotiated codec; a close item
+/// is written as a WebSocket close frame and terminates the task.
 /// (Mirrors `session_kit::run_writer`, which stays typed to the native
 /// `ServerMessage`/`ClosingNotice`.)
 async fn run_writer(
     mut writer: SplitSink<WebSocketStream<TcpStream>, Message>,
     mut rx: mpsc::Receiver<ObsOutbound>,
+    codec: ObsCodec,
 ) {
     while let Some(item) = rx.recv().await {
         let written = match item {
-            ObsOutbound::Message(value) => {
-                // Serializing a Value is total; a failure here is a bug.
-                let text = value.to_string();
-                writer.send(Message::Text(text.into())).await
-            }
+            ObsOutbound::Message(value) => writer.send(codec.encode(&value)).await,
             ObsOutbound::Close(code, reason) => {
                 let frame = CloseFrame {
                     code: code.into(),
@@ -218,42 +244,48 @@ async fn run_writer(
     }
 }
 
-/// Reads one inbound text frame as a JSON value. `Ok(None)` means the peer
-/// closed cleanly; `Err` maps to a `MessageDecodeError` (4002) close.
+/// Reads one inbound frame as an envelope value, decoded with the session's
+/// negotiated codec. The raw-payload size limit applies to both codecs.
+/// `Ok(None)` means the peer closed cleanly; `Err` maps to a
+/// `MessageDecodeError` (4002) close.
 async fn read_value(
     reader: &mut SplitStream<WebSocketStream<TcpStream>>,
     max_message_size: usize,
+    codec: ObsCodec,
 ) -> Result<Option<serde_json::Value>, ObsExit> {
     loop {
         match reader.next().await {
             None => return Ok(None),
-            Some(Ok(Message::Text(text))) => {
-                if text.len() > max_message_size {
+            Some(Ok(Message::Close(_))) => return Ok(None),
+            Some(Ok(message)) => {
+                // The size limit applies to the raw payload of data frames,
+                // equally in both codecs (ping/pong carry no payload).
+                let payload_len = match &message {
+                    Message::Text(text) => text.len(),
+                    Message::Binary(payload) => payload.len(),
+                    _ => 0,
+                };
+                if payload_len > max_message_size {
                     return Err(ObsExit::close(
                         proto::close::MESSAGE_DECODE_ERROR,
                         format!(
-                            "message payload {} bytes exceeds limit of {max_message_size}",
-                            text.len()
+                            "message payload {payload_len} bytes exceeds limit of {max_message_size}"
                         ),
                     ));
                 }
-                return serde_json::from_str(&text).map(Some).map_err(|e| {
-                    ObsExit::close(
-                        proto::close::MESSAGE_DECODE_ERROR,
-                        format!("unable to decode Json: {e}"),
-                    )
-                });
+                match codec.decode(&message) {
+                    Ok(Some(value)) => return Ok(Some(value)),
+                    // Ping/Pong (answered automatically by tungstenite)
+                    // carry no protocol payload.
+                    Ok(None) => continue,
+                    Err(error) => {
+                        return Err(ObsExit::close(
+                            proto::close::MESSAGE_DECODE_ERROR,
+                            error.close_reason(),
+                        ));
+                    }
+                }
             }
-            Some(Ok(Message::Binary(_))) => {
-                return Err(ObsExit::close(
-                    proto::close::MESSAGE_DECODE_ERROR,
-                    "session encoding is Json, but a binary message was received",
-                ));
-            }
-            Some(Ok(Message::Close(_))) => return Ok(None),
-            // Ping/Pong (answered automatically by tungstenite) carry no
-            // protocol payload.
-            Some(Ok(_)) => continue,
             Some(Err(TungsteniteError::ConnectionClosed))
             | Some(Err(TungsteniteError::AlreadyClosed)) => return Ok(None),
             Some(Err(error)) => {
@@ -280,6 +312,7 @@ async fn handshake(
     reader: &mut SplitStream<WebSocketStream<TcpStream>>,
     out_tx: &mpsc::Sender<ObsOutbound>,
     config: &ObsSessionConfig,
+    codec: ObsCodec,
 ) -> Result<Established, ObsExit> {
     let challenge = config.auth.challenge_for_session();
     let hello = proto::Hello {
@@ -297,7 +330,7 @@ async fn handshake(
 
     let frame = timeout(
         config.handshake_timeout,
-        read_value(reader, config.max_message_size),
+        read_value(reader, config.max_message_size, codec),
     )
     .await
     .map_err(|_| ObsExit::close(proto::close::NOT_IDENTIFIED, "identify timeout"))??;
@@ -403,6 +436,11 @@ struct Session {
     session_id: Uuid,
     permissions: Permissions,
     item_ids: Arc<ItemIdMap>,
+    /// Publish half of the custom-event bus (for `BroadcastCustomEvent`).
+    custom_events_tx: broadcast::Sender<serde_json::Value>,
+    /// Receive half; `None` after the bus closed (it never does while the
+    /// server lives, but the select arm treats it like the fan-out).
+    custom_events_rx: Option<broadcast::Receiver<serde_json::Value>>,
     out_tx: mpsc::Sender<ObsOutbound>,
     events: ObsEventPipe,
     rate_limiter: RateLimiter,
@@ -414,6 +452,7 @@ impl Session {
         app: AppHandle,
         item_ids: Arc<ItemIdMap>,
         fanout: EventFanout,
+        custom_events: broadcast::Sender<serde_json::Value>,
         out_tx: mpsc::Sender<ObsOutbound>,
         established: Established,
     ) -> Self {
@@ -427,6 +466,8 @@ impl Session {
             session_id: established.session_id,
             permissions: map::permissions_to_app(&established.permissions),
             item_ids,
+            custom_events_rx: Some(custom_events.subscribe()),
+            custom_events_tx: custom_events,
             out_tx,
             events,
             rate_limiter: RateLimiter::new(REQUEST_BURST),
@@ -439,6 +480,7 @@ impl Session {
             app: &self.app,
             permissions: self.permissions,
             item_ids: &self.item_ids,
+            custom_events: &self.custom_events_tx,
         }
     }
 
@@ -448,13 +490,14 @@ impl Session {
         reader: &mut SplitStream<WebSocketStream<TcpStream>>,
         shutdown: &mut watch::Receiver<()>,
         max_message_size: usize,
+        codec: ObsCodec,
     ) -> ObsExit {
         loop {
             tokio::select! {
                 _ = shutdown.changed() => {
                     return ObsExit::close(CLOSE_GOING_AWAY, "server is shutting down");
                 }
-                frame = read_value(reader, max_message_size) => match frame {
+                frame = read_value(reader, max_message_size, codec) => match frame {
                     Ok(Some(value)) => {
                         if let Some(exit) = self.handle_client_value(value).await {
                             return exit;
@@ -479,6 +522,17 @@ impl Session {
                         warn!(dropped, "obs session event stream lagged; events were dropped");
                     }
                     StreamItem::Closed => self.events.rx = None,
+                },
+                item = recv_custom_event(&mut self.custom_events_rx) => match item {
+                    StreamItem::Item(payload) => {
+                        if let Err(exit) = self.events.handle_custom_event(payload, &self.out_tx) {
+                            return exit;
+                        }
+                    }
+                    StreamItem::Lagged(dropped) => {
+                        warn!(dropped, "obs session custom-event bus lagged; events were dropped");
+                    }
+                    StreamItem::Closed => self.custom_events_rx = None,
                 },
             }
         }
@@ -550,18 +604,13 @@ impl Session {
     async fn handle_request(&mut self, request: proto::Request) -> Option<ObsExit> {
         debug!(%self.session_id, request_id = %request.request_id, request_type = %request.request_type, "obs request");
         let outcome = if !self.rate_limiter.check() {
-            requests::RequestOutcome {
-                status: RequestStatus::error(
-                    proto::status::REQUEST_PROCESSING_FAILED,
-                    "request rate limit exceeded",
-                ),
-                data: None,
-            }
+            Self::rate_limited_outcome()
         } else {
             requests::execute(
                 &self.request_context(),
                 &request.request_type,
                 request.request_data.as_ref(),
+                None,
             )
             .await
             .unwrap_or_else(|| requests::RequestOutcome {
@@ -581,11 +630,13 @@ impl Session {
         .await
     }
 
-    /// Executes a batch (op 8). `SerialRealtime` runs serially with
-    /// `haltOnFailure` and bounded `Sleep`; `SerialFrame`/`Parallel` are
-    /// answered with a whole-batch 206 (`UnsupportedRequestBatchExecutionType`)
-    /// — the same "the batch did not run" shape upstream uses for batches it
-    /// refuses (one result per request, or one when `haltOnFailure`).
+    /// Executes a batch (op 8). `SerialRealtime` (0/absent) runs serially
+    /// with `haltOnFailure` and bounded `Sleep`; `SerialFrame` (1) runs the
+    /// same serial loop with `Sleep.sleepFrames` resolved against the active
+    /// profile's frame rate; `Parallel` (2) fans members out on a bounded
+    /// [`tokio::task::JoinSet`] (results in request order, `haltOnFailure`
+    /// ignored — upstream semantics). An out-of-range `executionType` closes
+    /// 4005, like upstream.
     async fn handle_batch(&mut self, batch: proto::RequestBatch) -> Option<ObsExit> {
         debug!(%self.session_id, request_id = %batch.request_id, requests = batch.requests.len(), "obs request batch");
         let execution = match batch.execution_type {
@@ -602,40 +653,10 @@ impl Session {
         };
         let results = match execution {
             proto::RequestBatchExecutionType::SerialRealtime => self.run_serial_batch(&batch).await,
-            proto::RequestBatchExecutionType::SerialFrame
-            | proto::RequestBatchExecutionType::Parallel => {
-                let unsupported = || {
-                    RequestStatus::error(
-                        proto::status::UNSUPPORTED_REQUEST_BATCH_EXECUTION_TYPE,
-                        format!(
-                            "executionType {} ({execution:?}) is not supported by this server",
-                            execution.code()
-                        ),
-                    )
-                };
-                if batch.halt_on_failure {
-                    batch
-                        .requests
-                        .first()
-                        .map(|request| proto::BatchResult {
-                            request_type: request.request_type.clone(),
-                            request_status: unsupported(),
-                            response_data: None,
-                        })
-                        .into_iter()
-                        .collect()
-                } else {
-                    batch
-                        .requests
-                        .iter()
-                        .map(|request| proto::BatchResult {
-                            request_type: request.request_type.clone(),
-                            request_status: unsupported(),
-                            response_data: None,
-                        })
-                        .collect()
-                }
+            proto::RequestBatchExecutionType::SerialFrame => {
+                self.run_serial_frame_batch(&batch).await
             }
+            proto::RequestBatchExecutionType::Parallel => self.run_parallel_batch(&batch).await,
         };
         self.send(proto::envelope(
             op::REQUEST_BATCH_RESPONSE,
@@ -647,25 +668,55 @@ impl Session {
         .await
     }
 
+    /// The outcome for a member refused by the request rate limiter (typed
+    /// 702, never a silent drop).
+    fn rate_limited_outcome() -> requests::RequestOutcome {
+        requests::RequestOutcome {
+            status: RequestStatus::error(
+                proto::status::REQUEST_PROCESSING_FAILED,
+                "request rate limit exceeded",
+            ),
+            data: None,
+        }
+    }
+
     /// Serial batch body: requests run in order through the same translation
     /// path as standalone requests; `haltOnFailure` stops at the first failed
     /// result.
     async fn run_serial_batch(&mut self, batch: &proto::RequestBatch) -> Vec<proto::BatchResult> {
+        self.run_serial(batch, None).await
+    }
+
+    /// `SerialFrame` batch body: identical semantics to the serial-realtime
+    /// batch (in order, `haltOnFailure` honored), except `Sleep.sleepFrames`
+    /// resolves against the active profile's frame rate — there is no
+    /// graphics thread to couple to, so frame timing is a wall-clock
+    /// approximation (documented divergence, ADR-0021 §d).
+    async fn run_serial_frame_batch(
+        &mut self,
+        batch: &proto::RequestBatch,
+    ) -> Vec<proto::BatchResult> {
+        let frame_duration = requests::frame_duration(self.app.snapshot().state());
+        self.run_serial(batch, Some(frame_duration)).await
+    }
+
+    /// Shared serial loop; `frame_duration` is `Some` only under
+    /// `SerialFrame` (see [`requests::execute`]).
+    async fn run_serial(
+        &mut self,
+        batch: &proto::RequestBatch,
+        frame_duration: Option<Duration>,
+    ) -> Vec<proto::BatchResult> {
         let mut results = Vec::with_capacity(batch.requests.len());
         for request in &batch.requests {
             let outcome = if !self.rate_limiter.check() {
-                requests::RequestOutcome {
-                    status: RequestStatus::error(
-                        proto::status::REQUEST_PROCESSING_FAILED,
-                        "request rate limit exceeded",
-                    ),
-                    data: None,
-                }
+                Self::rate_limited_outcome()
             } else {
                 requests::execute(
                     &self.request_context(),
                     &request.request_type,
                     request.request_data.as_ref(),
+                    frame_duration,
                 )
                 .await
                 .unwrap_or_else(|| requests::RequestOutcome {
@@ -684,6 +735,80 @@ impl Session {
             }
         }
         results
+    }
+
+    /// `Parallel` batch body: every member runs in its own task on a bounded
+    /// [`tokio::task::JoinSet`] (at most [`PARALLEL_BATCH_MAX_CONCURRENCY`]
+    /// in flight; spawning the next member awaits a finished one), so a
+    /// `Sleep` member never serializes the batch. The core actor serializes
+    /// commands itself, and upstream defines no ordering between members.
+    /// Results are collected by member index and returned in **request
+    /// order**; `haltOnFailure` is ignored (upstream semantics). One
+    /// rate-limiter token is consumed per member before spawning — an
+    /// exhausted budget answers that member inline with the typed 702.
+    async fn run_parallel_batch(&mut self, batch: &proto::RequestBatch) -> Vec<proto::BatchResult> {
+        let context = requests::OwnedRequestContext {
+            app: self.app.clone(),
+            permissions: self.permissions,
+            item_ids: self.item_ids.clone(),
+            custom_events: self.custom_events_tx.clone(),
+        };
+        // One slot per member, filled as member tasks finish (out of order).
+        let mut outcomes: Vec<Option<requests::RequestOutcome>> =
+            (0..batch.requests.len()).map(|_| None).collect();
+        let mut tasks = tokio::task::JoinSet::new();
+        for (index, request) in batch.requests.iter().enumerate() {
+            if !self.rate_limiter.check() {
+                outcomes[index] = Some(Self::rate_limited_outcome());
+                continue;
+            }
+            while tasks.len() >= PARALLEL_BATCH_MAX_CONCURRENCY {
+                let Some(joined) = tasks.join_next().await else {
+                    break;
+                };
+                store_parallel_outcome(joined, &mut outcomes);
+            }
+            let ctx = context.clone();
+            let request_type = request.request_type.clone();
+            let request_data = request.request_data.clone();
+            tasks.spawn(async move {
+                let outcome =
+                    requests::execute(&ctx.as_ref(), &request_type, request_data.as_ref(), None)
+                        .await
+                        .unwrap_or_else(|| requests::RequestOutcome {
+                            status: unknown_request_status(&request_type),
+                            data: None,
+                        });
+                (index, outcome)
+            });
+        }
+        while let Some(joined) = tasks.join_next().await {
+            store_parallel_outcome(joined, &mut outcomes);
+        }
+        batch
+            .requests
+            .iter()
+            .enumerate()
+            .map(|(index, request)| {
+                // A panicked member task leaves its slot empty (logged in
+                // `store_parallel_outcome`); answer it with a typed failure
+                // rather than dropping the result.
+                let outcome = outcomes[index]
+                    .take()
+                    .unwrap_or_else(|| requests::RequestOutcome {
+                        status: RequestStatus::error(
+                            proto::status::REQUEST_PROCESSING_FAILED,
+                            "batch member task failed",
+                        ),
+                        data: None,
+                    });
+                proto::BatchResult {
+                    request_type: request.request_type.clone(),
+                    request_status: outcome.status,
+                    response_data: outcome.data,
+                }
+            })
+            .collect()
     }
 
     /// Enqueues a response; a persistently blocked queue sheds the session
@@ -712,6 +837,19 @@ fn unknown_request_status(request_type: &str) -> RequestStatus {
         proto::status::UNKNOWN_REQUEST_TYPE,
         format!("request type '{request_type}' is not implemented by this server"),
     )
+}
+
+/// Stores one finished `Parallel` member outcome in its request-order slot.
+/// A failed join (member task panicked) is logged; the slot stays empty and
+/// the collector answers it with a typed 702.
+fn store_parallel_outcome(
+    joined: Result<(usize, requests::RequestOutcome), tokio::task::JoinError>,
+    outcomes: &mut [Option<requests::RequestOutcome>],
+) {
+    match joined {
+        Ok((index, outcome)) => outcomes[index] = Some(outcome),
+        Err(error) => warn!(%error, "parallel batch member task failed"),
+    }
 }
 
 /// Per-session event pipeline: the subscription set translated from the obs
@@ -775,43 +913,85 @@ impl ObsEventPipe {
             return Ok(());
         }
         for event in self.translator.event_to_obs(&event, snapshot) {
-            match out_tx.try_send(ObsOutbound::Message(proto::envelope(op::EVENT, &event))) {
-                Ok(()) => self.overflow_strikes.reset(),
-                Err(mpsc::error::TrySendError::Full(_)) => {
-                    let shed = self.overflow_strikes.strike();
-                    warn!(
-                        strikes = self.overflow_strikes.strikes(),
-                        "outbound queue full; dropped obs event"
-                    );
-                    if shed {
-                        return Err(ObsExit::close(
-                            proto::close::UNKNOWN_REASON,
-                            "slow consumer: persistent outbound overflow",
-                        ));
-                    }
+            self.deliver(&event, out_tx)?;
+        }
+        Ok(())
+    }
+
+    /// Delivers one custom event (`BroadcastCustomEvent` → `CustomEvent`,
+    /// OBSWS-002): not a domain-event translation but a server-generated
+    /// relay, so the envelope is built here directly. Gated by the native
+    /// `General` category — the same gate domain events use (the obs
+    /// `General` and `Vendors` bits both map to it, §4.2 of the protocol
+    /// doc); `eventIntent` reports the obs `General` bit, like upstream.
+    fn handle_custom_event(
+        &mut self,
+        payload: serde_json::Value,
+        out_tx: &mpsc::Sender<ObsOutbound>,
+    ) -> Result<(), ObsExit> {
+        if self.set.get(EventCategory::General).is_none() {
+            return Ok(());
+        }
+        let event = proto::Event {
+            event_type: "CustomEvent".to_string(),
+            event_intent: proto::subscription::GENERAL,
+            event_data: Some(payload),
+        };
+        self.deliver(&event, out_tx)
+    }
+
+    /// Enqueues one translated event; on a full outbound queue the event is
+    /// dropped and persistent overflow sheds the session (obs has no
+    /// slow-consumer code: 4000 `UnknownReason`).
+    fn deliver(
+        &mut self,
+        event: &proto::Event,
+        out_tx: &mpsc::Sender<ObsOutbound>,
+    ) -> Result<(), ObsExit> {
+        match out_tx.try_send(ObsOutbound::Message(proto::envelope(op::EVENT, event))) {
+            Ok(()) => self.overflow_strikes.reset(),
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                let shed = self.overflow_strikes.strike();
+                warn!(
+                    strikes = self.overflow_strikes.strikes(),
+                    "outbound queue full; dropped obs event"
+                );
+                if shed {
+                    return Err(ObsExit::close(
+                        proto::close::UNKNOWN_REASON,
+                        "slow consumer: persistent outbound overflow",
+                    ));
                 }
-                Err(mpsc::error::TrySendError::Closed(_)) => return Err(ObsExit::Silent),
             }
+            Err(mpsc::error::TrySendError::Closed(_)) => return Err(ObsExit::Silent),
         }
         Ok(())
     }
 }
 
-/// Result of awaiting the session's event receiver.
-enum StreamItem {
-    Item(StreamEvent),
+/// Result of awaiting one of the session's broadcast receivers.
+enum StreamItem<T> {
+    Item(T),
     Lagged(u64),
     Closed,
 }
 
-async fn recv_event(rx: &mut Option<tokio::sync::broadcast::Receiver<StreamEvent>>) -> StreamItem {
+async fn recv_event(rx: &mut Option<broadcast::Receiver<StreamEvent>>) -> StreamItem<StreamEvent> {
+    recv_broadcast(rx).await
+}
+
+async fn recv_custom_event(
+    rx: &mut Option<broadcast::Receiver<serde_json::Value>>,
+) -> StreamItem<serde_json::Value> {
+    recv_broadcast(rx).await
+}
+
+async fn recv_broadcast<T: Clone>(rx: &mut Option<broadcast::Receiver<T>>) -> StreamItem<T> {
     match rx {
         Some(rx) => match rx.recv().await {
             Ok(item) => StreamItem::Item(item),
-            Err(tokio::sync::broadcast::error::RecvError::Lagged(dropped)) => {
-                StreamItem::Lagged(dropped)
-            }
-            Err(tokio::sync::broadcast::error::RecvError::Closed) => StreamItem::Closed,
+            Err(broadcast::error::RecvError::Lagged(dropped)) => StreamItem::Lagged(dropped),
+            Err(broadcast::error::RecvError::Closed) => StreamItem::Closed,
         },
         None => std::future::pending().await,
     }

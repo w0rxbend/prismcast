@@ -8,8 +8,11 @@
 //! ...). The golden fixture tests at the bottom pin the exact field names so
 //! a rename here fails loudly instead of breaking real clients at runtime.
 //!
-//! Only JSON encoding is served (`obswebsocket.json` subprotocol);
-//! MessagePack (`obswebsocket.msgpack`) is deferred (OBSWS-002+).
+//! Both codecs obs-websocket 5.x defines are served: JSON text frames
+//! (`obswebsocket.json`, the default) and MessagePack binary frames
+//! (`obswebsocket.msgpack`, OBSWS-002; ADR-0021). Both encode the same
+//! `{op, d}` envelope shape — MessagePack uses struct-as-map encoding, so
+//! the wire types here are shared by both codecs unchanged.
 
 use serde::{Deserialize, Serialize};
 
@@ -23,6 +26,10 @@ pub const RPC_VERSION: u32 = 1;
 
 /// The WebSocket subprotocol tag selecting the JSON codec.
 pub const SUBPROTOCOL_JSON: &str = "obswebsocket.json";
+
+/// The WebSocket subprotocol tag selecting the MessagePack codec (binary
+/// frames, struct-as-map encoding; ADR-0021).
+pub const SUBPROTOCOL_MSGPACK: &str = "obswebsocket.msgpack";
 
 /// Message opcodes (`op` field of the envelope). Op 4 is deliberately
 /// unused upstream (4.x-era semantics) and rejected like any unknown opcode.
@@ -382,9 +389,12 @@ pub struct BatchRequest {
     pub request_data: Option<serde_json::Value>,
 }
 
-/// How a batch is executed. Only [`SerialRealtime`](Self::SerialRealtime) is
-/// supported by this adapter; `SerialFrame` (graphics-thread coupling) and
-/// `Parallel` are deferred (OBSWS-002+) and answered with status code 206.
+/// How a batch is executed. All three upstream execution types are
+/// supported (OBSWS-002): [`SerialFrame`](Self::SerialFrame) resolves
+/// `Sleep.sleepFrames` against the active profile's frame rate (wall-clock;
+/// there is no graphics thread to couple to), and
+/// [`Parallel`](Self::Parallel) runs members as tasks with bounded
+/// concurrency, results in request order (see the session module docs).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RequestBatchExecutionType {
     /// Process serially, as fast as possible (wire value 0, the default).

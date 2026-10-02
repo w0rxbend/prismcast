@@ -18,12 +18,18 @@ adapter defines its own obs-shaped wire types (`obs_ws::proto`, golden-pinned ag
 | Transport | WebSocket over TCP (`ws://`); no TLS yet (WS-003) |
 | Default bind | `127.0.0.1:4455` (the obs-websocket default port, loopback only) |
 | Enabled | **off by default**; requires an explicit credential (password or token) |
-| Codec | JSON text frames only; `Sec-WebSocket-Protocol: obswebsocket.json` is echoed when offered, and no subprotocol means JSON (the obs default) |
-| Message size limit | 1 MiB inbound; larger → close 4002 |
+| Codec | JSON text frames or MessagePack binary frames, negotiated by `Sec-WebSocket-Protocol`: `obswebsocket.json` is echoed when offered (JSON wins when both are offered), `obswebsocket.msgpack` selects MessagePack, and no subprotocol means JSON (the obs default) |
+| Message size limit | 1 MiB inbound raw payload (both codecs); larger → close 4002 |
 
-Offering only unsupported subprotocols — including `obswebsocket.msgpack` (MessagePack is
-**deferred**, OBSWS-002+) — **refuses the HTTP upgrade with 400**. Upstream silently defaults to
-JSON; refusing unknown codecs is deliberate hardening (see §10).
+Both codecs encode the **same** `{op, d}` envelope shape: MessagePack uses struct-as-map encoding
+(string-keyed maps), so every wire type is identical in either codec and the choice is invisible
+above the framing layer. In a MessagePack session **every** protocol frame — Hello, Identified,
+responses, events — is a binary frame; a text frame closes the session with **4002**
+(`MessageDecodeError`), as does a binary frame in a JSON session, an undecodable payload, or
+hostile MessagePack (ext types, garbage bytes).
+
+Offering only unsupported subprotocols **refuses the HTTP upgrade with 400**. Upstream silently
+defaults to JSON; refusing unknown codecs is deliberate hardening (see §10).
 
 The local-trust auth policy (`AuthConfig::AllowLocal`) is rejected at `ObsWsServer::bind` with
 `AuthRequired`, same as the native `WsServer`: a network transport always requires a credential.
@@ -88,6 +94,7 @@ are answered with a typed **204** (`UnknownRequestType`), never silently dropped
 |---|---|---|
 | `GetVersion` | — (no core call) | obs-shaped fields; `availableRequests` is drift-guarded (every advertised type dispatches) |
 | `Sleep` | — (local delay) | `sleepMillis` ≤ 50 000; standalone use accepted (upstream: batches only) |
+| `BroadcastCustomEvent` | — (no core call; server-wide broadcast bus) | `eventData` required, must be an object (300/401); every `General`-subscribed session — originator included — receives `CustomEvent` with the payload verbatim |
 | `GetSceneList` | snapshot query | `currentProgramScene*` are `null` when no scene is current; preview fields only in studio mode |
 | `GetCurrentProgramScene` | snapshot query | 600 when no current scene |
 | `SetCurrentProgramScene` | `SetCurrentScene` | by `sceneName` |
@@ -127,7 +134,6 @@ are answered with a typed **204** (`UnknownRequestType`), never silently dropped
 |---|---|
 | success | 100 |
 | unknown/unsupported `requestType` | 204 |
-| whole batch refused (`executionType` 1/2) | 206 |
 | core actor shut down | 207 |
 | missing `requestData` field | 300 |
 | invalid field value (bad enum string, generic `InvalidInput`) | 400 |
@@ -143,12 +149,27 @@ are answered with a typed **204** (`UnknownRequestType`), never silently dropped
 
 ### Batches
 
-`RequestBatch` (op 8) → `RequestBatchResponse` (op 9). Only `SerialRealtime` (executionType 0,
-the default) is implemented: requests run serially, in order, as fast as possible; `haltOnFailure`
-ends the batch at the first failure with a shortened `results`; `Sleep` delays are honored up to
-the 50 s cap. `SerialFrame` (1) and `Parallel` (2) are **not implemented** and get a whole-batch
-**206** per member; an out-of-range `executionType` closes the session with 4005, like upstream.
-Batches cannot nest through this adapter (there is no `RequestBatch` request type).
+`RequestBatch` (op 8) → `RequestBatchResponse` (op 9). All three execution types are implemented
+(ADR-0021 §d):
+
+- **`SerialRealtime`** (executionType 0, the default): requests run serially, in order, as fast as
+  possible; `haltOnFailure` ends the batch at the first failure with a shortened `results`; `Sleep`
+  delays are honored up to the 50 s cap (`sleepMillis`; `sleepFrames` is a typed 400 here — there
+  is no frame clock outside `SerialFrame`).
+- **`SerialFrame`** (executionType 1): the same serial loop (in order, `haltOnFailure` honored),
+  except `Sleep.sleepFrames` resolves against the active profile's frame rate
+  (`frames × fps_den / fps_num` seconds; 60 fps when no profile is active or the profile's rate is
+  degenerate), with the same 50 s total-sleep cap. There is no graphics thread to couple to, so
+  frame timing is a wall-clock approximation of upstream's graphics-thread sync (§10).
+- **`Parallel`** (executionType 2): every member runs in its own task with at most **8** in flight
+  per batch (spawning member *n* awaits a finished one), so a `Sleep` member never serializes the
+  batch. Upstream defines no ordering between members; the core actor serializes the underlying
+  commands itself. Results are returned in **request order**, one per member; `haltOnFailure` is
+  **ignored** (upstream semantics). Minted `sceneItemId` numbers under Parallel are opaque — no
+  assignment order is guaranteed between members.
+
+An out-of-range `executionType` closes the session with 4005, like upstream. Batches cannot nest
+through this adapter (there is no `RequestBatch` request type).
 
 ## 4. Events and subscriptions
 
@@ -177,6 +198,7 @@ coarser.
 | … output is the record primary | + `RecordStateChanged` | Outputs | + `outputPath: null` (the domain does not model the path yet) |
 | `SystemEvent::StudioModeChanged` | `StudioModeStateChanged` | Ui | `studioModeEnabled` |
 | `SystemEvent::PreviewSceneChanged` | `CurrentPreviewSceneChanged` | Scenes | gated by native `System`, see §4.2 note |
+| — (server-generated: a client's `BroadcastCustomEvent`) | `CustomEvent` | General | `eventData` verbatim from the request; relayed to every `General`-admitting session, originator included |
 
 ¹ `OutputStateChanged` is a **Prismcast extension**: upstream has no per-output state event (its
 outputs are singletons). The singleton events are emitted only when the changing output is the
@@ -250,11 +272,13 @@ through the `OutputStateChanged` extension event.
 
 `Hello` advertises `obsWebSocketVersion: "5.7.4"` (the OBS 32.2.2 baseline, RES-007) and
 `rpcVersion: 1`. `GetVersion` returns `availableRequests` equal to the implemented set (§3),
-`supportedImageFormats: []` (screenshots are OBSWS-002+), `platform: "linux"`, and `obsVersion`
-equal to Prismcast's own version — there is no OBS build behind the field. Clients that enforce a
-minimum `obsStudioVersion` (e.g. `obws`'s default ≥ 30.2 check) must relax that check; the
-conformance test (`tests/obs_ws_obws.rs`) demonstrates this with `skip_studio_version_check` while
-leaving the websocket-version check enabled.
+`supportedImageFormats: []` (screenshots are OBSWS-002+), `platform: "linux"`,
+`platformDescription: "Linux (Prismcast obs-websocket adapter)"`, and `obsVersion: "30.2.0"` —
+a compatibility constant, not Prismcast's own version (ADR-0021). "30.2.0" is the minimum
+`obsStudioVersion` the `obws` client's default gate accepts; advertising the 32.x baseline
+would imply features this adapter answers 204 for. Clients therefore pass both of obws's
+default version checks (studio ≥ 30.2, websocket ^5.5) unskipped; the conformance test
+(`tests/obs_ws_obws.rs`) connects with no `DangerousConnectConfig` overrides.
 
 ## 8. Conformance
 
@@ -266,7 +290,7 @@ tungstenite clients (handshake matrix, auth, subprotocols, batches, status codes
 
 ## 9. Not implemented (OBSWS-002+)
 
-MessagePack (`obswebsocket.msgpack`), `SerialFrame`/`Parallel` batch execution, meter and other
+Meter and other
 high-volume event producers (`InputVolumeMeters`, `InputActiveStateChanged`,
 `InputShowStateChanged`, `SceneItemTransformChanged`), filters, screenshots, stats
 (`GetStats`/`GetOutputStats`; output runtime metrics read as zero), vendor and persistent data,
@@ -277,7 +301,8 @@ Unsupported request types get the typed 204, never a silent no-op.
 ## 10. Documented divergences from upstream obs-websocket
 
 - **Subprotocol hardening:** unknown/unsupported subprotocol offers refuse the HTTP upgrade with
-  400 instead of silently defaulting to JSON.
+  400 instead of silently defaulting to JSON; when both known tags are offered, **JSON wins** (a
+  fixed priority, deterministic across clients).
 - **Malformed `d` payloads** close with 4002 (`MessageDecodeError`) where upstream sometimes uses
   the more specific 4003/4004/4005; invalid batch `executionType` values do close with 4005 like
   upstream.
@@ -294,7 +319,14 @@ Unsupported request types get the typed 204, never a silent no-op.
 - **`SetInputVolume` with `inputVolumeMul: 0` maps to −100 dB**, not −∞: the core requires finite
   gains.
 - **`Sleep` is accepted standalone** (upstream registers it for batches only), keeping
-  `availableRequests` truthful.
+  `availableRequests` truthful; `sleepFrames` resolves only inside a `SerialFrame` batch (typed
+  400 elsewhere, since no other context has a frame clock).
+- **`SerialFrame` is not graphics-thread coupled** (there is none): the serial batch loop is
+  identical to `SerialRealtime`, and frame timing is a wall-clock approximation driven by the
+  active profile's frame rate (§3).
+- **`Parallel` concurrency is bounded at 8 in-flight members per batch** (upstream's thread pool
+  is unbounded by contract); results still return in request order and `haltOnFailure` is ignored,
+  like upstream.
 - **Adapter-specific `inputKind`/`outputKind` strings** (`color_source`, `v4l2_input`,
   `pipewire_display_capture`, `rtmp_output`, `recording_output`, …; `prismcast_*` for kinds with no
   OBS counterpart in events): there is no OBS plugin registry behind them; `unversionedInputKind`
@@ -303,8 +335,11 @@ Unsupported request types get the typed 204, never a silent no-op.
   bits (see §4.2, e.g. `CurrentPreviewSceneChanged`).
 - **Backpressure** (absent upstream): a bounded outbound queue per session; persistent overflow
   sheds the session with 4000 (`UnknownReason`), since obs defines no slow-consumer code.
-- **`obsStudioVersion` omitted** from `Hello` (ADR-0020 §d); `obsVersion` in `GetVersion` is
-  Prismcast's own version (§7).
+- **The `CustomEvent` bus is bounded** (capacity 64, server-wide): a session that falls behind
+  drops custom events with a log line (obs has no resync contract), exactly like domain-event lag
+  — the session is never killed over a lagged broadcast.
+- **`obsStudioVersion` omitted** from `Hello` (ADR-0020 §d); `obsVersion` in `GetVersion` is the
+  compatibility constant `"30.2.0"`, not the real OBS or Prismcast version (§7, ADR-0021).
 - Event `sceneItemId` values are UUID-derived placeholders until the `ItemIdMap` is shared with
   the event path at integration (§6).
 

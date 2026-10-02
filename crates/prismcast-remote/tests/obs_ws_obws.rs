@@ -9,19 +9,17 @@
 //! incompatibility surfaces as a handshake failure, a deserialization error,
 //! or an API status error.
 //!
-//! One obws-side adjustment is required and documented here (and in
-//! `docs/protocols/obs-websocket-adapter.md`): obws verifies
-//! `GetVersion.obsVersion >= 30.2` unless told otherwise, while the adapter
-//! reports Prismcast's own crate version as `obsVersion` (there is no OBS
-//! build behind it). The test therefore sets
-//! `DangerousConnectConfig::skip_studio_version_check`. The
-//! `obsWebSocketVersion` check is **not** skipped: the adapter advertises a
-//! genuine "5.7.4".
+//! One adapter-side compatibility constant makes this work without any
+//! obws-side relaxation (ADR-0021): `GetVersion.obsVersion` advertises
+//! "30.2.0", the minimum `obsStudioVersion` obws's default check accepts —
+//! deliberately not the 32.x baseline, which would imply features this
+//! adapter answers 204 for. Both version gates (studio ≥ 30.2 and
+//! websocket ^5.5 against the genuine "5.7.4") run unskipped.
 
 use std::net::{Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
-use obws::client::{ConnectConfig, DangerousConnectConfig, DEFAULT_BROADCAST_CAPACITY};
+use obws::client::{ConnectConfig, DEFAULT_BROADCAST_CAPACITY};
 use obws::requests::inputs::InputId;
 use obws::requests::EventSubscription;
 
@@ -105,16 +103,14 @@ impl TestBed {
     }
 }
 
-/// Connects an obws client with the password (see the module docs for why
-/// `skip_studio_version_check` is set; the websocket-version check stays on).
+/// Connects an obws client with the password and default version checks:
+/// the advertised `obsVersion` (see the module docs) and
+/// `obsWebSocketVersion` both pass obws's gates unskipped.
 async fn connect(addr: SocketAddr, password: &str) -> obws::error::Result<obws::Client> {
     obws::Client::connect_with_config(ConnectConfig {
         host: addr.ip().to_string(),
         port: addr.port(),
-        dangerous: Some(DangerousConnectConfig {
-            skip_studio_version_check: true,
-            skip_websocket_version_check: false,
-        }),
+        dangerous: None,
         password: Some(password),
         event_subscriptions: Some(EventSubscription::NONE),
         broadcast_capacity: DEFAULT_BROADCAST_CAPACITY,
@@ -131,8 +127,11 @@ async fn obws_handshake_and_get_version() {
         .await
         .expect("obws identifies with the obs challenge-response");
     let version = client.general().version().await.expect("GetVersion");
-    // `obs_web_socket_version` is a `semver::Version` in obws — it parsed —
-    // and matches the adapter's advertised baseline.
+    // `obs_studio_version` and `obs_web_socket_version` are `semver::Version`
+    // in obws — they parsed — and match the adapter's advertised constants:
+    // the compatibility claim that passes obws's studio gate (ADR-0021) and
+    // the genuine websocket baseline.
+    assert_eq!(version.obs_studio_version.to_string(), "30.2.0");
     assert_eq!(version.obs_web_socket_version.to_string(), "5.7.4");
     assert_eq!(version.rpc_version, 1, "rpcVersion 1 policy");
     assert_eq!(version.platform, "linux");
@@ -151,11 +150,8 @@ async fn obws_handshake_and_get_version() {
             version.available_requests
         );
     }
-    // The advertised obsVersion is Prismcast's own (see module docs).
-    assert_eq!(
-        version.obs_studio_version.to_string(),
-        env!("CARGO_PKG_VERSION")
-    );
+    // The handshake itself proves both version gates passed unskipped; the
+    // exact advertised strings are asserted above.
 
     client.disconnect().await;
     bed.shutdown().await;

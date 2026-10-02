@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use futures_util::{SinkExt, StreamExt};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::header::SEC_WEBSOCKET_PROTOCOL;
-use tokio_tungstenite::tungstenite::http::{HeaderValue, StatusCode};
+use tokio_tungstenite::tungstenite::http::HeaderValue;
 use tokio_tungstenite::tungstenite::{Error as TungsteniteError, Message, Utf8Bytes};
 use tokio_tungstenite::WebSocketStream;
 
@@ -383,13 +383,16 @@ async fn subprotocol_negotiation() {
     let hello = read_hello(&mut stream).await;
     assert_eq!(hello["d"]["rpcVersion"], 1);
 
-    // MessagePack-only: refused at the upgrade (deferred to OBSWS-002+).
-    match raw::connect_opt(bed.addr, Some("obswebsocket.msgpack")).await {
-        Err(TungsteniteError::Http(response)) => {
-            assert_eq!(response.status(), StatusCode::BAD_REQUEST)
-        }
-        other => panic!("msgpack-only offer must be refused, got {}", other.is_ok()),
-    }
+    // MessagePack-only: accepted and echoed (OBSWS-002; full msgpack
+    // behavior is pinned in tests/obs_ws_msgpack.rs).
+    let (_stream, response) = raw::connect_opt(bed.addr, Some("obswebsocket.msgpack"))
+        .await
+        .expect("msgpack connect");
+    assert_eq!(
+        response.headers().get(SEC_WEBSOCKET_PROTOCOL),
+        Some(&HeaderValue::from_static("obswebsocket.msgpack")),
+        "msgpack subprotocol echoed"
+    );
 
     // An unrelated subprotocol set is refused too.
     let refused = raw::connect_opt(bed.addr, Some("chat, superchat")).await;
@@ -628,43 +631,14 @@ async fn sleep_is_honored_and_capped() {
 }
 
 #[tokio::test]
-async fn unsupported_execution_types_get_whole_batch_206() {
+async fn invalid_execution_type_closes_4005() {
     let bed = password_bed().await;
     let mut stream = raw::connect(bed.addr).await;
     identify_with_password(&mut stream, PASSWORD).await;
 
-    for execution_type in [1, 2] {
-        let d = roundtrip_batch(
-            &mut stream,
-            serde_json::json!({
-                "requestId": format!("batch-exec-{execution_type}"),
-                "executionType": execution_type,
-                "requests": [stub_request("GetVersion"), stub_request("GetSceneList")]
-            }),
-        )
-        .await;
-        let results = d["results"].as_array().expect("results");
-        assert_eq!(results.len(), 2, "one 206 per request");
-        for result in results {
-            assert_eq!(result["requestStatus"]["code"], 206);
-            assert_eq!(result["requestStatus"]["result"], false);
-        }
-    }
-
-    // With haltOnFailure the refused batch reports a single result.
-    let d = roundtrip_batch(
-        &mut stream,
-        serde_json::json!({
-            "requestId": "batch-exec-halt",
-            "haltOnFailure": true,
-            "executionType": 2,
-            "requests": [stub_request("GetVersion"), stub_request("GetSceneList")]
-        }),
-    )
-    .await;
-    assert_eq!(d["results"].as_array().expect("results").len(), 1);
-
-    // An out-of-range executionType value closes 4005 like upstream.
+    // executionType 1 (SerialFrame) and 2 (Parallel) are implemented
+    // (tests/obs_ws_batches.rs); an out-of-range value still closes 4005
+    // like upstream.
     raw::write_value(
         &mut stream,
         serde_json::json!({

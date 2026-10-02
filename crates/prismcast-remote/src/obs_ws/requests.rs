@@ -30,7 +30,9 @@
 //! ## Documented divergences from upstream
 //!
 //! - `Sleep` is accepted as a standalone request (upstream registers it for
-//!   batches only), which keeps [`AVAILABLE_REQUESTS`] truthful.
+//!   batches only), which keeps [`AVAILABLE_REQUESTS`] truthful; `sleepFrames`
+//!   resolves only inside a `SerialFrame` batch (the frame clock comes from
+//!   the active profile's video config) and is a typed 400 elsewhere.
 //! - `sourceWidth`/`sourceHeight` in scene-item transforms are `0` until the
 //!   source reports capture dimensions (no capture runtime yet).
 //! - Output runtime metrics (`outputBytes`, frame counters, duration,
@@ -78,6 +80,7 @@ const MAX_SLEEP_MILLIS: u64 = 50_000;
 /// `tests/obs_ws_requests.rs` (every entry must dispatch to a non-204
 /// answer through the real socket path).
 pub(crate) const AVAILABLE_REQUESTS: &[&str] = &[
+    "BroadcastCustomEvent",
     "CreateScene",
     "CreateSceneItem",
     "GetCurrentPreviewScene",
@@ -123,7 +126,8 @@ pub(crate) const AVAILABLE_REQUESTS: &[&str] = &[
 ];
 
 /// Everything a request translation needs: the core handle, the session's
-/// authenticated permissions, and the server-wide scene-item ID registry.
+/// authenticated permissions, the server-wide scene-item ID registry, and
+/// the custom-event bus.
 pub(crate) struct RequestContext<'a> {
     /// The application core.
     pub app: &'a AppHandle,
@@ -131,6 +135,35 @@ pub(crate) struct RequestContext<'a> {
     pub permissions: Permissions,
     /// Shared `sceneItemId` registry.
     pub item_ids: &'a ItemIdMap,
+    /// Server-wide custom-event bus (`BroadcastCustomEvent`).
+    pub custom_events: &'a tokio::sync::broadcast::Sender<Value>,
+}
+
+/// An owned, `Send`-able [`RequestContext`] for `Parallel` batch member
+/// tasks: each in-flight member gets a clone, so translation never borrows
+/// session state across an `await` on a spawned task.
+#[derive(Clone)]
+pub(crate) struct OwnedRequestContext {
+    /// The application core.
+    pub app: AppHandle,
+    /// Permissions granted at `Identify` (mapped to app scopes).
+    pub permissions: Permissions,
+    /// Shared `sceneItemId` registry.
+    pub item_ids: Arc<ItemIdMap>,
+    /// Server-wide custom-event bus (`BroadcastCustomEvent`).
+    pub custom_events: tokio::sync::broadcast::Sender<Value>,
+}
+
+impl OwnedRequestContext {
+    /// Borrows as the translation context [`execute`] takes.
+    pub(crate) fn as_ref(&self) -> RequestContext<'_> {
+        RequestContext {
+            app: &self.app,
+            permissions: self.permissions,
+            item_ids: &self.item_ids,
+            custom_events: &self.custom_events,
+        }
+    }
 }
 
 /// The translated outcome of one request: an obs [`RequestStatus`] plus an
@@ -147,15 +180,19 @@ type Handler = Result<Option<Value>, RequestStatus>;
 
 /// Executes one obs request. Returns `None` for request types this adapter
 /// does not implement — the session layer answers those with the typed 204
-/// stub (`unknown_request_status`).
+/// stub (`unknown_request_status`). `frame_duration` is the `SerialFrame`
+/// batch clock (`Some` only from the SerialFrame batch runner): it is what
+/// lets `Sleep.sleepFrames` resolve; every other path passes `None`.
 pub(crate) async fn execute(
     ctx: &RequestContext<'_>,
     request_type: &str,
     request_data: Option<&Value>,
+    frame_duration: Option<Duration>,
 ) -> Option<RequestOutcome> {
     let result = match request_type {
         "GetVersion" => get_version(),
-        "Sleep" => execute_sleep(request_data).await,
+        "Sleep" => execute_sleep(request_data, frame_duration).await,
+        "BroadcastCustomEvent" => broadcast_custom_event(ctx, request_data),
         // Scenes
         "GetSceneList" => get_scene_list(ctx),
         "GetCurrentProgramScene" => get_current_program_scene(ctx),
@@ -446,9 +483,13 @@ fn resolve_item<'a>(
 
 // --- GetVersion ---
 
+/// OBS Studio version advertised to clients: the minimum obws (>= 30.2)
+/// accepts. Compatibility constant, not the Prismcast version (ADR-0021).
+pub(crate) const OBS_VERSION_COMPAT: &str = "30.2.0";
+
 fn get_version() -> Handler {
     Ok(Some(json!({
-        "obsVersion": env!("CARGO_PKG_VERSION"),
+        "obsVersion": OBS_VERSION_COMPAT,
         "obsWebSocketVersion": proto::OBS_WEBSOCKET_VERSION,
         "rpcVersion": proto::RPC_VERSION,
         "availableRequests": AVAILABLE_REQUESTS,
@@ -461,7 +502,7 @@ fn get_version() -> Handler {
 
 // --- Sleep (batch-oriented; also accepted standalone, see module docs) ---
 
-async fn execute_sleep(data: Option<&Value>) -> Handler {
+async fn execute_sleep(data: Option<&Value>, frame_duration: Option<Duration>) -> Handler {
     let sleep_millis = opt_u64(data, "sleepMillis")?;
     let sleep_frames = opt_u64(data, "sleepFrames")?;
     match (sleep_millis, sleep_frames) {
@@ -473,12 +514,48 @@ async fn execute_sleep(data: Option<&Value>) -> Handler {
             tokio::time::sleep(Duration::from_millis(ms)).await;
             Ok(None)
         }
-        (None, Some(_)) => Err(RequestStatus::error(
-            proto::status::INVALID_REQUEST_FIELD,
-            "sleepFrames requires SerialFrame execution, which this server does not support",
-        )),
+        (None, Some(frames)) => {
+            // The frame clock exists only inside a SerialFrame batch; a
+            // standalone or serial-realtime Sleep has no frame rate to
+            // resolve against (typed 400, as before SerialFrame landed).
+            let Some(frame_duration) = frame_duration else {
+                return Err(RequestStatus::error(
+                    proto::status::INVALID_REQUEST_FIELD,
+                    "sleepFrames requires SerialFrame batch execution (executionType 1)",
+                ));
+            };
+            // f64 first, bound-checked before construction: a huge
+            // `sleepFrames` must answer 402, never overflow a Duration
+            // (inputs are finite and non-negative, so `>` is exact).
+            let total_secs = frame_duration.as_secs_f64() * frames as f64;
+            if total_secs > MAX_SLEEP_MILLIS as f64 / 1000.0 {
+                return Err(RequestStatus::error(
+                    proto::status::REQUEST_FIELD_OUT_OF_RANGE,
+                    format!(
+                        "sleepFrames {frames} exceeds the maximum sleep of {MAX_SLEEP_MILLIS} ms"
+                    ),
+                ));
+            }
+            tokio::time::sleep(Duration::from_secs_f64(total_secs)).await;
+            Ok(None)
+        }
         (None, None) => Err(missing("sleepMillis")),
     }
+}
+
+// --- custom events (server-generated relay, OBSWS-002) ---
+
+/// `BroadcastCustomEvent`: publishes `eventData` verbatim onto the
+/// server-wide custom-event bus. Every session subscribed to `General`
+/// (including the originator) relays it as a `CustomEvent` — upstream
+/// models this as a pure client-to-clients relay with no core involvement,
+/// so no permission beyond an identified session is required.
+fn broadcast_custom_event(ctx: &RequestContext<'_>, data: Option<&Value>) -> Handler {
+    let event_data = req_object(data, "eventData")?;
+    // `send` fails only when no receiver exists; an empty audience is still
+    // a successful broadcast (upstream answers success unconditionally).
+    let _ = ctx.custom_events.send(event_data.clone());
+    Ok(None)
 }
 
 // --- scenes ---
@@ -1164,6 +1241,20 @@ fn video_config(state: &AppState) -> VideoConfig {
         .and_then(|id| state.profiles.get(&id))
         .map(|profile| profile.video)
         .unwrap_or_default()
+}
+
+/// One frame's wall-clock duration under the active profile's video config
+/// (`fps_den / fps_num` seconds) — the `SerialFrame` batch clock. Defaults
+/// to the 60 fps frame (16.667 ms) when no profile is active, and falls back
+/// to the same when the profile's rate is degenerate (`fps_num == 0`), so a
+/// batch sleep can never divide by zero.
+pub(crate) fn frame_duration(state: &AppState) -> Duration {
+    const DEFAULT_FPS: f64 = 60.0;
+    let video = video_config(state);
+    if video.fps_num == 0 {
+        return Duration::from_secs_f64(1.0 / DEFAULT_FPS);
+    }
+    Duration::from_secs_f64(f64::from(video.fps_den) / f64::from(video.fps_num))
 }
 
 fn output_json(output: &Output, video: VideoConfig) -> Value {
