@@ -132,6 +132,51 @@ async fn next_event(stream: &mut Stream) -> Value {
     frame["d"].clone()
 }
 
+/// Sends an obs `Request` (op 6) and returns its `RequestResponse` `d` plus
+/// any events (op 5) that arrived interleaved (a request that mutates state
+/// publishes its domain events while the response travels the same queue).
+async fn request(
+    stream: &mut Stream,
+    request_type: &str,
+    request_id: &str,
+    request_data: Value,
+) -> (Value, Vec<Value>) {
+    write_value(
+        stream,
+        json!({
+            "op": 6,
+            "d": {
+                "requestType": request_type,
+                "requestId": request_id,
+                "requestData": request_data,
+            },
+        }),
+    )
+    .await;
+    let mut events = Vec::new();
+    loop {
+        let frame = read_value(stream).await;
+        match frame["op"].as_u64() {
+            Some(5) => events.push(frame["d"].clone()),
+            Some(7) => {
+                assert_eq!(frame["d"]["requestId"], request_id, "{frame}");
+                assert_eq!(frame["d"]["requestType"], request_type, "{frame}");
+                return (frame["d"].clone(), events);
+            }
+            _ => panic!("unexpected frame: {frame}"),
+        }
+    }
+}
+
+/// The next event, preferring ones already drained by [`request`].
+async fn next_event_from(pending: &mut Vec<Value>, stream: &mut Stream) -> Value {
+    if pending.is_empty() {
+        next_event(stream).await
+    } else {
+        pending.remove(0)
+    }
+}
+
 /// Asserts the exact shape of one obs event.
 fn assert_event(d: &Value, event_type: &str, intent: u32, event_data: Value) {
     assert_eq!(d["eventType"], event_type, "eventType of {d}");
@@ -821,6 +866,103 @@ async fn reidentify_narrows_and_widens_mid_session() {
         "SceneRemoved",
         subscription::SCENES,
         json!({"sceneName": "B", "sceneUuid": b.as_uuid().to_string(), "isGroup": false}),
+    );
+    assert_silent(&mut stream).await;
+
+    bed.shutdown().await;
+}
+
+/// Numeric `sceneItemId` coherence (ADR-0020 §c): the number minted by the
+/// request path (CreateSceneItem/GetSceneItemList responses) is the number
+/// the event stream reports, including on the removal event — even though
+/// `RemoveSceneItem`'s handler evicts the number eagerly, before the
+/// session's event pipe sees the `ItemRemoved` domain event.
+#[tokio::test]
+async fn scene_item_ids_match_between_requests_and_events() {
+    let bed = TestBed::spawn().await;
+    let mut stream = connect_subscribed(bed.addr, Some(subscription::ALL)).await;
+
+    let _mic = add_source(&bed.app, SourceKind::Color, "Mic").await;
+    let _main = add_scene(&bed.app, "Main").await;
+    // Drain the creation events so later assertions start clean.
+    assert_eq!(next_event(&mut stream).await["eventType"], "InputCreated");
+    assert_eq!(next_event(&mut stream).await["eventType"], "SceneCreated");
+    assert_eq!(
+        next_event(&mut stream).await["eventType"],
+        "CurrentProgramSceneChanged"
+    );
+
+    // The request path mints the number.
+    let (response, mut pending) = request(
+        &mut stream,
+        "CreateSceneItem",
+        "r1",
+        json!({"sceneName": "Main", "sourceName": "Mic"}),
+    )
+    .await;
+    assert_eq!(response["requestStatus"]["code"], 100, "{response}");
+    let number = response["responseData"]["sceneItemId"]
+        .as_u64()
+        .expect("CreateSceneItem responseData.sceneItemId");
+
+    // The creation event (interleaved with or following the response)
+    // reports the same number.
+    let created = next_event_from(&mut pending, &mut stream).await;
+    assert_eq!(created["eventType"], "SceneItemCreated");
+    assert_eq!(
+        created["eventData"]["sceneItemId"],
+        json!(number),
+        "event and response agree: {created}"
+    );
+    assert!(pending.is_empty());
+
+    // Enumeration agrees too.
+    let (response, pending) = request(
+        &mut stream,
+        "GetSceneItemList",
+        "r2",
+        json!({"sceneName": "Main"}),
+    )
+    .await;
+    assert!(pending.is_empty(), "a query publishes no events");
+    assert_eq!(
+        response["responseData"]["sceneItems"][0]["sceneItemId"],
+        json!(number),
+        "{response}"
+    );
+
+    // Toggling via the request path emits SceneItemEnableStateChanged with
+    // the same number.
+    let (response, mut pending) = request(
+        &mut stream,
+        "SetSceneItemEnabled",
+        "r3",
+        json!({"sceneName": "Main", "sceneItemId": number, "sceneItemEnabled": false}),
+    )
+    .await;
+    assert_eq!(response["requestStatus"]["code"], 100, "{response}");
+    let enable = next_event_from(&mut pending, &mut stream).await;
+    assert_eq!(enable["eventType"], "SceneItemEnableStateChanged");
+    assert_eq!(enable["eventData"]["sceneItemId"], json!(number));
+    assert_eq!(enable["eventData"]["sceneItemEnabled"], json!(false));
+
+    // Removal: the request handler evicts the number eagerly (before the
+    // event pipe translates ItemRemoved), yet the removal event still
+    // carries it.
+    let (response, mut pending) = request(
+        &mut stream,
+        "RemoveSceneItem",
+        "r4",
+        json!({"sceneName": "Main", "sceneItemId": number}),
+    )
+    .await;
+    assert_eq!(response["requestStatus"]["code"], 100, "{response}");
+    let removed = next_event_from(&mut pending, &mut stream).await;
+    assert_eq!(removed["eventType"], "SceneItemRemoved");
+    assert_eq!(
+        removed["eventData"]["sceneItemId"],
+        json!(number),
+        "removal event survives eager eviction: {removed}"
     );
     assert_silent(&mut stream).await;
 

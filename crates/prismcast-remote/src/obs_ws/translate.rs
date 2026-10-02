@@ -48,13 +48,15 @@
 //! ADR-0020 §c) with a per-session memo of last-known names as the fallback
 //! for already-removed entities. The same memo records prior mute/volume and
 //! item-visibility values, because `MixerChanged`/`ItemUpdated` carry the
-//! full state and the *kind* of change must be detected by diffing. The
-//! numeric `sceneItemId` is **not** resolved here: ADR-0020 §c assigns the
-//! sequential per-scene `ItemIdMap` to the request slice; until integration
-//! shares it, a stable UUID-derived placeholder is emitted
-//! ([`obs_scene_item_id`]).
+//! full state and the *kind* of change must be detected by diffing. Numeric
+//! `sceneItemId`s come from the server-wide [`ItemIdMap`] (ADR-0020 §c), so
+//! events and request responses agree; the translator memoizes the minted
+//! number per item so `SceneItemRemoved` still reports it even when the
+//! map's eviction listener (or an eager request-side eviction) processed the
+//! removal first.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use serde_json::json;
 use tracing::debug;
@@ -66,6 +68,7 @@ use prismcast_core::id::{OutputId, SceneId, SceneItemId, SourceId};
 use prismcast_core::output::{OutputKind, OutputState};
 use prismcast_core::source::SourceKind;
 
+use super::names::ItemIdMap;
 use super::proto::{self, subscription};
 
 /// Per-session event translation state: last-known names (for entities the
@@ -73,8 +76,10 @@ use super::proto::{self, subscription};
 /// change detection. Seeded from the snapshot at session start and on every
 /// `Reidentify`; maintained incrementally from the events that pass the
 /// subscription gate.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(crate) struct EventTranslator {
+    /// Server-wide numeric `sceneItemId` registry (shared with requests).
+    item_ids: Arc<ItemIdMap>,
     /// Last-known name per scene/source/output UUID.
     names: HashMap<Uuid, String>,
     /// Last-known mute/volume per source UUID (MixerChanged diffing).
@@ -83,6 +88,9 @@ pub(crate) struct EventTranslator {
     item_visible: HashMap<Uuid, bool>,
     /// Scene membership per scene-item UUID, for eviction on scene removal.
     item_scene: HashMap<Uuid, Uuid>,
+    /// The minted `sceneItemId` per scene-item UUID, as emitted to this
+    /// session; memoized so removal events survive eviction-listener races.
+    item_numbers: HashMap<Uuid, u64>,
 }
 
 /// Last-known mixer values relevant to obs events.
@@ -93,8 +101,15 @@ struct MixerMemo {
 }
 
 impl EventTranslator {
-    pub(crate) fn new() -> Self {
-        Self::default()
+    pub(crate) fn new(item_ids: Arc<ItemIdMap>) -> Self {
+        Self {
+            item_ids,
+            names: HashMap::new(),
+            mixer: HashMap::new(),
+            item_visible: HashMap::new(),
+            item_scene: HashMap::new(),
+            item_numbers: HashMap::new(),
+        }
     }
 
     /// Records the current names/values of every entity in the snapshot, so
@@ -106,6 +121,10 @@ impl EventTranslator {
                 self.item_visible.insert(*item.id.as_uuid(), item.visible);
                 self.item_scene
                     .insert(*item.id.as_uuid(), *scene.id.as_uuid());
+                // Mint (idempotently) so removals of pre-existing items
+                // report a stable number even if no event named one yet.
+                let number = self.item_ids.mint(scene.id, item.id);
+                self.item_numbers.insert(*item.id.as_uuid(), number);
             }
         }
         for source in snapshot.sources() {
@@ -176,6 +195,20 @@ impl EventTranslator {
         self.name_or(*source_id.as_uuid(), current.as_deref())
     }
 
+    /// The obs `sceneItemId` for an item: the memoized number this session
+    /// already emitted, else an idempotent `mint` on the shared map (so the
+    /// number agrees with the request path even when this session never
+    /// emitted the item's creation).
+    fn item_number(&mut self, scene_id: SceneId, item_id: SceneItemId) -> u64 {
+        let uuid = *item_id.as_uuid();
+        if let Some(number) = self.item_numbers.get(&uuid) {
+            return *number;
+        }
+        let number = self.item_ids.mint(scene_id, item_id);
+        self.item_numbers.insert(uuid, number);
+        number
+    }
+
     fn scene_event(&mut self, event: &SceneEvent, snapshot: &AppSnapshot) -> Vec<proto::Event> {
         match event {
             SceneEvent::Added { scene_id, name } => {
@@ -204,6 +237,7 @@ impl EventTranslator {
                 for item in items {
                     self.item_scene.remove(&item);
                     self.item_visible.remove(&item);
+                    self.item_numbers.remove(&item);
                 }
                 vec![obs_event(
                     "SceneRemoved",
@@ -251,6 +285,7 @@ impl EventTranslator {
                 let item_uuid = *item.id.as_uuid();
                 self.item_visible.insert(item_uuid, item.visible);
                 self.item_scene.insert(item_uuid, scene_uuid);
+                let number = self.item_number(*scene_id, item.id);
                 let scene_name = self.scene_name(snapshot, *scene_id);
                 let source_name = self.source_name(snapshot, item.source_id);
                 let index = snapshot
@@ -265,7 +300,7 @@ impl EventTranslator {
                         "sceneUuid": scene_uuid.to_string(),
                         "sourceName": source_name,
                         "sourceUuid": item.source_id.as_uuid().to_string(),
-                        "sceneItemId": obs_scene_item_id(item.id),
+                        "sceneItemId": number,
                         "sceneItemIndex": index,
                     }),
                 )]
@@ -278,6 +313,16 @@ impl EventTranslator {
                 let item_uuid = *item_id.as_uuid();
                 self.item_visible.remove(&item_uuid);
                 self.item_scene.remove(&item_uuid);
+                // The memoized number survives the shared map's eviction
+                // (the server-wide listener or an eager request-side
+                // `evict_item` may have processed this removal first).
+                let number = match self.item_numbers.remove(&item_uuid) {
+                    Some(number) => number,
+                    // Never emitted to this session (lagged/unsubscribed at
+                    // creation): mint is the graceful fallback — idempotent
+                    // while the number is still registered.
+                    None => self.item_ids.mint(*scene_id, *item_id),
+                };
                 let scene_name = self.scene_name(snapshot, *scene_id);
                 let source_name = self.source_name(snapshot, *source_id);
                 vec![obs_event(
@@ -288,7 +333,7 @@ impl EventTranslator {
                         "sceneUuid": scene_id.as_uuid().to_string(),
                         "sourceName": source_name,
                         "sourceUuid": source_id.as_uuid().to_string(),
-                        "sceneItemId": obs_scene_item_id(*item_id),
+                        "sceneItemId": number,
                     }),
                 )]
             }
@@ -302,6 +347,7 @@ impl EventTranslator {
                     // high-volume opt-in upstream, deferred to OBSWS-002+).
                     return Vec::new();
                 }
+                let number = self.item_number(*scene_id, item.id);
                 let scene_name = self.scene_name(snapshot, *scene_id);
                 vec![obs_event(
                     "SceneItemEnableStateChanged",
@@ -309,7 +355,7 @@ impl EventTranslator {
                     json!({
                         "sceneName": scene_name,
                         "sceneUuid": scene_id.as_uuid().to_string(),
-                        "sceneItemId": obs_scene_item_id(item.id),
+                        "sceneItemId": number,
                         "sceneItemEnabled": item.visible,
                     }),
                 )]
@@ -614,15 +660,6 @@ fn obs_input_kind(kind: SourceKind) -> &'static str {
     }
 }
 
-/// **Placeholder** numeric `sceneItemId`: obs uses sequential per-scene
-/// integers maintained by the request slice's `ItemIdMap` (ADR-0020 §c);
-/// until that map is shared with the event path, derive a stable positive
-/// integer from the item UUID so clients can correlate events within a
-/// session.
-fn obs_scene_item_id(item_id: SceneItemId) -> i64 {
-    (item_id.as_uuid().as_u128() % (i64::MAX as u128)) as i64
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -666,17 +703,90 @@ mod tests {
     }
 
     #[test]
-    fn scene_item_id_placeholder_is_stable_and_positive() {
-        let id = SceneItemId::new();
-        assert_eq!(obs_scene_item_id(id), obs_scene_item_id(id));
-        assert!(obs_scene_item_id(id) >= 0);
-        assert_ne!(obs_scene_item_id(id), obs_scene_item_id(SceneItemId::new()));
-    }
-
-    #[test]
     fn input_kinds_are_stable_strings() {
         assert_eq!(obs_input_kind(SourceKind::Color), "color_source");
         assert_eq!(obs_input_kind(SourceKind::V4l2Camera), "v4l2_input");
         assert_eq!(obs_input_kind(SourceKind::Scene(SceneId::new())), "scene");
+    }
+
+    /// The removal event must report the number the session already
+    /// emitted, even when the shared map's eviction ran first (the
+    /// server-wide eviction listener and request-side eager eviction are
+    /// independent of the session's event pipe, so either ordering occurs).
+    #[tokio::test]
+    async fn removal_event_keeps_the_minted_number_after_eviction() {
+        use prismcast_app::{AppHandle, CoreConfig};
+        use prismcast_core::Command;
+
+        let app = AppHandle::spawn(CoreConfig::default());
+        let response = app
+            .dispatch(Command::AddScene {
+                name: "Main".into(),
+            })
+            .await
+            .expect("add scene");
+        let scene_id = match &response.events[0] {
+            Event::Scene(SceneEvent::Added { scene_id, .. }) => *scene_id,
+            other => panic!("unexpected {other:?}"),
+        };
+        let response = app
+            .dispatch(Command::AddSource {
+                kind: SourceKind::Color,
+                name: "Mic".into(),
+            })
+            .await
+            .expect("add source");
+        let source_id = match &response.events[0] {
+            Event::Source(SourceEvent::Added { source }) => source.id,
+            other => panic!("unexpected {other:?}"),
+        };
+
+        let map = ItemIdMap::shared();
+        let mut translator = EventTranslator::new(map.clone());
+        translator.seed(&app.snapshot());
+
+        let response = app
+            .dispatch(Command::AddSceneItem {
+                scene_id,
+                source_id,
+            })
+            .await
+            .expect("add item");
+        let added = response.events[0].clone();
+        let item_id = match &added {
+            Event::Scene(SceneEvent::ItemAdded { item, .. }) => item.id,
+            other => panic!("unexpected {other:?}"),
+        };
+        let created = translator.event_to_obs(&added, &app.snapshot());
+        let number = created[0]
+            .event_data
+            .as_ref()
+            .and_then(|data| data["sceneItemId"].as_u64())
+            .expect("SceneItemCreated carries sceneItemId");
+        assert_eq!(number, map.mint(scene_id, item_id), "event mints the map");
+
+        // Eviction wins the race: the map no longer knows the number.
+        let response = app
+            .dispatch(Command::RemoveSceneItem { scene_id, item_id })
+            .await
+            .expect("remove item");
+        let removed = response.events[0].clone();
+        map.apply_event(&removed);
+        assert_eq!(map.resolve(scene_id, number), None, "evicted");
+
+        let events = translator.event_to_obs(&removed, &app.snapshot());
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_type, "SceneItemRemoved");
+        assert_eq!(
+            events[0]
+                .event_data
+                .as_ref()
+                .and_then(|data| data["sceneItemId"].as_u64()),
+            Some(number),
+            "removal event still carries the minted number"
+        );
+        // The translator does not re-mint into the shared map.
+        assert_eq!(map.resolve(scene_id, number), None);
+        app.shutdown().await;
     }
 }
