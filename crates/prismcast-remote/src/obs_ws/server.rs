@@ -379,6 +379,8 @@ async fn accept_loop(
 /// Performs the HTTP → WebSocket upgrade (with subprotocol negotiation),
 /// then hands the connection to the obs session engine with the negotiated
 /// codec.
+// The closure's error type is dictated by tungstenite's `Callback` trait.
+#[allow(clippy::result_large_err)]
 async fn upgrade_and_run(
     stream: TcpStream,
     websocket_config: WebSocketConfig,
