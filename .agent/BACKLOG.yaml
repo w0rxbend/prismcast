@@ -212,4 +212,18 @@ tasks:
     title: V4L2 camera discovery and bounded shared capture preview
     priority: 62
     depends_on: [CAPTURE-002]
+    status: done
+
+  # --- Audio (Phase 5) ---
+  - id: AUDIO-001
+    title: Audio mixer and meter foundation (unblocks obs meter/stats events)
+    priority: 63
+    depends_on: [MEDIA-005]
+    status: ready
+
+  # --- Linux capture (Phase 3, continued) ---
+  - id: CAPTURE-004
+    title: PipeWire audio input/output/application capture
+    priority: 64
+    depends_on: [CAPTURE-001]
     status: ready

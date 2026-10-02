@@ -787,3 +787,42 @@ MessagePack, SerialFrame/Parallel, meters, filters, screenshots, stats,
 vendor/persistent data, media control, virtualcam/replay, UI requests.
 Next candidates: OBSWS-002 or WS-003 TLS; CAPTURE-002 picker retry still
 awaits user coordination.
+
+## OBSWS-002 + WS-003 (2026-10-02, parallel swarm)
+
+Two tasks shipped concurrently from one scoping pass (plan agent produced a
+zero-overlap file partition: OBSWS-002 owns obs_ws/*, WS-003 owns
+ws.rs/ws_client.rs/tls.rs/prismcast-cli; Cargo.lock + .agent sequenced at
+integration). OBSWS-002: ADR-0021 then four slices — MessagePack subprotocol
+(rmp-serde to_vec_named, zero new deps, ObsCodec at the session framing
+boundary, 7 byte-pinned golden fixtures, cross-codec 4002), OBS-shaped
+version advertisement (obsVersion "30.2.0" compat constant; obws 0.15 now
+connects with NO skip flags), SerialFrame + Parallel batch modes (frame clock
+from active profile fps, bounded JoinSet cap 8 over dispatch_with_permissions
+— safe because the core actor serializes commands; results in request order,
+haltOnFailure ignored per upstream; the whole-batch 206 fallback is gone),
+and BroadcastCustomEvent → CustomEvent over a bounded (64) server-wide
+broadcast bus gated by the General bit (works inside all batch modes).
+WS-003: ADR-0022 then three slices — server TLS (rustls 0.23 ring provider,
+tokio-rustls acceptor in the per-connection task under a 10 s bound, stream
+generic-ization in ws.rs, non-loopback-without-TLS → typed TlsRequired,
+rcgen test certs never committed, rustls-pki-types PemObject instead of
+RUSTSEC-flagged rustls-pemfile), client wss (WsClient::connect_url, native
+roots + extra CA + warn-logged danger mode, auth matrix re-run over wss),
+CLI wss (--url conflicts --socket, --tls-ca/--insecure scoped to wss,
+CliClient enum dispatch, subprocess e2e over a real TLS server).
+Integration caught one real defect the slices could not see:
+tokio-tungstenite's rustls feature was dev-only, so prismcast-remote's wss
+arm only compiled under dev-feature unification — moved to the main
+dependency (verified via cargo check -p prismcast-remote standalone) and
+dropped the CLI workaround dep. Merge-era lesson: a slice changing
+long-stubbed behavior (msgpack refusal, whole-batch 206) must update the
+stale pin tests in the same commit — both were caught by full-suite runs,
+not by scoped test runs.
+
+Validation: just ci green on both integration branches AND on the combined
+main tree. 188+ prismcast-remote tests, 37 prismcast-cli tests, deny clean
+(zero aws-lc-rs). Stats/screenshots/meter events stay deferred — no producer
+exists (verified); AUDIO-001 is the unblock. Next candidates: AUDIO-001
+(mixer/meters) or CAPTURE-004 (PipeWire audio capture). CAPTURE-002 picker
+retry still awaits user coordination.

@@ -1,0 +1,84 @@
+id: OBSWS-002
+title: obs-websocket adapter hardening — MessagePack, batch execution modes, OBS-shaped version advertisement
+goal: >
+  Close the verifiable OBSWS-001 deferrals in the obs_ws adapter (ADR-0010/0020,
+  docs/protocols/obs-websocket-adapter.md §9): (1) the MessagePack subprotocol
+  (obswebsocket.msgpack) — handshake negotiation, binary-frame encode/decode of
+  the same {op,d} envelopes via rmp-serde (already a prismcast-remote
+  dependency: no new crates), golden round-trip fixtures, and a scripted
+  real-socket conformance path; (2) RequestBatch executionType 1 (SerialFrame)
+  as serial execution with frame-timed Sleep (sleepFrames honored via the
+  active profile's fps_num/fps_den; no graphics-thread coupling — documented
+  divergence) and executionType 2 (Parallel) as a bounded-concurrency JoinSet
+  over the existing dispatch path with results in request order (safe because
+  the core actor serializes commands; haltOnFailure is ignored in Parallel like
+  upstream); (3) OBS-shaped version advertisement: GetVersion obsVersion
+  reports the compatibility constant "30.2.0" (the minimum OBS Studio version
+  obws >= 30.2 accepts) instead of the crate version, so real clients connect
+  without dangerous skip flags. Stats (GetStats/GetOutputStats), screenshots,
+  and meter/high-volume producers are NOT in scope — no producer exists
+  (OutputGraph runtime stats are not wired to the app snapshot; no compositor
+  frame access; no meter producer) — they stay deferred with typed 204/zeros.
+depends_on: [OBSWS-001]
+allowed_scope:
+- crates/prismcast-remote/src/obs_ws/
+- crates/prismcast-remote/tests/obs_ws_msgpack.rs
+- crates/prismcast-remote/tests/obs_ws_batches.rs
+- crates/prismcast-remote/tests/obs_ws_custom_event.rs
+- crates/prismcast-remote/tests/obs_ws_obws.rs
+- docs/protocols/obs-websocket-adapter.md
+- docs/adr/
+acceptance:
+- a client offering only `Sec-WebSocket-Protocol: obswebsocket.msgpack` gets the
+  subprotocol echoed and a full binary-frame session: Hello/Identify/Identified,
+  Request/RequestResponse, RequestBatch/RequestBatchResponse, and gated Event
+  delivery, all MessagePack-encoded; a text frame in a msgpack session (and a
+  binary frame in a JSON session) closes with 4002
+- golden round-trip fixtures pin the msgpack byte encoding of Hello, Identify,
+  Request, RequestResponse, Event, and RequestBatchResponse envelopes (decode →
+  re-encode identity, struct-as-map with string keys, against a checked-in hex
+  or base64 fixture in the test file)
+- offering both subprotocols negotiates JSON (stable default); offering only
+  unknown subprotocols still refuses the upgrade with HTTP 400
+- RequestBatch executionType 1 (SerialFrame) executes serially in order with
+  haltOnFailure; Sleep with sleepFrames delays by frames × (fps_den/fps_num) of
+  the active profile's video config (default profile 60 fps when none active);
+  executionType 2 (Parallel) executes all members with bounded concurrency (cap
+  8), returns one result per member in REQUEST order, ignores haltOnFailure,
+  and Sleep members sleep independently
+- Parallel batch members produce the same Core Events as serial execution of
+  the same members (verified against the AppHandle event stream, order-insensitive)
+- GetVersion obsVersion == "30.2.0"; the obws 0.15 conformance tests connect
+  with NO DangerousConnectConfig skip flags (both studio >= 30.2 and websocket
+  ^5.5 checks pass against the advertised versions)
+- availableRequests remains drift-guarded; unknown request types still get typed
+  204; native protocol golden tripwires untouched
+validation:
+- cargo test -p prismcast-remote
+- cargo clippy --workspace --all-targets -- -D warnings
+- just deny
+status: done
+
+validation_notes:
+- just ci green on each integration branch and on the combined main tree (fmt/clippy -D warnings/workspace tests/deny)
+- 188+ prismcast-remote tests green: 7 msgpack golden fixtures (byte-pinned, map-shape, u32/i64 wire types), full msgpack live session, cross-codec 4002, hostile-payload 4002, both-offered→JSON, unknown-only→HTTP 400
+- SerialFrame: order parity, haltOnFailure, sleepFrames timing (30f @ 60fps ≈ 500 ms), over-cap 402; Parallel: request-order results, order-insensitive Core Event parity, bounded concurrency (wall-time < sum of sleeps), haltOnFailure ignored
+- obws 0.15 conformance connects with NO DangerousConnectConfig skip flags; obsVersion "30.2.0" + obsWebSocketVersion "5.7.4" exact-asserted
+- BroadcastCustomEvent: two subscribed sessions + originator receive CustomEvent, unsubscribed silence, 300/401 validation, msgpack round-trip; drift guard passes with no edits (required eventData → typed 300, non-204)
+- One pre-existing test each in tests/obs_ws.rs (stale msgpack-refusal assertion; 206 behavior test → 4005 close test) updated where the contract and stale test were mutually exclusive
+
+notes:
+- ADR-0021 records the codec/batch/advertisement decisions BEFORE implementation
+  (project law: architecture-affecting changes need an ADR first).
+- rmp-serde pitfalls: encoding MUST use rmp_serde::to_vec_named (struct-as-map);
+  obs envelopes must round-trip through serde_json::Value losslessly; msgpack
+  carries no field names for array-encoded structs — the classic silent-breakage mode.
+- Deferred, explicitly (no producer exists — verified): GetStats/GetOutputStats
+  (OutputGraph runtime stats not wired to prismcast-app), GetSourceScreenshot
+  (no compositor frame access), InputVolumeMeters and other high-volume event
+  producers (no meter producer). Keep zeros/204 behavior and doc entries.
+- BroadcastCustomEvent is an OPTIONAL last slice (server-wide broadcast channel
+  in SharedServices; CustomEvent event gated by the General bit). Cut it first
+  if the schedule tightens; CallVendorRequest stays a typed 204.
+- TLS for the obs adapter is WS-003's decision and is DEFERRED there too
+  (upstream obs-websocket has no wss; obs clients do not use it).

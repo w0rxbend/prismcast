@@ -1,0 +1,92 @@
+id: WS-003
+title: TLS (wss://) + non-loopback bind hardening for the native WebSocket server
+goal: >
+  Deliver rustls-terminated TLS for the native WebSocket server (PLAN §22's
+  wss://) and harden non-loopback binds: WsServerConfig gains an optional
+  provided-certificate TLS config (cert chain + private key PEM paths — no
+  self-signed auto-generation in production; test certs are generated at test
+  time with rcgen as a dev-dependency, nothing committed), the accept loop
+  wraps accepted TCP streams in a tokio-rustls TlsAcceptor before the WebSocket
+  upgrade (ws.rs's stream types generalize over the IO stream; the
+  transport-generic session engine is untouched), and WsServer::bind REFUSES a
+  non-loopback bind without TLS (plaintext network listeners are a policy
+  error, not a warning). Client side: WsClient speaks wss:// with
+  system-native roots, an optional custom CA bundle, and an explicit
+  danger-accept-invalid-certs escape hatch for tests/dev; prismcast-cli gains a
+  --url ws(s):// flag selecting the WS transport (default remains the Unix
+  socket) plus --tls-ca/--insecure flags, sharing the ClientAuth flag/env
+  semantics verbatim. The obs-websocket adapter stays PLAINTEXT (deferred:
+  upstream obs-websocket has no TLS support and obs clients do not speak wss —
+  recorded in the ADR); IPC is untouched.
+depends_on: [WS-002]
+allowed_scope:
+- crates/prismcast-remote/src/tls.rs
+- crates/prismcast-remote/src/ws.rs
+- crates/prismcast-remote/src/ws_client.rs
+- crates/prismcast-remote/src/lib.rs
+- crates/prismcast-remote/Cargo.toml
+- crates/prismcast-remote/tests/tls_ws.rs
+- crates/prismcast-remote/tests/tls_client.rs
+- crates/prismcast-cli/
+- docs/protocols/native-protocol.md
+- docs/adr/
+- Cargo.toml
+- Cargo.lock
+acceptance:
+- WsServer with a TLS config serves a full native session over wss:// on a real
+  socket (Hello/Identify/Identified, request round-trip, event delivery)
+  against a scripted tungstenite client using a rustls connector rooted at the
+  test CA; test certs are generated in-test via rcgen (no committed key material)
+- WsServer::bind with a non-loopback address and no TLS config fails with a
+  typed policy error; loopback plaintext ws:// keeps working unchanged
+- WsServer::bind with a missing/unreadable/invalid cert or key fails with a
+  typed error naming the path (no unwrap/panic); a plaintext client on a TLS
+  port and a TLS client on a plaintext port both fail cleanly at the handshake
+  (no crash, no hanging accept loop)
+- token and password auth over wss behave exactly as over ws (WS-002 matrix
+  re-run on the TLS transport); AllowLocal still rejected at bind
+- WsClient connects over wss with native roots, with a custom CA bundle, and
+  rejects a self-signed server when no CA/danger flag is given; danger mode is
+  gated behind an explicit config flag with a warning log
+- prismcast-cli --url wss://host:port --password/--token (+ --tls-ca PATH)
+  drives ping/status/scene list/scene switch over TLS; --url and --socket are
+  mutually exclusive; secret values never printed; exit codes unchanged
+- rustls uses the ring provider explicitly (no aws-lc-rs C-build dependency);
+  all new deps pass just deny
+validation:
+- cargo test -p prismcast-remote
+- cargo test -p prismcast-cli
+- cargo clippy --workspace --all-targets -- -D warnings
+- just deny
+status: done
+
+validation_notes:
+- just ci green on the integration branch and on the combined main tree (fmt/clippy -D warnings/workspace tests/deny)
+- 174+ prismcast-remote tests green: full wss native session (rcgen CA per test, tempdir, nothing committed), plaintext-on-TLS-port rejected + accept loop survives, non-loopback-no-TLS → TlsRequired, typed path errors for bad cert/key, WsClient custom-CA/native-roots-rejection/danger-mode matrix, token+password auth matrix over wss
+- 37 prismcast-cli tests green: flag matrix (conflicts/requires, no secret leakage, exit codes), subprocess e2e over real wss server (ping, scene list/switch, --tls-ca, --insecure stderr warning)
+- Integration fix: tokio-tungstenite rustls-tls-native-roots moved to prismcast-remote's MAIN dependency (wss arm only compiled under dev-feature unification); CLI workaround removed
+- rustls-pemfile NOT used (RUSTSEC unmaintained): PEM parsing via rustls-pki-types PemObject per the advisory's recommendation; zero aws-lc-rs in tree (ring provider)
+- docs/protocols/native-protocol.md TLS debt resolved (now describes what exists)
+
+notes:
+- ADR-0022 records TLS placement, the provided-certs-only decision, the
+  non-loopback-requires-TLS policy, and the obs-adapter deferral BEFORE
+  implementation.
+- Server-side TLS needs NO tokio-tungstenite TLS feature: the TlsAcceptor wraps
+  the TcpStream before accept_hdr_async_with_config. Client-side wss uses the
+  manual Connector::Rustls + connect_async_tls_with_config path (needed anyway
+  for custom CA / danger mode).
+- The native session engine (session.rs/session_kit) is transport-generic
+  already; only ws.rs's WsFrameReader/WsFrameWriter types generalize over the
+  stream. obs_ws is OUT OF SCOPE (owned concurrently by OBSWS-002; its session
+  is typed to WebSocketStream<TcpStream> and stays plaintext).
+- Self-signed generation as a production convenience (e.g. a `tls.generate`
+  config mode) is a deliberate follow-up, not this task: it needs a persistence
+  story for the generated key and a trust UX; provided paths cover servers,
+  dev uses rcgen in tests or openssl manually.
+- remote.toml is NOT extended (its parser rejects unknown keys by design and it
+  is an auth file, not a server config); TLS configuration is programmatic on
+  WsServerConfig/WsClientConfig until a server-config file exists.
+- rustls 0.23 with default-features = false, features = ["ring", "std", "tls12",
+  "logging"] to avoid the aws-lc-rs C build; rcgen 0.13 dev-dependency only
+  (CertifiedKey::generate / CertificateParams API), never commit PEMs.

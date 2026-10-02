@@ -1,7 +1,7 @@
 schema_version: 1
 project_phase: phase-3-linux-capture
-head_commit: c17a86e
-current_objective: Retry integrated live window preview picker (user-coordinated), then scope WS-002 or monitor/KDE/X11 capture validation
+head_commit: 45ea0dd
+current_objective: Scope AUDIO-001 (mixer/meters foundation, unblocks obs meter/stats events) or CAPTURE-004 (PipeWire audio capture); CAPTURE-002 integrated window preview picker retry still awaits user coordination
 completed:
 - RESUME-001
 - SKILL-001
@@ -47,11 +47,13 @@ completed:
 - CAPTURE-003
 - WS-002
 - OBSWS-001
+- OBSWS-002
+- WS-003
 in_progress: []
 blocked: []
 next_candidates:
-- OBSWS-002
-- WS-003
+- AUDIO-001
+- CAPTURE-004
 decisions:
 - ADR-0001
 - ADR-0002
@@ -73,6 +75,8 @@ decisions:
 - ADR-0018
 - ADR-0019
 - ADR-0020
+- ADR-0021
+- ADR-0022
 verification:
   cargo_fmt: pass
   cargo_clippy: pass
