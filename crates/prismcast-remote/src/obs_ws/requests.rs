@@ -43,6 +43,8 @@
 //! - `outputKind`/`inputKind` strings are Prismcast's own identifiers (there
 //!   is no OBS plugin registry behind them); `unversionedInputKind` mirrors
 //!   `inputKind`.
+//! - `ToggleInputMute`'s response carries `inputMutedToggled` in addition to
+//!   upstream's `inputMuted` (alias kept for the adapter's initial clients).
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -971,7 +973,12 @@ async fn toggle_input_mute(ctx: &RequestContext<'_>, data: Option<&Value>) -> Ha
         },
     )
     .await?;
-    Ok(Some(json!({ "inputMutedToggled": muted })))
+    // Upstream 5.7.4 answers `inputMuted`; `inputMutedToggled` is kept as an
+    // alias for clients that adopted this adapter's initial field name
+    // (pinned by tests/obs_ws_requests.rs; drop the alias at OBSWS-002).
+    Ok(Some(
+        json!({ "inputMuted": muted, "inputMutedToggled": muted }),
+    ))
 }
 
 /// obs dB → multiplier (`0` below the −100 dB floor; the core requires
