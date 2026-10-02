@@ -13,7 +13,10 @@
 //! exactly once.
 //!
 //! Socket writes live in a separate writer task fed by a **bounded** outbound
-//! queue ([`Outbound`]); producers never write to the socket directly.
+//! queue ([`Outbound`](crate::session_kit::Outbound)); producers never write
+//! to the socket directly. The transport traits, writer task, throttle, rate
+//! limiter, and slow-consumer shedding are protocol-agnostic and live in
+//! [`crate::session_kit`] (extracted for OBSWS-001).
 //!
 //! ## Events, throttle, and backpressure (protocol doc §7)
 //!
@@ -31,11 +34,11 @@
 //!   and dropped-on-overflow events consume sequence numbers without sending,
 //!   so clients always detect loss as a gap and re-sync with `get_snapshot`.
 //! - Outbound overflow: event delivery uses `try_send` (drop + seq gap);
-//!   after [`MAX_OVERFLOW_STRIKES`] consecutive failures, or if a response
+//!   after [`MAX_OVERFLOW_STRIKES`](crate::session_kit::MAX_OVERFLOW_STRIKES)
+//!   consecutive failures, or if a response
 //!   cannot be enqueued within `send_timeout`, the session is closed with
 //!   `SlowConsumer` (4013).
 
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -56,17 +59,17 @@ use prismcast_protocol::handshake::{CloseCode, Hello, Identified, Identify};
 use prismcast_protocol::message::ServerMessage;
 use prismcast_protocol::request::{Request, RequestKind};
 use prismcast_protocol::response::{RequestResponse, ResponseData, ResponseStatus};
-use prismcast_protocol::subscription::{EventCategory, SubscriptionSet};
+use prismcast_protocol::subscription::SubscriptionSet;
 use prismcast_protocol::version;
 
 use crate::auth::AuthConfig;
 use crate::codec::ClosingNotice;
 use crate::map::{self, RequestClass};
 use crate::server::EventFanout;
-
-/// Consecutive outbound-queue overflows tolerated before the session is shed
-/// with [`CloseCode::SlowConsumer`].
-const MAX_OVERFLOW_STRIKES: u32 = 8;
+use crate::session_kit::{
+    run_writer, FrameReader, FrameWriter, Outbound, OverflowStrikes, RateLimiter, Throttle,
+    ThrottleDecision,
+};
 
 /// Transport-independent session tuning shared by the IPC and WebSocket
 /// servers (each server config converts into this). Inbound frame-size
@@ -82,65 +85,6 @@ pub(crate) struct SessionConfig {
     pub send_timeout: Duration,
     /// Deadline for the client's `Identify` after connect.
     pub handshake_timeout: Duration,
-}
-
-/// An inbound frame could not be read or decoded. The session maps this to a
-/// [`CloseCode::MessageDecodeError`] close (protocol doc §8).
-#[derive(Debug)]
-pub(crate) struct FrameReadError(pub String);
-
-impl std::fmt::Display for FrameReadError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-/// An outbound frame could not be written; the connection is dead.
-#[derive(Debug)]
-pub(crate) struct FrameWriteError(pub String);
-
-impl std::fmt::Display for FrameWriteError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-/// The reading half of a transport connection. Implementations decode one
-/// inbound frame into a generic [`serde_json::Value`] so the session can
-/// classify the `type` tag before committing to a typed decode.
-pub(crate) trait FrameReader: Send {
-    /// Reads one frame. `Ok(None)` means the peer closed cleanly (EOF or a
-    /// close frame); `Err` means the frame was unreadable or undecodable and
-    /// the session closes with [`CloseCode::MessageDecodeError`].
-    fn read_value(
-        &mut self,
-    ) -> impl std::future::Future<Output = Result<Option<serde_json::Value>, FrameReadError>> + Send;
-}
-
-/// The writing half of a transport connection. Owned by the session's writer
-/// task.
-pub(crate) trait FrameWriter: Send + 'static {
-    /// Writes one protocol message.
-    fn write_message(
-        &mut self,
-        message: &ServerMessage,
-    ) -> impl std::future::Future<Output = Result<(), FrameWriteError>> + Send;
-    /// Writes the terminal closing notice — a length-prefixed `closing`
-    /// frame on IPC, a WebSocket close frame carrying the numeric code on WS
-    /// (protocol doc §8) — then the writer task ends.
-    fn write_close(
-        &mut self,
-        notice: &ClosingNotice,
-    ) -> impl std::future::Future<Output = Result<(), FrameWriteError>> + Send;
-}
-
-/// One item in a session's bounded outbound queue.
-pub(crate) enum Outbound {
-    /// A regular protocol message.
-    Message(ServerMessage),
-    /// Terminal closing notice; the writer sends it and exits (IPC substitute
-    /// for WebSocket close codes, protocol doc §8).
-    Close(ClosingNotice),
 }
 
 /// How the session ends: silently (peer disappeared) or with a closing
@@ -228,25 +172,6 @@ async fn run_session_inner<R: FrameReader, W: FrameWriter>(
         .is_err()
     {
         writer_task.abort();
-    }
-}
-
-/// Socket-writing half of a session: drains the bounded outbound queue; a
-/// [`Outbound::Close`] item is written and terminates the task.
-async fn run_writer<W: FrameWriter>(mut writer: W, mut rx: mpsc::Receiver<Outbound>) {
-    while let Some(item) = rx.recv().await {
-        let closing = matches!(item, Outbound::Close(_));
-        let written = match &item {
-            Outbound::Message(message) => writer.write_message(message).await,
-            Outbound::Close(notice) => writer.write_close(notice).await,
-        };
-        if let Err(error) = written {
-            debug!(%error, "transport write failed; closing writer");
-            return;
-        }
-        if closing {
-            return;
-        }
     }
 }
 
@@ -832,87 +757,6 @@ async fn sleep_until_opt(deadline: Option<Instant>) {
     }
 }
 
-/// Coalescing throttle state: minimum delivery interval per
-/// `(category, entity)` key with latest-wins pending slots.
-#[derive(Default)]
-struct Throttle {
-    last_sent: HashMap<(EventCategory, Option<Uuid>), Instant>,
-    pending: HashMap<(EventCategory, Option<Uuid>), PendingEvent>,
-}
-
-struct PendingEvent {
-    event: WireEvent,
-    deliver_at: Instant,
-}
-
-/// Outcome of offering an event to the throttle.
-enum ThrottleDecision {
-    /// Deliver this event immediately (first in window or window expired).
-    DeliverNow(WireEvent),
-    /// The event replaced the coalescing slot; flush at `next_deadline()`.
-    Deferred,
-}
-
-impl Throttle {
-    /// Offers an event for throttled delivery.
-    fn offer(
-        &mut self,
-        key: (EventCategory, Option<Uuid>),
-        interval: Duration,
-        event: WireEvent,
-        now: Instant,
-    ) -> ThrottleDecision {
-        match self.last_sent.get(&key) {
-            Some(last) if now < *last + interval => {
-                let deliver_at = *last + interval;
-                let pending = PendingEvent { event, deliver_at };
-                self.pending.insert(key, pending);
-                ThrottleDecision::Deferred
-            }
-            _ => {
-                self.last_sent.insert(key, now);
-                // A stale pending slot holds an older snapshot of the same
-                // entity; the newer event supersedes it.
-                self.pending.remove(&key);
-                ThrottleDecision::DeliverNow(event)
-            }
-        }
-    }
-
-    /// Drains pending events whose deadline has passed, in deadline order.
-    fn take_expired(&mut self, now: Instant) -> Vec<PendingEvent> {
-        let expired: Vec<(EventCategory, Option<Uuid>)> = self
-            .pending
-            .iter()
-            .filter(|(_, pending)| pending.deliver_at <= now)
-            .map(|(key, _)| *key)
-            .collect();
-        let mut drained: Vec<PendingEvent> = expired
-            .into_iter()
-            .filter_map(|key| {
-                let pending = self.pending.remove(&key)?;
-                self.last_sent.insert(key, now);
-                Some(pending)
-            })
-            .collect();
-        drained.sort_by_key(|pending| pending.deliver_at);
-        drained
-    }
-
-    /// The earliest pending flush deadline.
-    fn next_deadline(&self) -> Option<Instant> {
-        self.pending
-            .values()
-            .map(|pending| pending.deliver_at)
-            .min()
-    }
-
-    fn clear(&mut self) {
-        self.last_sent.clear();
-        self.pending.clear();
-    }
-}
-
 /// Per-session event pipeline: subscription set, fan-out receiver, sequence
 /// numbering, and throttle state.
 struct EventPipe {
@@ -921,7 +765,7 @@ struct EventPipe {
     set: SubscriptionSet,
     next_seq: u64,
     throttle: Throttle,
-    overflow_strikes: u32,
+    overflow_strikes: OverflowStrikes,
 }
 
 impl EventPipe {
@@ -932,7 +776,7 @@ impl EventPipe {
             set,
             next_seq: 0,
             throttle: Throttle::default(),
-            overflow_strikes: 0,
+            overflow_strikes: OverflowStrikes::default(),
         }
     }
 
@@ -1024,17 +868,17 @@ impl EventPipe {
         });
         match out_tx.try_send(Outbound::Message(message)) {
             Ok(()) => {
-                self.overflow_strikes = 0;
+                self.overflow_strikes.reset();
                 Ok(())
             }
             Err(mpsc::error::TrySendError::Full(_)) => {
-                self.overflow_strikes += 1;
+                let shed = self.overflow_strikes.strike();
                 warn!(
                     seq,
-                    strikes = self.overflow_strikes,
+                    strikes = self.overflow_strikes.strikes(),
                     "outbound queue full; dropped event"
                 );
-                if self.overflow_strikes >= MAX_OVERFLOW_STRIKES {
+                if shed {
                     Err(SessionExit::notify(
                         CloseCode::SlowConsumer,
                         "persistent outbound overflow",
@@ -1048,39 +892,9 @@ impl EventPipe {
     }
 }
 
-/// Fixed-window inbound request rate limiter (protocol doc §1: 100 req/s,
-/// burst 200; excess → `rate_limited` error responses).
-struct RateLimiter {
-    window_start: Instant,
-    count: u32,
-    burst: u32,
-}
-
-impl RateLimiter {
-    fn new(burst: u32) -> Self {
-        Self {
-            window_start: Instant::now(),
-            count: 0,
-            burst,
-        }
-    }
-
-    /// Whether the request may proceed.
-    fn check(&mut self) -> bool {
-        let now = Instant::now();
-        if now.duration_since(self.window_start) >= Duration::from_secs(1) {
-            self.window_start = now;
-            self.count = 0;
-        }
-        self.count += 1;
-        self.count <= self.burst
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use prismcast_protocol::subscription::EventCategory as Cat;
 
     #[tokio::test]
     async fn distinct_sessions_fork_controller_identity_and_group_ownership() {
@@ -1116,147 +930,5 @@ mod tests {
         first.app.clone().end_transaction().await.unwrap();
         app.shutdown().await;
         task.await.unwrap();
-    }
-
-    fn wire_scene_event(name: &str) -> WireEvent {
-        WireEvent::Scene(prismcast_protocol::event::SceneEvent::Added {
-            scene_id: Uuid::new_v4(),
-            name: name.into(),
-        })
-    }
-
-    fn assert_deliver_now(decision: ThrottleDecision) {
-        assert!(matches!(decision, ThrottleDecision::DeliverNow(_)));
-    }
-
-    fn assert_deferred(decision: ThrottleDecision) {
-        assert!(matches!(decision, ThrottleDecision::Deferred));
-    }
-
-    #[test]
-    fn throttle_delivers_first_event_immediately() {
-        let mut throttle = Throttle::default();
-        let now = Instant::now();
-        let key = (Cat::Scene, Some(Uuid::new_v4()));
-        assert_deliver_now(throttle.offer(
-            key,
-            Duration::from_millis(100),
-            wire_scene_event("a"),
-            now,
-        ));
-        assert!(throttle.next_deadline().is_none());
-    }
-
-    #[test]
-    fn throttle_coalesces_within_window_latest_wins() {
-        let mut throttle = Throttle::default();
-        let now = Instant::now();
-        let key = (Cat::Scene, Some(Uuid::new_v4()));
-        let interval = Duration::from_millis(100);
-        assert_deliver_now(throttle.offer(key, interval, wire_scene_event("first"), now));
-        assert_deferred(throttle.offer(
-            key,
-            interval,
-            wire_scene_event("second"),
-            now + Duration::from_millis(10),
-        ));
-        assert_eq!(throttle.next_deadline(), Some(now + interval));
-        assert_deferred(throttle.offer(
-            key,
-            interval,
-            wire_scene_event("third"),
-            now + Duration::from_millis(20),
-        ));
-        assert_eq!(
-            throttle.next_deadline(),
-            Some(now + interval),
-            "same window, same deadline"
-        );
-
-        // Nothing expires inside the window.
-        assert!(throttle
-            .take_expired(now + Duration::from_millis(50))
-            .is_empty());
-        let expired = throttle.take_expired(now + interval);
-        assert_eq!(expired.len(), 1, "coalesced to a single latest event");
-        assert!(matches!(
-            &expired[0].event,
-            WireEvent::Scene(prismcast_protocol::event::SceneEvent::Added { name, .. }) if name == "third"
-        ));
-        // After flushing at the window's end, the window restarts at the
-        // flush moment (fixed cadence): an event right after is deferred,
-        // one past the new window delivers immediately.
-        assert_deferred(throttle.offer(
-            key,
-            interval,
-            wire_scene_event("fourth"),
-            now + interval + Duration::from_millis(1),
-        ));
-        assert_eq!(throttle.take_expired(now + 2 * interval).len(), 1);
-        // The flush at t = now+2i is itself a delivery; an event a full
-        // window later delivers immediately.
-        assert_deliver_now(throttle.offer(
-            key,
-            interval,
-            wire_scene_event("fifth"),
-            now + 3 * interval,
-        ));
-    }
-
-    #[test]
-    fn throttle_windows_are_per_entity() {
-        let mut throttle = Throttle::default();
-        let now = Instant::now();
-        let interval = Duration::from_millis(100);
-        let a = (Cat::Scene, Some(Uuid::new_v4()));
-        let b = (Cat::Scene, Some(Uuid::new_v4()));
-        assert_deliver_now(throttle.offer(a, interval, wire_scene_event("a1"), now));
-        assert_deliver_now(throttle.offer(b, interval, wire_scene_event("b1"), now));
-        assert_deferred(throttle.offer(
-            a,
-            interval,
-            wire_scene_event("a2"),
-            now + Duration::from_millis(10),
-        ));
-        assert_deferred(throttle.offer(
-            b,
-            interval,
-            wire_scene_event("b2"),
-            now + Duration::from_millis(10),
-        ));
-        assert_eq!(throttle.take_expired(now + interval).len(), 2);
-    }
-
-    #[test]
-    fn entityless_events_throttle_under_their_own_key() {
-        let mut throttle = Throttle::default();
-        let now = Instant::now();
-        let key = (Cat::System, None);
-        let interval = Duration::from_millis(50);
-        assert_deliver_now(throttle.offer(
-            key,
-            interval,
-            WireEvent::System(prismcast_protocol::event::SystemEvent::StudioModeChanged {
-                enabled: true,
-            }),
-            now,
-        ));
-        assert_deferred(throttle.offer(
-            key,
-            interval,
-            WireEvent::System(prismcast_protocol::event::SystemEvent::StudioModeChanged {
-                enabled: false,
-            }),
-            now,
-        ));
-    }
-
-    #[test]
-    fn rate_limiter_allows_burst_then_rejects() {
-        let mut limiter = RateLimiter::new(3);
-        assert!(limiter.check());
-        assert!(limiter.check());
-        assert!(limiter.check());
-        assert!(!limiter.check());
     }
 }
