@@ -389,9 +389,12 @@ pub struct BatchRequest {
     pub request_data: Option<serde_json::Value>,
 }
 
-/// How a batch is executed. Only [`SerialRealtime`](Self::SerialRealtime) is
-/// supported by this adapter; `SerialFrame` (graphics-thread coupling) and
-/// `Parallel` are deferred (OBSWS-002+) and answered with status code 206.
+/// How a batch is executed. All three upstream execution types are
+/// supported (OBSWS-002): [`SerialFrame`](Self::SerialFrame) resolves
+/// `Sleep.sleepFrames` against the active profile's frame rate (wall-clock;
+/// there is no graphics thread to couple to), and
+/// [`Parallel`](Self::Parallel) runs members as tasks with bounded
+/// concurrency, results in request order (see the session module docs).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RequestBatchExecutionType {
     /// Process serially, as fast as possible (wire value 0, the default).
