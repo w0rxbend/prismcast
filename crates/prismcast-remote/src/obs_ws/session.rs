@@ -26,11 +26,14 @@
 //!    `Identify` closes 4008; any other opcode closes 4006.
 //!
 //! Request translation lives in [`super::requests`]: opcode dispatch,
-//! envelope mirroring of `requestType`/`requestId`, serial batch execution
-//! with `haltOnFailure`, and the whole-batch 206 answer for execution types
-//! 1/2 stay here; per-request semantics (name resolution, RequestKind pivot,
-//! status codes) are there. Genuinely unknown request types still get the
-//! typed 204 (`UnknownRequestType`) stub.
+//! envelope mirroring of `requestType`/`requestId`, and batch execution stay
+//! here — serial (`SerialRealtime`/`SerialFrame`, in order, `haltOnFailure`
+//! honored, `Sleep.sleepFrames` resolved against the active profile's frame
+//! rate under `SerialFrame`) and bounded-concurrency `Parallel` (results in
+//! request order, `haltOnFailure` ignored, like upstream); per-request
+//! semantics (name resolution, RequestKind pivot, status codes) are there.
+//! Genuinely unknown request types still get the typed 204
+//! (`UnknownRequestType`) stub.
 //!
 //! obs-websocket defines no backpressure policy (RES-007 weakness 5); this
 //! engine applies Prismcast's: a bounded outbound queue, drop + strike on
@@ -79,6 +82,11 @@ use super::{requests, translate};
 /// protocol's budget (protocol doc §1). obs-websocket has no rate limiting;
 /// excess requests get a typed 702 response instead of a silent drop.
 const REQUEST_BURST: u32 = 200;
+
+/// Maximum in-flight member tasks of a `Parallel` batch (ADR-0021 §d):
+/// bounds core-actor pressure per client without serializing independent
+/// members.
+const PARALLEL_BATCH_MAX_CONCURRENCY: usize = 8;
 
 /// WebSocket close code used when the server shuts down: RFC 6455
 /// `going_away`, matching upstream ("Server stopping.").
@@ -566,18 +574,13 @@ impl Session {
     async fn handle_request(&mut self, request: proto::Request) -> Option<ObsExit> {
         debug!(%self.session_id, request_id = %request.request_id, request_type = %request.request_type, "obs request");
         let outcome = if !self.rate_limiter.check() {
-            requests::RequestOutcome {
-                status: RequestStatus::error(
-                    proto::status::REQUEST_PROCESSING_FAILED,
-                    "request rate limit exceeded",
-                ),
-                data: None,
-            }
+            Self::rate_limited_outcome()
         } else {
             requests::execute(
                 &self.request_context(),
                 &request.request_type,
                 request.request_data.as_ref(),
+                None,
             )
             .await
             .unwrap_or_else(|| requests::RequestOutcome {
@@ -597,11 +600,13 @@ impl Session {
         .await
     }
 
-    /// Executes a batch (op 8). `SerialRealtime` runs serially with
-    /// `haltOnFailure` and bounded `Sleep`; `SerialFrame`/`Parallel` are
-    /// answered with a whole-batch 206 (`UnsupportedRequestBatchExecutionType`)
-    /// — the same "the batch did not run" shape upstream uses for batches it
-    /// refuses (one result per request, or one when `haltOnFailure`).
+    /// Executes a batch (op 8). `SerialRealtime` (0/absent) runs serially
+    /// with `haltOnFailure` and bounded `Sleep`; `SerialFrame` (1) runs the
+    /// same serial loop with `Sleep.sleepFrames` resolved against the active
+    /// profile's frame rate; `Parallel` (2) fans members out on a bounded
+    /// [`tokio::task::JoinSet`] (results in request order, `haltOnFailure`
+    /// ignored — upstream semantics). An out-of-range `executionType` closes
+    /// 4005, like upstream.
     async fn handle_batch(&mut self, batch: proto::RequestBatch) -> Option<ObsExit> {
         debug!(%self.session_id, request_id = %batch.request_id, requests = batch.requests.len(), "obs request batch");
         let execution = match batch.execution_type {
@@ -618,40 +623,10 @@ impl Session {
         };
         let results = match execution {
             proto::RequestBatchExecutionType::SerialRealtime => self.run_serial_batch(&batch).await,
-            proto::RequestBatchExecutionType::SerialFrame
-            | proto::RequestBatchExecutionType::Parallel => {
-                let unsupported = || {
-                    RequestStatus::error(
-                        proto::status::UNSUPPORTED_REQUEST_BATCH_EXECUTION_TYPE,
-                        format!(
-                            "executionType {} ({execution:?}) is not supported by this server",
-                            execution.code()
-                        ),
-                    )
-                };
-                if batch.halt_on_failure {
-                    batch
-                        .requests
-                        .first()
-                        .map(|request| proto::BatchResult {
-                            request_type: request.request_type.clone(),
-                            request_status: unsupported(),
-                            response_data: None,
-                        })
-                        .into_iter()
-                        .collect()
-                } else {
-                    batch
-                        .requests
-                        .iter()
-                        .map(|request| proto::BatchResult {
-                            request_type: request.request_type.clone(),
-                            request_status: unsupported(),
-                            response_data: None,
-                        })
-                        .collect()
-                }
+            proto::RequestBatchExecutionType::SerialFrame => {
+                self.run_serial_frame_batch(&batch).await
             }
+            proto::RequestBatchExecutionType::Parallel => self.run_parallel_batch(&batch).await,
         };
         self.send(proto::envelope(
             op::REQUEST_BATCH_RESPONSE,
@@ -663,25 +638,55 @@ impl Session {
         .await
     }
 
+    /// The outcome for a member refused by the request rate limiter (typed
+    /// 702, never a silent drop).
+    fn rate_limited_outcome() -> requests::RequestOutcome {
+        requests::RequestOutcome {
+            status: RequestStatus::error(
+                proto::status::REQUEST_PROCESSING_FAILED,
+                "request rate limit exceeded",
+            ),
+            data: None,
+        }
+    }
+
     /// Serial batch body: requests run in order through the same translation
     /// path as standalone requests; `haltOnFailure` stops at the first failed
     /// result.
     async fn run_serial_batch(&mut self, batch: &proto::RequestBatch) -> Vec<proto::BatchResult> {
+        self.run_serial(batch, None).await
+    }
+
+    /// `SerialFrame` batch body: identical semantics to the serial-realtime
+    /// batch (in order, `haltOnFailure` honored), except `Sleep.sleepFrames`
+    /// resolves against the active profile's frame rate — there is no
+    /// graphics thread to couple to, so frame timing is a wall-clock
+    /// approximation (documented divergence, ADR-0021 §d).
+    async fn run_serial_frame_batch(
+        &mut self,
+        batch: &proto::RequestBatch,
+    ) -> Vec<proto::BatchResult> {
+        let frame_duration = requests::frame_duration(self.app.snapshot().state());
+        self.run_serial(batch, Some(frame_duration)).await
+    }
+
+    /// Shared serial loop; `frame_duration` is `Some` only under
+    /// `SerialFrame` (see [`requests::execute`]).
+    async fn run_serial(
+        &mut self,
+        batch: &proto::RequestBatch,
+        frame_duration: Option<Duration>,
+    ) -> Vec<proto::BatchResult> {
         let mut results = Vec::with_capacity(batch.requests.len());
         for request in &batch.requests {
             let outcome = if !self.rate_limiter.check() {
-                requests::RequestOutcome {
-                    status: RequestStatus::error(
-                        proto::status::REQUEST_PROCESSING_FAILED,
-                        "request rate limit exceeded",
-                    ),
-                    data: None,
-                }
+                Self::rate_limited_outcome()
             } else {
                 requests::execute(
                     &self.request_context(),
                     &request.request_type,
                     request.request_data.as_ref(),
+                    frame_duration,
                 )
                 .await
                 .unwrap_or_else(|| requests::RequestOutcome {
@@ -700,6 +705,79 @@ impl Session {
             }
         }
         results
+    }
+
+    /// `Parallel` batch body: every member runs in its own task on a bounded
+    /// [`tokio::task::JoinSet`] (at most [`PARALLEL_BATCH_MAX_CONCURRENCY`]
+    /// in flight; spawning the next member awaits a finished one), so a
+    /// `Sleep` member never serializes the batch. The core actor serializes
+    /// commands itself, and upstream defines no ordering between members.
+    /// Results are collected by member index and returned in **request
+    /// order**; `haltOnFailure` is ignored (upstream semantics). One
+    /// rate-limiter token is consumed per member before spawning — an
+    /// exhausted budget answers that member inline with the typed 702.
+    async fn run_parallel_batch(&mut self, batch: &proto::RequestBatch) -> Vec<proto::BatchResult> {
+        let context = requests::OwnedRequestContext {
+            app: self.app.clone(),
+            permissions: self.permissions,
+            item_ids: self.item_ids.clone(),
+        };
+        // One slot per member, filled as member tasks finish (out of order).
+        let mut outcomes: Vec<Option<requests::RequestOutcome>> =
+            (0..batch.requests.len()).map(|_| None).collect();
+        let mut tasks = tokio::task::JoinSet::new();
+        for (index, request) in batch.requests.iter().enumerate() {
+            if !self.rate_limiter.check() {
+                outcomes[index] = Some(Self::rate_limited_outcome());
+                continue;
+            }
+            while tasks.len() >= PARALLEL_BATCH_MAX_CONCURRENCY {
+                let Some(joined) = tasks.join_next().await else {
+                    break;
+                };
+                store_parallel_outcome(joined, &mut outcomes);
+            }
+            let ctx = context.clone();
+            let request_type = request.request_type.clone();
+            let request_data = request.request_data.clone();
+            tasks.spawn(async move {
+                let outcome =
+                    requests::execute(&ctx.as_ref(), &request_type, request_data.as_ref(), None)
+                        .await
+                        .unwrap_or_else(|| requests::RequestOutcome {
+                            status: unknown_request_status(&request_type),
+                            data: None,
+                        });
+                (index, outcome)
+            });
+        }
+        while let Some(joined) = tasks.join_next().await {
+            store_parallel_outcome(joined, &mut outcomes);
+        }
+        batch
+            .requests
+            .iter()
+            .enumerate()
+            .map(|(index, request)| {
+                // A panicked member task leaves its slot empty (logged in
+                // `store_parallel_outcome`); answer it with a typed failure
+                // rather than dropping the result.
+                let outcome = outcomes[index]
+                    .take()
+                    .unwrap_or_else(|| requests::RequestOutcome {
+                        status: RequestStatus::error(
+                            proto::status::REQUEST_PROCESSING_FAILED,
+                            "batch member task failed",
+                        ),
+                        data: None,
+                    });
+                proto::BatchResult {
+                    request_type: request.request_type.clone(),
+                    request_status: outcome.status,
+                    response_data: outcome.data,
+                }
+            })
+            .collect()
     }
 
     /// Enqueues a response; a persistently blocked queue sheds the session
@@ -728,6 +806,19 @@ fn unknown_request_status(request_type: &str) -> RequestStatus {
         proto::status::UNKNOWN_REQUEST_TYPE,
         format!("request type '{request_type}' is not implemented by this server"),
     )
+}
+
+/// Stores one finished `Parallel` member outcome in its request-order slot.
+/// A failed join (member task panicked) is logged; the slot stays empty and
+/// the collector answers it with a typed 702.
+fn store_parallel_outcome(
+    joined: Result<(usize, requests::RequestOutcome), tokio::task::JoinError>,
+    outcomes: &mut [Option<requests::RequestOutcome>],
+) {
+    match joined {
+        Ok((index, outcome)) => outcomes[index] = Some(outcome),
+        Err(error) => warn!(%error, "parallel batch member task failed"),
+    }
 }
 
 /// Per-session event pipeline: the subscription set translated from the obs
