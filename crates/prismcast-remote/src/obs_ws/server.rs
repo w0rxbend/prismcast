@@ -7,12 +7,13 @@
 //! network-transport-requires-a-credential gating.
 //!
 //! - **Subprotocol**: clients offering `Sec-WebSocket-Protocol:
-//!   obswebsocket.json` get it echoed; no subprotocol requested means JSON
-//!   (the obs default). Any other subprotocol set — including
-//!   `obswebsocket.msgpack`, which is deferred (OBSWS-002+) — is refused at
-//!   the HTTP upgrade with a 400. (Upstream accepts anything and defaults to
-//!   JSON; refusing unknown codecs is a deliberate hardening, documented in
-//!   the module docs.)
+//!   obswebsocket.json` get it echoed (JSON wins when both known tags are
+//!   offered); `obswebsocket.msgpack` alone selects MessagePack binary
+//!   frames (OBSWS-002; ADR-0021); no subprotocol requested means JSON (the
+//!   obs default). Any other subprotocol set is refused at the HTTP upgrade
+//!   with a 400. (Upstream accepts anything and defaults to JSON; refusing
+//!   unknown codecs is a deliberate hardening, documented in the module
+//!   docs.)
 //! - **Defaults**: `127.0.0.1:4455` (the obs-websocket default port),
 //!   disabled by default, and [`AuthConfig::AllowLocal`] rejected at
 //!   [`ObsWsServer::bind`] — password (obs's own model) or token (Prismcast
@@ -37,8 +38,9 @@ use prismcast_app::{AppHandle, DEFAULT_SUBSCRIBER_CAPACITY};
 use crate::auth::AuthConfig;
 use crate::server::EventFanout;
 
+use super::codec::ObsCodec;
 use super::names;
-use super::proto::SUBPROTOCOL_JSON;
+use super::proto::{SUBPROTOCOL_JSON, SUBPROTOCOL_MSGPACK};
 use super::session::{run_session, ObsSessionConfig, ObsSessionContext};
 
 /// Default bind address: loopback, the obs-websocket default port 4455.
@@ -264,16 +266,24 @@ fn ws_protocol_config(max_message_size: usize) -> WebSocketConfig {
     config
 }
 
-/// Negotiates the codec subprotocol: echo `obswebsocket.json` when offered;
-/// accept with no subprotocol when none was offered (JSON is the obs
-/// default); refuse the upgrade with HTTP 400 when the client offered only
-/// subprotocols this server does not serve (`obswebsocket.msgpack` is
-/// deferred, OBSWS-002+).
-// The error type is dictated by tungstenite's `AcceptCallback` trait.
+/// Records the negotiated codec in the shared cell (tungstenite's accept
+/// callback cannot return a value, so the codec is captured here and read
+/// after the upgrade completes).
+fn record_codec(negotiated: &Mutex<Option<ObsCodec>>, codec: ObsCodec) {
+    *negotiated.lock().unwrap_or_else(|p| p.into_inner()) = Some(codec);
+}
+
+/// Negotiates the codec subprotocol and records the outcome in `negotiated`.
+/// Priority: `obswebsocket.json` when offered (JSON wins when both known
+/// tags are offered); else `obswebsocket.msgpack` (echoed, MessagePack
+/// binary frames); no header means JSON (the obs default); any other
+/// subprotocol set refuses the upgrade with HTTP 400.
+// The error type is dictated by tungstenite's `Callback` trait.
 #[allow(clippy::result_large_err)]
 fn negotiate_subprotocol(
     request: &Request,
     mut response: Response,
+    negotiated: &Mutex<Option<ObsCodec>>,
 ) -> Result<Response, ErrorResponse> {
     use tokio_tungstenite::tungstenite::http::header::SEC_WEBSOCKET_PROTOCOL;
     let Some(offered) = request
@@ -282,22 +292,34 @@ fn negotiate_subprotocol(
         .and_then(|value| value.to_str().ok())
     else {
         // No subprotocol requested: JSON by default.
+        record_codec(negotiated, ObsCodec::Json);
         return Ok(response);
     };
-    if offered
+    let selected = if offered
         .split(',')
         .any(|token| token.trim() == SUBPROTOCOL_JSON)
     {
+        Some((ObsCodec::Json, SUBPROTOCOL_JSON))
+    } else if offered
+        .split(',')
+        .any(|token| token.trim() == SUBPROTOCOL_MSGPACK)
+    {
+        Some((ObsCodec::MsgPack, SUBPROTOCOL_MSGPACK))
+    } else {
+        None
+    };
+    if let Some((codec, subprotocol)) = selected {
         response.headers_mut().insert(
             SEC_WEBSOCKET_PROTOCOL,
-            HeaderValue::from_static(SUBPROTOCOL_JSON),
+            HeaderValue::from_static(subprotocol),
         );
+        record_codec(negotiated, codec);
         return Ok(response);
     }
     warn!(%offered, "rejecting unsupported obs-websocket subprotocol");
     let mut rejection = ErrorResponse::new(Some(format!(
         "unsupported subprotocol(s) `{offered}`: this server speaks {SUBPROTOCOL_JSON} \
-         (MessagePack is not implemented yet)"
+         and {SUBPROTOCOL_MSGPACK}"
     )));
     *rejection.status_mut() = StatusCode::BAD_REQUEST;
     Err(rejection)
@@ -332,6 +354,9 @@ async fn accept_loop(
                     debug!(connection_id = next_connection, %peer, "accepted connection");
                     let context = ObsSessionContext {
                         config: config.clone(),
+                        // Placeholder: the negotiated codec is known only
+                        // after the upgrade; `upgrade_and_run` overwrites it.
+                        codec: ObsCodec::Json,
                         app: shared.app.clone(),
                         item_ids: shared.item_ids.clone(),
                         fanout: shared.fanout.clone(),
@@ -352,21 +377,33 @@ async fn accept_loop(
 }
 
 /// Performs the HTTP → WebSocket upgrade (with subprotocol negotiation),
-/// then hands the connection to the obs session engine.
+/// then hands the connection to the obs session engine with the negotiated
+/// codec.
+// The closure's error type is dictated by tungstenite's `Callback` trait.
+#[allow(clippy::result_large_err)]
 async fn upgrade_and_run(
     stream: TcpStream,
     websocket_config: WebSocketConfig,
     connection_id: u64,
-    context: ObsSessionContext,
+    mut context: ObsSessionContext,
 ) {
+    let negotiated = Arc::new(Mutex::new(None));
+    let callback_cell = negotiated.clone();
     let upgraded = tokio_tungstenite::accept_hdr_async_with_config(
         stream,
-        negotiate_subprotocol,
+        move |request: &Request, response| negotiate_subprotocol(request, response, &callback_cell),
         Some(websocket_config),
     )
     .await;
     match upgraded {
-        Ok(websocket) => run_session(websocket, connection_id, context).await,
+        Ok(websocket) => {
+            // Every accepted path records a codec; JSON is the fallback.
+            context.codec = negotiated
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .unwrap_or(ObsCodec::Json);
+            run_session(websocket, connection_id, context).await;
+        }
         Err(error) => {
             debug!(%error, "WebSocket upgrade failed; dropping connection");
         }

@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use futures_util::{SinkExt, StreamExt};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::header::SEC_WEBSOCKET_PROTOCOL;
-use tokio_tungstenite::tungstenite::http::{HeaderValue, StatusCode};
+use tokio_tungstenite::tungstenite::http::HeaderValue;
 use tokio_tungstenite::tungstenite::{Error as TungsteniteError, Message, Utf8Bytes};
 use tokio_tungstenite::WebSocketStream;
 
@@ -383,13 +383,16 @@ async fn subprotocol_negotiation() {
     let hello = read_hello(&mut stream).await;
     assert_eq!(hello["d"]["rpcVersion"], 1);
 
-    // MessagePack-only: refused at the upgrade (deferred to OBSWS-002+).
-    match raw::connect_opt(bed.addr, Some("obswebsocket.msgpack")).await {
-        Err(TungsteniteError::Http(response)) => {
-            assert_eq!(response.status(), StatusCode::BAD_REQUEST)
-        }
-        other => panic!("msgpack-only offer must be refused, got {}", other.is_ok()),
-    }
+    // MessagePack-only: accepted and echoed (OBSWS-002; full msgpack
+    // behavior is pinned in tests/obs_ws_msgpack.rs).
+    let (_stream, response) = raw::connect_opt(bed.addr, Some("obswebsocket.msgpack"))
+        .await
+        .expect("msgpack connect");
+    assert_eq!(
+        response.headers().get(SEC_WEBSOCKET_PROTOCOL),
+        Some(&HeaderValue::from_static("obswebsocket.msgpack")),
+        "msgpack subprotocol echoed"
+    );
 
     // An unrelated subprotocol set is refused too.
     let refused = raw::connect_opt(bed.addr, Some("chat, superchat")).await;

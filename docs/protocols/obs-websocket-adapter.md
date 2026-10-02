@@ -18,12 +18,18 @@ adapter defines its own obs-shaped wire types (`obs_ws::proto`, golden-pinned ag
 | Transport | WebSocket over TCP (`ws://`); no TLS yet (WS-003) |
 | Default bind | `127.0.0.1:4455` (the obs-websocket default port, loopback only) |
 | Enabled | **off by default**; requires an explicit credential (password or token) |
-| Codec | JSON text frames only; `Sec-WebSocket-Protocol: obswebsocket.json` is echoed when offered, and no subprotocol means JSON (the obs default) |
-| Message size limit | 1 MiB inbound; larger → close 4002 |
+| Codec | JSON text frames or MessagePack binary frames, negotiated by `Sec-WebSocket-Protocol`: `obswebsocket.json` is echoed when offered (JSON wins when both are offered), `obswebsocket.msgpack` selects MessagePack, and no subprotocol means JSON (the obs default) |
+| Message size limit | 1 MiB inbound raw payload (both codecs); larger → close 4002 |
 
-Offering only unsupported subprotocols — including `obswebsocket.msgpack` (MessagePack is
-**deferred**, OBSWS-002+) — **refuses the HTTP upgrade with 400**. Upstream silently defaults to
-JSON; refusing unknown codecs is deliberate hardening (see §10).
+Both codecs encode the **same** `{op, d}` envelope shape: MessagePack uses struct-as-map encoding
+(string-keyed maps), so every wire type is identical in either codec and the choice is invisible
+above the framing layer. In a MessagePack session **every** protocol frame — Hello, Identified,
+responses, events — is a binary frame; a text frame closes the session with **4002**
+(`MessageDecodeError`), as does a binary frame in a JSON session, an undecodable payload, or
+hostile MessagePack (ext types, garbage bytes).
+
+Offering only unsupported subprotocols **refuses the HTTP upgrade with 400**. Upstream silently
+defaults to JSON; refusing unknown codecs is deliberate hardening (see §10).
 
 The local-trust auth policy (`AuthConfig::AllowLocal`) is rejected at `ObsWsServer::bind` with
 `AuthRequired`, same as the native `WsServer`: a network transport always requires a credential.
@@ -266,7 +272,7 @@ tungstenite clients (handshake matrix, auth, subprotocols, batches, status codes
 
 ## 9. Not implemented (OBSWS-002+)
 
-MessagePack (`obswebsocket.msgpack`), `SerialFrame`/`Parallel` batch execution, meter and other
+`SerialFrame`/`Parallel` batch execution, meter and other
 high-volume event producers (`InputVolumeMeters`, `InputActiveStateChanged`,
 `InputShowStateChanged`, `SceneItemTransformChanged`), filters, screenshots, stats
 (`GetStats`/`GetOutputStats`; output runtime metrics read as zero), vendor and persistent data,
@@ -277,7 +283,8 @@ Unsupported request types get the typed 204, never a silent no-op.
 ## 10. Documented divergences from upstream obs-websocket
 
 - **Subprotocol hardening:** unknown/unsupported subprotocol offers refuse the HTTP upgrade with
-  400 instead of silently defaulting to JSON.
+  400 instead of silently defaulting to JSON; when both known tags are offered, **JSON wins** (a
+  fixed priority, deterministic across clients).
 - **Malformed `d` payloads** close with 4002 (`MessageDecodeError`) where upstream sometimes uses
   the more specific 4003/4004/4005; invalid batch `executionType` values do close with 4005 like
   upstream.
