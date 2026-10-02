@@ -22,17 +22,19 @@
 //!   [`SubscriptionSet`](prismcast_protocol::subscription::SubscriptionSet)
 //!   mapping, and the `eventIntent` bit per native event category.
 //!
-//! ## Foundation-slice scope
+//! ## Slice status
 //!
-//! The handshake (Hello/Identify/Identified with obs close codes), auth via
-//! the shared [`AuthConfig`](crate::AuthConfig) (obs's SHA-256
+//! Real: the handshake (Hello/Identify/Identified with obs close codes), auth
+//! via the shared [`AuthConfig`](crate::AuthConfig) (obs's SHA-256
 //! challenge-response *is* [`crate::auth::challenge_response`]), `Reidentify`
-//! subscription updates, event gating by bitmask, and the RequestBatch
-//! scaffolding (serial execution, `haltOnFailure`, bounded `Sleep`,
-//! whole-batch 206 for `SerialFrame`/`Parallel`) are real. Per-request
-//! translation is the follow-up slice's job: until then every request is
-//! answered with a typed 204 (`UnknownRequestType`), and no domain event is
-//! translated to an obs event ([`translate::event_to_obs`] is a stub).
+//! subscription updates, event gating by bitmask, **domain event → obs event
+//! translation** ([`translate`]: scenes/program/preview, scene items, input
+//! CRUD + mute/volume, output state incl. the stream/record primaries, studio
+//! mode), and the RequestBatch scaffolding (serial execution,
+//! `haltOnFailure`, bounded `Sleep`, whole-batch 206 for
+//! `SerialFrame`/`Parallel`). Per-request translation is the follow-up
+//! slice's job: until then every request is answered with a typed 204
+//! (`UnknownRequestType`).
 //!
 //! ## Documented divergences from upstream obs-websocket
 //!
@@ -50,6 +52,17 @@
 //! - Server shutdown closes with RFC 6455 1001 (`going_away`), like
 //!   upstream's "Server stopping.".
 //! - `obsStudioVersion` is omitted from `Hello` (ADR-0020 §d).
+//! - `OutputStateChanged` (per-output, `outputName`/`outputUuid` addressed)
+//!   is a Prismcast extension event: upstream only has the singleton
+//!   `StreamStateChanged`/`RecordStateChanged`, which are emitted here only
+//!   when the changing output is the designated primary (ADR-0020 §e).
+//! - Event `sceneItemId` values are stable UUID-derived placeholders until
+//!   the request slice's `ItemIdMap` (sequential per-scene integers,
+//!   ADR-0020 §c) is shared with the event path at integration.
+//! - `eventIntent` is obs-exact, but delivery gating uses native event
+//!   categories (bitmask → `SubscriptionSet`, see [`bitmask`]), which are
+//!   coarser: e.g. `CurrentPreviewSceneChanged` is native `System`, so it is
+//!   admitted by the `Config`/`Transitions`/`Ui` bits, not by `Scenes`.
 
 pub mod bitmask;
 pub mod proto;
