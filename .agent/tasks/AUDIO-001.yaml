@@ -25,7 +25,16 @@ acceptance:
 - Deterministic native tests cover real gain/mute, routing/solo, 32 sources, removal/disable and shutdown; app tests cover stale/invalid owner reports and no telemetry snapshot/undo churn
 - Balance, monitoring playback, sync delay, filters, output track delivery and PipeWire audio capture remain explicitly documented follow-ups, not silently claimed implemented
 validation: [just ci, just deny, focused native audio and actor tests, separately recorded GTK display regression]
-status: in_progress
+status: done
 notes:
 - User explicitly requested direct-main development; coordinator commits, agents own disjoint files
 - ADR-0023 must be accepted before implementation
+validation_notes:
+- Combined final just ci passed; 659 workspace tests passed, 12 environment-dependent tests ignored
+- just deny passed; existing duplicate/unmatched warnings only, no new external dependencies
+- Real native stereo gain/RMS/mute, per-bus solo, 32-source slow-consumer lifecycle, terminal failure priority, invalid observation failure and native cleanup tests passed
+- Eight app ingress tests verify owner/revision/source/bounds, watch capacity/invalidation, no snapshot/revision/undo/redo churn and filtering
+- Native real-socket meter opt-in, entity filtering, latest throttling and disabled-source pending cancellation tests passed
+- Real owned-service graph failure clears readings at unchanged revision, no timer retries, next-command recovery and joined cancellation passed
+- Wayland GTK controls, unchanged widget identity, two-route atomic tone deletion and actual application Add-tone/live-meter/repeated-close regressions passed with fatal GTK criticals
+- Full implementation evidence and remaining runtime limits are in docs/testing/audio-mixer.md

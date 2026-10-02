@@ -837,3 +837,26 @@ the one already-integrated local lockfile edit. just ci and just deny passed.
 Details: docs/testing/worktree-reconciliation.md. User explicitly overrides
 branch/worktree workflow: subsequent swarm edits directly on main with
 nonoverlapping file ownership and coordinator-only commits.
+
+2026-10-02 AUDIO-001 — direct-main orchestration
+
+After reconciling all worktree histories, scoped AUDIO-001 and accepted
+ADR-0023. Three agents worked directly on main with disjoint backend,
+domain/app and UI/service ownership; coordinator handled native remote
+translation, integration and commits. Implemented pure bounded mixer plans,
+stereo native tones, gain/mute, per-bus solo and named routes, native terminal
+cleanup, transient revision-authenticated Core meter events, latest watches,
+existing native wire delivery, GTK mixer controls and atomic tone removal.
+No physical capture/playback or output encoding is claimed.
+
+Review fixed stale observations after native failure, cancellation during
+reporting, aggregate F32 gain headroom, malformed native observation handling,
+idle wording, routed-tone deletion and throttle invalidation preserving mixer
+change cadence. Real service failure fixture and production app-window Add
+tone/measurement/repeated-close regression establish recovery and shutdown.
+
+Final combined just ci passed: 659 tests, 12 environment-dependent ignored;
+just deny passed (existing warnings only). Both Wayland GTK regressions pass
+with Cairo/fatal criticals. Implementation: 90d200b. Evidence and runtime
+limits: docs/testing/audio-mixer.md. State/handoff/task/backlog updated; next
+candidate is CAPTURE-004. Full OBS-class application remains under development.

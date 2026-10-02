@@ -1,0 +1,15 @@
+id: INTEGRATE-001
+title: Merge existing worktrees before direct-main swarm development
+goal: Reconcile all auxiliary worktree HEADs into main without replacing already validated implementations or losing local edits.
+depends_on: []
+allowed_scope: [.agent/, docs/testing/worktree-reconciliation.md, git history]
+acceptance:
+- All 41 auxiliary worktree heads are ancestors of main
+- Patch-equivalent cherry-picks and previously reconciled archived alternatives are reviewed and recorded
+- Worktrees, archives and existing local edits remain preserved
+- The resulting main tree passes just ci and just deny and is pushed
+validation: [git ancestry audit, git cherry and range-diff review, just ci, just deny]
+status: done
+notes:
+- User explicitly overrides branch/worktree workflow with direct-main development
+- Merge commit 7e0ff3a ancestry is discoverable via merge(INTEGRATE-001) history; see reconciliation report for evidence

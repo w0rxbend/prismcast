@@ -2,6 +2,11 @@ schema_version: 1
 
 # Priority: lower number = earlier. Status: ready | blocked | in_progress | done.
 tasks:
+  - id: INTEGRATE-001
+    title: Reconcile all existing worktree histories before direct-main development
+    priority: 0
+    depends_on: []
+    status: done
   # --- Research (Phase 0) ---
   - id: RES-001
     title: OBS feature inventory
@@ -219,7 +224,7 @@ tasks:
     title: Audio mixer and meter foundation (unblocks obs meter/stats events)
     priority: 63
     depends_on: [MEDIA-005]
-    status: in_progress
+    status: done
 
   # --- Linux capture (Phase 3, continued) ---
   - id: CAPTURE-004
