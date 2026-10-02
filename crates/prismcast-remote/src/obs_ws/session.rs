@@ -37,6 +37,12 @@
 //! overflow, and session shed after consecutive strikes — closed with 4000
 //! `UnknownReason` since obs has no slow-consumer code (documented
 //! divergence).
+//!
+//! The wire codec ([`super::codec::ObsCodec`], negotiated at the upgrade)
+//! lives exactly at this module's framing boundary: [`run_writer`] encodes
+//! outbound envelopes and [`read_value`] decodes inbound frames. Everything
+//! above — handshake, translation, request dispatch, event gating — works on
+//! `serde_json::Value` envelopes and is codec-agnostic (ADR-0021).
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -64,6 +70,7 @@ use crate::server::EventFanout;
 use crate::session_kit::{OverflowStrikes, RateLimiter};
 
 use super::bitmask;
+use super::codec::ObsCodec;
 use super::names::ItemIdMap;
 use super::proto::{self, op, RequestStatus};
 use super::{requests, translate};
@@ -97,6 +104,8 @@ pub(crate) struct ObsSessionConfig {
 pub(crate) struct ObsSessionContext {
     /// Transport-independent tuning.
     pub config: Arc<ObsSessionConfig>,
+    /// The negotiated wire codec (subprotocol at the upgrade; ADR-0021).
+    pub codec: ObsCodec,
     /// Snapshot reads for event translation (name resolution, primary
     /// output designation) and request dispatch — an `Arc` clone out of a
     /// watch cell, never blocking (PLAN.md §57).
@@ -142,6 +151,7 @@ pub(crate) async fn run_session(
 async fn run_session_inner(stream: WebSocketStream<TcpStream>, context: ObsSessionContext) {
     let ObsSessionContext {
         config,
+        codec,
         app,
         item_ids,
         fanout,
@@ -149,9 +159,9 @@ async fn run_session_inner(stream: WebSocketStream<TcpStream>, context: ObsSessi
     } = context;
     let (writer, mut reader) = stream.split();
     let (out_tx, out_rx) = mpsc::channel::<ObsOutbound>(config.outbound_capacity.max(1));
-    let mut writer_task = tokio::spawn(run_writer(writer, out_rx));
+    let mut writer_task = tokio::spawn(run_writer(writer, out_rx, codec));
 
-    let exit = match handshake(&mut reader, &out_tx, &config).await {
+    let exit = match handshake(&mut reader, &out_tx, &config, codec).await {
         Ok(established) => {
             let session = Session::new(
                 config.clone(),
@@ -162,7 +172,7 @@ async fn run_session_inner(stream: WebSocketStream<TcpStream>, context: ObsSessi
                 established,
             );
             session
-                .steady_state(&mut reader, &mut shutdown, config.max_message_size)
+                .steady_state(&mut reader, &mut shutdown, config.max_message_size, codec)
                 .await
         }
         Err(exit) => exit,
@@ -187,21 +197,19 @@ async fn run_session_inner(stream: WebSocketStream<TcpStream>, context: ObsSessi
     }
 }
 
-/// Socket-writing half of a session: drains the bounded outbound queue; a
-/// close item is written as a WebSocket close frame and terminates the task.
+/// Socket-writing half of a session: drains the bounded outbound queue,
+/// encoding each envelope with the session's negotiated codec; a close item
+/// is written as a WebSocket close frame and terminates the task.
 /// (Mirrors `session_kit::run_writer`, which stays typed to the native
 /// `ServerMessage`/`ClosingNotice`.)
 async fn run_writer(
     mut writer: SplitSink<WebSocketStream<TcpStream>, Message>,
     mut rx: mpsc::Receiver<ObsOutbound>,
+    codec: ObsCodec,
 ) {
     while let Some(item) = rx.recv().await {
         let written = match item {
-            ObsOutbound::Message(value) => {
-                // Serializing a Value is total; a failure here is a bug.
-                let text = value.to_string();
-                writer.send(Message::Text(text.into())).await
-            }
+            ObsOutbound::Message(value) => writer.send(codec.encode(&value)).await,
             ObsOutbound::Close(code, reason) => {
                 let frame = CloseFrame {
                     code: code.into(),
@@ -218,42 +226,48 @@ async fn run_writer(
     }
 }
 
-/// Reads one inbound text frame as a JSON value. `Ok(None)` means the peer
-/// closed cleanly; `Err` maps to a `MessageDecodeError` (4002) close.
+/// Reads one inbound frame as an envelope value, decoded with the session's
+/// negotiated codec. The raw-payload size limit applies to both codecs.
+/// `Ok(None)` means the peer closed cleanly; `Err` maps to a
+/// `MessageDecodeError` (4002) close.
 async fn read_value(
     reader: &mut SplitStream<WebSocketStream<TcpStream>>,
     max_message_size: usize,
+    codec: ObsCodec,
 ) -> Result<Option<serde_json::Value>, ObsExit> {
     loop {
         match reader.next().await {
             None => return Ok(None),
-            Some(Ok(Message::Text(text))) => {
-                if text.len() > max_message_size {
+            Some(Ok(Message::Close(_))) => return Ok(None),
+            Some(Ok(message)) => {
+                // The size limit applies to the raw payload of data frames,
+                // equally in both codecs (ping/pong carry no payload).
+                let payload_len = match &message {
+                    Message::Text(text) => text.len(),
+                    Message::Binary(payload) => payload.len(),
+                    _ => 0,
+                };
+                if payload_len > max_message_size {
                     return Err(ObsExit::close(
                         proto::close::MESSAGE_DECODE_ERROR,
                         format!(
-                            "message payload {} bytes exceeds limit of {max_message_size}",
-                            text.len()
+                            "message payload {payload_len} bytes exceeds limit of {max_message_size}"
                         ),
                     ));
                 }
-                return serde_json::from_str(&text).map(Some).map_err(|e| {
-                    ObsExit::close(
-                        proto::close::MESSAGE_DECODE_ERROR,
-                        format!("unable to decode Json: {e}"),
-                    )
-                });
+                match codec.decode(&message) {
+                    Ok(Some(value)) => return Ok(Some(value)),
+                    // Ping/Pong (answered automatically by tungstenite)
+                    // carry no protocol payload.
+                    Ok(None) => continue,
+                    Err(error) => {
+                        return Err(ObsExit::close(
+                            proto::close::MESSAGE_DECODE_ERROR,
+                            error.close_reason(),
+                        ));
+                    }
+                }
             }
-            Some(Ok(Message::Binary(_))) => {
-                return Err(ObsExit::close(
-                    proto::close::MESSAGE_DECODE_ERROR,
-                    "session encoding is Json, but a binary message was received",
-                ));
-            }
-            Some(Ok(Message::Close(_))) => return Ok(None),
-            // Ping/Pong (answered automatically by tungstenite) carry no
-            // protocol payload.
-            Some(Ok(_)) => continue,
             Some(Err(TungsteniteError::ConnectionClosed))
             | Some(Err(TungsteniteError::AlreadyClosed)) => return Ok(None),
             Some(Err(error)) => {
@@ -280,6 +294,7 @@ async fn handshake(
     reader: &mut SplitStream<WebSocketStream<TcpStream>>,
     out_tx: &mpsc::Sender<ObsOutbound>,
     config: &ObsSessionConfig,
+    codec: ObsCodec,
 ) -> Result<Established, ObsExit> {
     let challenge = config.auth.challenge_for_session();
     let hello = proto::Hello {
@@ -297,7 +312,7 @@ async fn handshake(
 
     let frame = timeout(
         config.handshake_timeout,
-        read_value(reader, config.max_message_size),
+        read_value(reader, config.max_message_size, codec),
     )
     .await
     .map_err(|_| ObsExit::close(proto::close::NOT_IDENTIFIED, "identify timeout"))??;
@@ -448,13 +463,14 @@ impl Session {
         reader: &mut SplitStream<WebSocketStream<TcpStream>>,
         shutdown: &mut watch::Receiver<()>,
         max_message_size: usize,
+        codec: ObsCodec,
     ) -> ObsExit {
         loop {
             tokio::select! {
                 _ = shutdown.changed() => {
                     return ObsExit::close(CLOSE_GOING_AWAY, "server is shutting down");
                 }
-                frame = read_value(reader, max_message_size) => match frame {
+                frame = read_value(reader, max_message_size, codec) => match frame {
                     Ok(Some(value)) => {
                         if let Some(exit) = self.handle_client_value(value).await {
                             return exit;
