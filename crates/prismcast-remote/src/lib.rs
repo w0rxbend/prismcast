@@ -27,6 +27,10 @@
 //!   the 4000+ range. **Disabled by default**; a credential (token or
 //!   password challenge-response, protocol doc §4) is mandatory on this
 //!   network transport ([`WsServerConfig`]).
+//! - **obs-websocket adapter** (OBSWS-001, ADR-0010/ADR-0020): [`obs_ws`]
+//!   serves the obs-websocket 5.x wire protocol on its own port (4455) for
+//!   OBS-ecosystem clients, translating onto the same Core Command/Event
+//!   contract. Also disabled by default.
 //!
 //! Requests map wire `RequestKind`s to `prismcast_core::Command`s or
 //! read-only queries and are dispatched with the session's permissions
@@ -41,6 +45,7 @@ pub mod auth;
 pub mod client;
 pub mod codec;
 pub mod map;
+pub mod obs_ws;
 mod paths;
 mod server;
 mod session;
