@@ -1,10 +1,12 @@
-//! The WebSocket transport (WS-001; PLAN.md §22, protocol doc §1, §8).
+//! The WebSocket transport (WS-001/WS-003; PLAN.md §22, protocol doc §1, §8).
 //!
-//! [`WsServer`] serves the native protocol over `ws://` on a plain
-//! `TcpListener` via `tokio-tungstenite` — no axum (the axum-based web UI
-//! backend is the separate future `prismcast-web` crate), and no TLS yet
-//! (`rustls`-terminated `wss://` is a planned follow-up; until then the
-//! server binds loopback by default and token auth is mandatory).
+//! [`WsServer`] serves the native protocol over `ws://` (plaintext) or
+//! `wss://` (TLS) on a plain `TcpListener` via `tokio-tungstenite` — no axum
+//! (the axum-based web UI backend is the separate future `prismcast-web`
+//! crate). TLS is terminated in-process with rustls (ADR-0022): when
+//! [`WsServerConfig::tls`] is set, the accepted TCP stream is upgraded with a
+//! `tokio-rustls` acceptor (handshake bounded by a timeout, so a plaintext
+//! client on a `wss://` port fails fast) before the WebSocket upgrade.
 //!
 //! - **Framing**: one protocol message per WebSocket text frame, JSON-encoded
 //!   (`ClientMessage`/`ServerMessage`). Binary frames are reserved for the
@@ -27,6 +29,13 @@
 //! local-trust auth policy — a network transport requires a credential
 //! ([`AuthConfig::token`] or [`AuthConfig::password`], PLAN.md §24), unlike
 //! the Unix socket where filesystem permissions gate access.
+//!
+//! ## Bind hardening (ADR-0022 §c)
+//!
+//! [`WsServer::bind`] refuses a **non-loopback bind without TLS**
+//! ([`WsError::TlsRequired`]): exposing the control plane on the network
+//! requires `wss://`. Loopback plaintext stays valid — it is the default
+//! same-machine case.
 
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -34,9 +43,11 @@ use std::time::Duration;
 
 use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
+use tokio_rustls::TlsAcceptor;
 use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, Response};
 use tokio_tungstenite::tungstenite::http::HeaderValue;
 use tokio_tungstenite::tungstenite::protocol::frame::CloseFrame;
@@ -52,6 +63,7 @@ use crate::codec::ClosingNotice;
 use crate::server::EventFanout;
 use crate::session::{run_session, SessionConfig, SessionContext};
 use crate::session_kit::{FrameReadError, FrameReader, FrameWriteError, FrameWriter};
+use crate::tls::{TlsError, WsTlsConfig};
 
 /// The WebSocket subprotocol tag for the JSON codec (protocol doc §1). The
 /// MessagePack subprotocol name `prismcast.msgpack` is reserved but not
@@ -62,9 +74,16 @@ pub const SUBPROTOCOL_JSON: &str = "prismcast.json";
 /// messages close the session with [`CloseCode::MessageDecodeError`](prismcast_protocol::handshake::CloseCode).
 pub const DEFAULT_MAX_MESSAGE_SIZE: usize = 1024 * 1024;
 
-/// Default bind address: loopback only, until TLS exists.
+/// Default bind address: loopback only. Non-loopback binds require TLS
+/// ([`WsError::TlsRequired`], ADR-0022 §c).
 pub const DEFAULT_BIND: SocketAddr =
     SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 4465);
+
+/// Deadline for the TLS handshake on an accepted `wss://` connection. A
+/// plaintext client (or a scanner) on a TLS port must fail fast without
+/// stalling the accept loop — the handshake runs inside the per-connection
+/// task, so this bound only protects that connection's task budget.
+const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Tuning for [`WsServer`]. The default is inert twice over: `enabled` is
 /// `false`, and the placeholder auth policy would be rejected by
@@ -74,8 +93,14 @@ pub const DEFAULT_BIND: SocketAddr =
 pub struct WsServerConfig {
     /// Master switch; nothing binds unless this is `true`.
     pub enabled: bool,
-    /// Address to bind (loopback by default; TLS does not exist yet).
+    /// Address to bind (loopback by default). Non-loopback binds are
+    /// rejected unless [`tls`](Self::tls) is set ([`WsError::TlsRequired`],
+    /// ADR-0022 §c).
     pub bind: SocketAddr,
+    /// Optional server-side TLS: when set, the server speaks `wss://` and
+    /// terminates rustls at the accept loop (ADR-0022). Provided PEM
+    /// certificate/key paths only; there is no self-signed generation.
+    pub tls: Option<WsTlsConfig>,
     /// Authentication policy. Must be [`AuthConfig::Token`] or
     /// [`AuthConfig::Password`]; the local-trust policy is refused on a
     /// network transport.
@@ -100,6 +125,7 @@ impl Default for WsServerConfig {
         Self {
             enabled: false,
             bind: DEFAULT_BIND,
+            tls: None,
             auth: AuthConfig::allow_local(),
             max_message_size: DEFAULT_MAX_MESSAGE_SIZE,
             outbound_capacity: 256,
@@ -140,6 +166,15 @@ pub enum WsError {
          is only valid on the Unix socket"
     )]
     AuthRequired,
+    /// Bind hardening (ADR-0022 §c): a non-loopback bind must terminate TLS.
+    #[error(
+        "WebSocket server requires TLS (WsServerConfig::tls) for non-loopback binds; \
+         plaintext ws:// is only valid on loopback"
+    )]
+    TlsRequired,
+    /// Loading the configured TLS material failed.
+    #[error("TLS configuration error: {0}")]
+    Tls(#[from] TlsError),
 }
 
 /// The running WebSocket server.
@@ -154,9 +189,11 @@ pub struct WsServer {
 impl WsServer {
     /// Binds the listener, starts the accept loop and the event fan-out.
     ///
-    /// Fails with [`WsError::Disabled`] when the config is not enabled, and
-    /// with [`WsError::AuthRequired`] when the auth policy is the local-trust
-    /// policy.
+    /// Fails with [`WsError::Disabled`] when the config is not enabled, with
+    /// [`WsError::AuthRequired`] when the auth policy is the local-trust
+    /// policy, with [`WsError::TlsRequired`] when the bind address is not
+    /// loopback and no TLS is configured, and with [`WsError::Tls`] when the
+    /// configured TLS material fails to load.
     pub async fn bind(app: AppHandle, config: WsServerConfig) -> Result<Self, WsError> {
         if !config.enabled {
             return Err(WsError::Disabled);
@@ -164,9 +201,15 @@ impl WsServer {
         if matches!(config.auth, AuthConfig::AllowLocal { .. }) {
             return Err(WsError::AuthRequired);
         }
+        if !config.bind.ip().is_loopback() && config.tls.is_none() {
+            return Err(WsError::TlsRequired);
+        }
+        // The acceptor is built once per bind; per-connection handshakes
+        // reuse it (ADR-0022 §a).
+        let acceptor = config.tls.as_ref().map(WsTlsConfig::acceptor).transpose()?;
         let listener = TcpListener::bind(config.bind).await?;
         let local_addr = listener.local_addr()?;
-        info!(%local_addr, "WebSocket server listening");
+        info!(%local_addr, tls = acceptor.is_some(), "WebSocket server listening");
 
         let session_config = Arc::new(config.session_config());
         let tuning = WsTuning {
@@ -179,11 +222,14 @@ impl WsServer {
         let accept_task = tokio::spawn(
             accept_loop(
                 listener,
-                app,
-                session_config,
+                acceptor,
+                AcceptShared {
+                    app,
+                    config: session_config,
+                    fanout,
+                    sessions: sessions.clone(),
+                },
                 tuning,
-                fanout,
-                sessions.clone(),
                 shutdown_rx,
             )
             .instrument(info_span!("ws_accept")),
@@ -305,13 +351,20 @@ fn negotiate_subprotocol(
     Ok(response)
 }
 
-async fn accept_loop(
-    listener: TcpListener,
+/// Shared per-server state the accept loop clones into each connection's
+/// [`SessionContext`].
+struct AcceptShared {
     app: AppHandle,
     config: Arc<SessionConfig>,
-    tuning: WsTuning,
     fanout: EventFanout,
     sessions: Arc<Mutex<Vec<JoinHandle<()>>>>,
+}
+
+async fn accept_loop(
+    listener: TcpListener,
+    acceptor: Option<TlsAcceptor>,
+    shared: AcceptShared,
+    tuning: WsTuning,
     mut shutdown: watch::Receiver<()>,
 ) {
     let mut next_connection = 0_u64;
@@ -326,17 +379,17 @@ async fn accept_loop(
                     next_connection += 1;
                     debug!(connection_id = next_connection, %peer, "accepted connection");
                     let context = SessionContext {
-                        app: app.clone(),
-                        config: config.clone(),
-                        fanout: fanout.clone(),
+                        app: shared.app.clone(),
+                        config: shared.config.clone(),
+                        fanout: shared.fanout.clone(),
                         shutdown: shutdown.clone(),
                         transport: "ws",
                     };
                     let handle = tokio::spawn(
-                        upgrade_and_run(stream, tuning, next_connection, context)
+                        upgrade_and_run(stream, acceptor.clone(), tuning, next_connection, context)
                             .instrument(info_span!("ws_upgrade", connection_id = next_connection)),
                     );
-                    let mut guard = sessions.lock().unwrap_or_else(|p| p.into_inner());
+                    let mut guard = shared.sessions.lock().unwrap_or_else(|p| p.into_inner());
                     guard.retain(|h| !h.is_finished());
                     guard.push(handle);
                 }
@@ -346,14 +399,52 @@ async fn accept_loop(
     }
 }
 
-/// Performs the HTTP → WebSocket upgrade, then hands the connection to the
-/// shared session machinery.
+/// Terminates TLS when configured (inside this per-connection task, so a
+/// stalled or plaintext client never blocks the accept loop), then performs
+/// the HTTP → WebSocket upgrade and hands the connection to the shared
+/// session machinery.
 async fn upgrade_and_run(
     stream: TcpStream,
+    acceptor: Option<TlsAcceptor>,
     tuning: WsTuning,
     connection_id: u64,
     context: SessionContext,
 ) {
+    match acceptor {
+        Some(acceptor) => {
+            let accepted =
+                tokio::time::timeout(TLS_HANDSHAKE_TIMEOUT, acceptor.accept(stream)).await;
+            match accepted {
+                Ok(Ok(tls_stream)) => {
+                    run_websocket_session(tls_stream, tuning, connection_id, context).await;
+                }
+                // A plaintext client on a wss:// port lands here: log at
+                // debug and drop; the accept loop keeps serving.
+                Ok(Err(error)) => {
+                    debug!(%error, "TLS handshake failed; dropping connection");
+                }
+                Err(_) => {
+                    debug!(
+                        timeout_ms = TLS_HANDSHAKE_TIMEOUT.as_millis(),
+                        "TLS handshake timed out; dropping connection"
+                    );
+                }
+            }
+        }
+        None => run_websocket_session(stream, tuning, connection_id, context).await,
+    }
+}
+
+/// Performs the HTTP → WebSocket upgrade on a (possibly TLS) stream, then
+/// hands the connection to the shared session machinery.
+async fn run_websocket_session<S>(
+    stream: S,
+    tuning: WsTuning,
+    connection_id: u64,
+    context: SessionContext,
+) where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
     let upgraded = tokio_tungstenite::accept_hdr_async_with_config(
         stream,
         negotiate_subprotocol,
@@ -376,17 +467,20 @@ async fn upgrade_and_run(
     run_session(reader, writer, connection_id, context).await;
 }
 
-type WsStream = WebSocketStream<TcpStream>;
-
 /// WS [`FrameReader`]: one JSON text frame per protocol message. Binary
 /// frames are rejected (the `prismcast.msgpack` subprotocol is reserved,
-/// protocol doc §1); ping/pong is handled by tungstenite.
-struct WsFrameReader {
-    inner: SplitStream<WsStream>,
+/// protocol doc §1); ping/pong is handled by tungstenite. Generic over the
+/// underlying stream so plaintext `TcpStream` and rustls `TlsStream` share
+/// one code path (ADR-0022 §a).
+struct WsFrameReader<S> {
+    inner: SplitStream<WebSocketStream<S>>,
     max_message_size: usize,
 }
 
-impl FrameReader for WsFrameReader {
+impl<S> FrameReader for WsFrameReader<S>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
     async fn read_value(&mut self) -> Result<Option<serde_json::Value>, FrameReadError> {
         loop {
             match self.inner.next().await {
@@ -425,11 +519,14 @@ impl FrameReader for WsFrameReader {
 /// WS [`FrameWriter`]: JSON text frames; the closing notice becomes a
 /// WebSocket close frame carrying the protocol's numeric code (4000+ range,
 /// protocol doc §8).
-struct WsFrameWriter {
-    inner: SplitSink<WsStream, Message>,
+struct WsFrameWriter<S> {
+    inner: SplitSink<WebSocketStream<S>, Message>,
 }
 
-impl FrameWriter for WsFrameWriter {
+impl<S> FrameWriter for WsFrameWriter<S>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
     async fn write_message(
         &mut self,
         message: &prismcast_protocol::message::ServerMessage,
