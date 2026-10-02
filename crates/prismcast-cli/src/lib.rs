@@ -6,6 +6,16 @@
 //! internals and never initializes GTK or GStreamer; it speaks only the
 //! native protocol through [`prismcast_remote::IpcClient`].
 //!
+//! ## Transports
+//!
+//! The default transport is the Unix control socket (`--socket`). `--url
+//! ws(s)://host:port` switches to the WebSocket transport (WS-001/WS-003)
+//! through [`prismcast_remote::WsClient`] — the same protocol, handshake,
+//! and auth, over TCP. For `wss://`, `--tls-ca <PATH>` adds a private CA
+//! bundle on top of the system roots and `--insecure` disables certificate
+//! verification entirely (warn-logged to stderr; diagnostics only). Both
+//! flags are rejected unless the URL uses the `wss://` scheme.
+//!
 //! ## Commands
 //!
 //! - `ping` — handshake + `get_version`.
@@ -39,6 +49,8 @@ use prismcast_protocol::response::ResponseData;
 use prismcast_protocol::subscription::SubscriptionSet;
 use prismcast_remote::client::{ClientAuth, ClientError, IpcClient, IpcClientConfig};
 use prismcast_remote::default_socket_path;
+use prismcast_remote::tls::ClientTlsConfig;
+use prismcast_remote::ws_client::{WsClient, WsClientConfig, WsClientError};
 
 /// Exit code when the CLI could not reach or understand the server.
 pub const EXIT_TRANSPORT_ERROR: u8 = 1;
@@ -57,6 +69,23 @@ pub struct Cli {
     /// (default: $XDG_RUNTIME_DIR/prismcast/control.sock).
     #[arg(long, global = true, value_name = "PATH")]
     pub socket: Option<PathBuf>,
+
+    /// Connect over WebSocket instead of the control socket
+    /// (`ws://host:port` or `wss://host:port`). Conflicts with `--socket`.
+    #[arg(long, global = true, value_name = "URL", conflicts_with = "socket")]
+    pub url: Option<String>,
+
+    /// Extra PEM CA bundle to trust for a `wss://` `--url`
+    /// (private/self-signed deployments). Requires `--url` with a `wss://`
+    /// URL.
+    #[arg(long, global = true, value_name = "PATH", requires = "url")]
+    pub tls_ca: Option<PathBuf>,
+
+    /// Disable TLS certificate verification for a `wss://` `--url`
+    /// (dangerous; diagnostics only — a warning is printed on use).
+    /// Requires `--url` with a `wss://` URL.
+    #[arg(long, global = true, requires = "url")]
+    pub insecure: bool,
 
     /// Machine-readable JSON output.
     #[arg(long, global = true)]
@@ -154,6 +183,20 @@ impl From<ClientError> for CliError {
     }
 }
 
+impl From<WsClientError> for CliError {
+    fn from(error: WsClientError) -> Self {
+        match error {
+            WsClientError::RequestFailed(WireError {
+                code,
+                kind,
+                message,
+                ..
+            }) => Self::Rejected(message, code, kind),
+            other => Self::Transport(other.to_string()),
+        }
+    }
+}
+
 /// Maps the CLI's auth flags onto the client's auth method (WS-002).
 /// `token` and `password` are the already-merged flag/env values; setting
 /// both is a usage error. The error message names the flags, never the
@@ -170,24 +213,144 @@ fn client_auth(token: Option<String>, password: Option<String>) -> Result<Client
     }
 }
 
+/// The connected transport selected by the CLI flags: Unix-socket IPC or
+/// WebSocket (`ws://`/`wss://`). Both clients speak the same protocol with
+/// near-identical APIs, so dispatch is a thin match.
+enum CliClient {
+    Ipc(IpcClient),
+    Ws(WsClient),
+}
+
+impl CliClient {
+    async fn request_data(&mut self, kind: RequestKind) -> Result<ResponseData, CliError> {
+        match self {
+            Self::Ipc(client) => Ok(client.request_data(kind).await?),
+            Self::Ws(client) => Ok(client.request_data(kind).await?),
+        }
+    }
+
+    async fn close(self) {
+        match self {
+            Self::Ipc(client) => client.close().await,
+            Self::Ws(client) => client.close().await,
+        }
+    }
+}
+
+/// The transport selected by the CLI flags, validated before any I/O.
+#[derive(Debug)]
+enum TransportPlan {
+    Ipc {
+        socket: PathBuf,
+    },
+    Ws {
+        url: String,
+        tls: Option<ClientTlsConfig>,
+    },
+}
+
+/// Maps the CLI's transport flags onto a connection plan (WS-003).
+/// `--tls-ca`/`--insecure` are TLS-only: they are rejected unless `--url`
+/// names a `wss://` URL (a `ws://` or IPC server never looks at TLS
+/// material, so silently accepting the flags would imply protection that
+/// does not exist). Clap's `requires = "url"` covers the bare case, but it
+/// is suppressed when `--socket` is present (the required `--url` conflicts
+/// with it), so the rule is enforced here in full. The usage error names the
+/// flags, never values.
+fn transport_plan(cli: &Cli) -> Result<TransportPlan, CliError> {
+    let mut tls_flags = Vec::new();
+    if cli.tls_ca.is_some() {
+        tls_flags.push("--tls-ca");
+    }
+    if cli.insecure {
+        tls_flags.push("--insecure");
+    }
+    let tls_only_on_wss = |is_wss: bool| {
+        if !is_wss && !tls_flags.is_empty() {
+            return Err(CliError::Usage(format!(
+                "{} only apply to a wss:// --url",
+                tls_flags.join(" and ")
+            )));
+        }
+        Ok(())
+    };
+    match &cli.url {
+        None => {
+            tls_only_on_wss(false)?;
+            Ok(TransportPlan::Ipc {
+                socket: cli.socket.clone().unwrap_or_else(default_socket_path),
+            })
+        }
+        Some(url) => {
+            let is_wss = url
+                .split_once("://")
+                .is_some_and(|(scheme, _)| scheme.eq_ignore_ascii_case("wss"));
+            tls_only_on_wss(is_wss)?;
+            let tls = (cli.tls_ca.is_some() || cli.insecure).then(|| ClientTlsConfig {
+                extra_ca_path: cli.tls_ca.clone(),
+                danger_accept_invalid_certs: cli.insecure,
+            });
+            Ok(TransportPlan::Ws {
+                url: url.clone(),
+                tls,
+            })
+        }
+    }
+}
+
+/// Connects according to the plan and performs the protocol handshake.
+async fn connect(plan: &TransportPlan, auth: ClientAuth) -> Result<CliClient, CliError> {
+    let client_info = prismcast_protocol::handshake::ClientInfo {
+        name: "prismcast-cli".to_string(),
+        version: Some(env!("CARGO_PKG_VERSION").to_string()),
+    };
+    match plan {
+        TransportPlan::Ipc { socket } => {
+            let config = IpcClientConfig {
+                auth,
+                // The CLI is a command runner, not an event consumer.
+                subscriptions: Some(SubscriptionSet::none()),
+                client: Some(client_info),
+                ..IpcClientConfig::default()
+            };
+            let client = IpcClient::connect_with(socket, config)
+                .await
+                .map_err(|error| {
+                    CliError::Transport(format!("cannot connect to {}: {error}", socket.display()))
+                })?;
+            Ok(CliClient::Ipc(client))
+        }
+        TransportPlan::Ws { url, tls } => {
+            if tls
+                .as_ref()
+                .is_some_and(|tls| tls.danger_accept_invalid_certs)
+            {
+                eprintln!(
+                    "warning: --insecure disables TLS certificate verification; \
+                     traffic is encrypted but not authenticated"
+                );
+            }
+            let config = WsClientConfig {
+                auth,
+                // The CLI is a command runner, not an event consumer.
+                subscriptions: Some(SubscriptionSet::none()),
+                client: Some(client_info),
+                tls: tls.clone(),
+                ..WsClientConfig::default()
+            };
+            let client = WsClient::connect_url(url, config).await.map_err(|error| {
+                CliError::Transport(format!("cannot connect to {url}: {error}"))
+            })?;
+            Ok(CliClient::Ws(client))
+        }
+    }
+}
+
 /// Runs the parsed CLI to completion.
 pub async fn run(cli: Cli) -> Result<(), CliError> {
-    let socket = cli.socket.unwrap_or_else(default_socket_path);
-    let client_config = IpcClientConfig {
-        auth: client_auth(cli.token, cli.password)?,
-        // The CLI is a command runner, not an event consumer.
-        subscriptions: Some(SubscriptionSet::none()),
-        client: Some(prismcast_protocol::handshake::ClientInfo {
-            name: "prismcast-cli".to_string(),
-            version: Some(env!("CARGO_PKG_VERSION").to_string()),
-        }),
-        ..IpcClientConfig::default()
-    };
-    let mut client = IpcClient::connect_with(&socket, client_config)
-        .await
-        .map_err(|error| {
-            CliError::Transport(format!("cannot connect to {}: {error}", socket.display()))
-        })?;
+    let plan = transport_plan(&cli)?;
+    let auth = client_auth(cli.token, cli.password)?;
+    let mut client = connect(&plan, auth).await?;
 
     match &cli.command {
         Commands::Ping => {
@@ -282,7 +445,7 @@ pub async fn run(cli: Cli) -> Result<(), CliError> {
 }
 
 /// Resolves an exact scene name to its ID.
-async fn resolve_scene_by_name(client: &mut IpcClient, name: &str) -> Result<Uuid, CliError> {
+async fn resolve_scene_by_name(client: &mut CliClient, name: &str) -> Result<Uuid, CliError> {
     match client.request_data(RequestKind::ListScenes).await? {
         ResponseData::SceneList { scenes } => scenes
             .iter()
@@ -370,5 +533,152 @@ mod tests {
         .expect("both flags parse (the conflict is detected in client_auth)");
         assert_eq!(cli.token.as_deref(), Some("tok"));
         assert_eq!(cli.password.as_deref(), Some("pw"));
+    }
+
+    // --- WS-003: WebSocket transport flag matrix ---
+
+    fn parse(args: &[&str]) -> Cli {
+        Cli::try_parse_from(args).expect("args parse")
+    }
+
+    #[test]
+    fn url_conflicts_with_socket() {
+        let result = Cli::try_parse_from([
+            "prismcast-cli",
+            "--socket",
+            "/tmp/control.sock",
+            "--url",
+            "ws://127.0.0.1:4456",
+            "ping",
+        ]);
+        let error = result.expect_err("--url and --socket must conflict");
+        assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn tls_ca_requires_url() {
+        let result = Cli::try_parse_from(["prismcast-cli", "--tls-ca", "/tmp/ca.pem", "ping"]);
+        assert!(result.is_err(), "--tls-ca without --url must not parse");
+    }
+
+    #[test]
+    fn insecure_requires_url() {
+        let result = Cli::try_parse_from(["prismcast-cli", "--insecure", "ping"]);
+        assert!(result.is_err(), "--insecure without --url must not parse");
+    }
+
+    #[test]
+    fn plan_defaults_to_ipc_socket() {
+        let cli = parse(&["prismcast-cli", "ping"]);
+        match transport_plan(&cli).expect("plan") {
+            TransportPlan::Ipc { socket } => assert_eq!(socket, default_socket_path()),
+            other => panic!("expected the IPC plan, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn plan_honours_explicit_socket() {
+        let cli = parse(&["prismcast-cli", "--socket", "/tmp/x.sock", "ping"]);
+        match transport_plan(&cli).expect("plan") {
+            TransportPlan::Ipc { socket } => assert_eq!(socket, PathBuf::from("/tmp/x.sock")),
+            other => panic!("expected the IPC plan, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn plan_ws_plaintext_without_tls() {
+        let cli = parse(&["prismcast-cli", "--url", "ws://127.0.0.1:4456", "ping"]);
+        match transport_plan(&cli).expect("plan") {
+            TransportPlan::Ws { url, tls } => {
+                assert_eq!(url, "ws://127.0.0.1:4456");
+                assert!(tls.is_none(), "plaintext ws:// carries no TLS config");
+            }
+            other => panic!("expected the WS plan, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn plan_wss_defaults_to_native_roots() {
+        let cli = parse(&["prismcast-cli", "--url", "wss://studio.local:4456", "ping"]);
+        match transport_plan(&cli).expect("plan") {
+            TransportPlan::Ws { url, tls } => {
+                assert_eq!(url, "wss://studio.local:4456");
+                assert!(tls.is_none(), "None = platform native root store");
+            }
+            other => panic!("expected the WS plan, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn plan_wss_maps_tls_ca_and_insecure() {
+        let cli = parse(&[
+            "prismcast-cli",
+            "--url",
+            "wss://studio.local:4456",
+            "--tls-ca",
+            "/tmp/ca.pem",
+            "--insecure",
+            "ping",
+        ]);
+        match transport_plan(&cli).expect("plan") {
+            TransportPlan::Ws { tls, .. } => {
+                let tls = tls.expect("tls config");
+                assert_eq!(tls.extra_ca_path, Some(PathBuf::from("/tmp/ca.pem")));
+                assert!(tls.danger_accept_invalid_certs);
+            }
+            other => panic!("expected the WS plan, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tls_ca_with_ws_url_is_a_usage_error_naming_the_flag() {
+        let cli = parse(&[
+            "prismcast-cli",
+            "--url",
+            "ws://127.0.0.1:4456",
+            "--tls-ca",
+            "/tmp/ca.pem",
+            "ping",
+        ]);
+        let error = transport_plan(&cli).expect_err("--tls-ca needs wss://");
+        assert_eq!(error.exit_code(), 2);
+        let message = error.to_string();
+        assert!(message.contains("--tls-ca"), "message: {message}");
+        assert!(message.contains("wss://"), "message: {message}");
+    }
+
+    #[test]
+    fn insecure_with_ws_url_is_a_usage_error_naming_the_flag() {
+        let cli = parse(&[
+            "prismcast-cli",
+            "--url",
+            "ws://127.0.0.1:4456",
+            "--insecure",
+            "ping",
+        ]);
+        let error = transport_plan(&cli).expect_err("--insecure needs wss://");
+        assert_eq!(error.exit_code(), 2);
+        let message = error.to_string();
+        assert!(message.contains("--insecure"), "message: {message}");
+    }
+
+    #[test]
+    fn tls_flags_with_socket_transport_are_a_usage_error() {
+        // clap's requires = "url" is suppressed by the --socket conflict, so
+        // transport_plan enforces the rule: parse succeeds, the plan fails.
+        for tls_args in [&["--tls-ca", "/tmp/ca.pem"][..], &["--insecure"][..]] {
+            let cli = Cli::try_parse_from(
+                ["prismcast-cli", "--socket", "/tmp/control.sock"]
+                    .into_iter()
+                    .chain(tls_args.iter().copied())
+                    .chain(["ping"]),
+            )
+            .expect("args parse (clap's requires is suppressed by --socket)");
+            let error = transport_plan(&cli).expect_err("TLS flags need a wss:// --url");
+            assert_eq!(error.exit_code(), 2);
+            let message = error.to_string();
+            assert!(message.contains(tls_args[0]), "message: {message}");
+            assert!(message.contains("wss://"), "message: {message}");
+        }
     }
 }
