@@ -52,6 +52,12 @@ pub const DEFAULT_BIND: SocketAddr =
 /// (4002).
 pub const DEFAULT_MAX_MESSAGE_SIZE: usize = 1024 * 1024;
 
+/// Capacity of the server-wide custom-event bus (`BroadcastCustomEvent` →
+/// `CustomEvent`, OBSWS-002). Bounded like every other media/control channel;
+/// a session that falls behind drops custom events with a log line (obs has
+/// no resync contract), never a disconnect.
+const CUSTOM_EVENT_CAPACITY: usize = 64;
+
 /// Tuning for [`ObsWsServer`]. The default is inert twice over: `enabled` is
 /// `false`, and the placeholder auth policy would be rejected by
 /// [`ObsWsServer::bind`] — enabling the server requires an explicit
@@ -166,10 +172,15 @@ impl ObsWsServer {
             item_ids.clone(),
         ));
         let sessions: Arc<Mutex<Vec<JoinHandle<()>>>> = Arc::new(Mutex::new(Vec::new()));
+        // Server-wide custom-event bus: `BroadcastCustomEvent` publishes the
+        // payload verbatim; every General-subscribed session relays it as a
+        // `CustomEvent` (originator included).
+        let (custom_events, _) = tokio::sync::broadcast::channel(CUSTOM_EVENT_CAPACITY);
         let shared = SharedServices {
             app,
             fanout,
             item_ids,
+            custom_events,
         };
         let accept_task = tokio::spawn(
             accept_loop(
@@ -325,12 +336,13 @@ fn negotiate_subprotocol(
     Err(rejection)
 }
 
-/// Handles shared by every session: the core handle, the event fan-out, and
-/// the server-wide scene-item ID registry.
+/// Handles shared by every session: the core handle, the event fan-out, the
+/// server-wide scene-item ID registry, and the custom-event bus.
 struct SharedServices {
     app: AppHandle,
     fanout: EventFanout,
     item_ids: Arc<names::ItemIdMap>,
+    custom_events: tokio::sync::broadcast::Sender<serde_json::Value>,
 }
 
 async fn accept_loop(
@@ -360,6 +372,7 @@ async fn accept_loop(
                         app: shared.app.clone(),
                         item_ids: shared.item_ids.clone(),
                         fanout: shared.fanout.clone(),
+                        custom_events: shared.custom_events.clone(),
                         shutdown: shutdown.clone(),
                     };
                     let handle = tokio::spawn(

@@ -94,6 +94,7 @@ are answered with a typed **204** (`UnknownRequestType`), never silently dropped
 |---|---|---|
 | `GetVersion` | — (no core call) | obs-shaped fields; `availableRequests` is drift-guarded (every advertised type dispatches) |
 | `Sleep` | — (local delay) | `sleepMillis` ≤ 50 000; standalone use accepted (upstream: batches only) |
+| `BroadcastCustomEvent` | — (no core call; server-wide broadcast bus) | `eventData` required, must be an object (300/401); every `General`-subscribed session — originator included — receives `CustomEvent` with the payload verbatim |
 | `GetSceneList` | snapshot query | `currentProgramScene*` are `null` when no scene is current; preview fields only in studio mode |
 | `GetCurrentProgramScene` | snapshot query | 600 when no current scene |
 | `SetCurrentProgramScene` | `SetCurrentScene` | by `sceneName` |
@@ -197,6 +198,7 @@ coarser.
 | … output is the record primary | + `RecordStateChanged` | Outputs | + `outputPath: null` (the domain does not model the path yet) |
 | `SystemEvent::StudioModeChanged` | `StudioModeStateChanged` | Ui | `studioModeEnabled` |
 | `SystemEvent::PreviewSceneChanged` | `CurrentPreviewSceneChanged` | Scenes | gated by native `System`, see §4.2 note |
+| — (server-generated: a client's `BroadcastCustomEvent`) | `CustomEvent` | General | `eventData` verbatim from the request; relayed to every `General`-admitting session, originator included |
 
 ¹ `OutputStateChanged` is a **Prismcast extension**: upstream has no per-output state event (its
 outputs are singletons). The singleton events are emitted only when the changing output is the
@@ -333,6 +335,9 @@ Unsupported request types get the typed 204, never a silent no-op.
   bits (see §4.2, e.g. `CurrentPreviewSceneChanged`).
 - **Backpressure** (absent upstream): a bounded outbound queue per session; persistent overflow
   sheds the session with 4000 (`UnknownReason`), since obs defines no slow-consumer code.
+- **The `CustomEvent` bus is bounded** (capacity 64, server-wide): a session that falls behind
+  drops custom events with a log line (obs has no resync contract), exactly like domain-event lag
+  — the session is never killed over a lagged broadcast.
 - **`obsStudioVersion` omitted** from `Hello` (ADR-0020 §d); `obsVersion` in `GetVersion` is the
   compatibility constant `"30.2.0"`, not the real OBS or Prismcast version (§7, ADR-0021).
 - Event `sceneItemId` values are UUID-derived placeholders until the `ItemIdMap` is shared with

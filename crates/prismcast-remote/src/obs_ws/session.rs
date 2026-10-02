@@ -35,6 +35,12 @@
 //! Genuinely unknown request types still get the typed 204
 //! (`UnknownRequestType`) stub.
 //!
+//! `BroadcastCustomEvent` does not touch the core: the request publishes its
+//! `eventData` verbatim onto a server-wide bounded broadcast bus (capacity
+//! 64), and every session whose subscription set admits the native `General`
+//! category relays it as a `CustomEvent` (op 5, `eventIntent` = obs
+//! `General`) — originator included, per upstream semantics.
+//!
 //! obs-websocket defines no backpressure policy (RES-007 weakness 5); this
 //! engine applies Prismcast's: a bounded outbound queue, drop + strike on
 //! overflow, and session shed after consecutive strikes — closed with 4000
@@ -53,7 +59,7 @@ use std::time::Duration;
 use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
 use tokio::net::TcpStream;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{broadcast, mpsc, watch};
 use tokio::time::timeout;
 use tokio_tungstenite::tungstenite::protocol::frame::CloseFrame;
 use tokio_tungstenite::tungstenite::{Error as TungsteniteError, Message};
@@ -65,7 +71,7 @@ use prismcast_app::broadcaster::StreamEvent;
 use prismcast_app::snapshot::AppSnapshot;
 use prismcast_app::{AppHandle, Permissions};
 use prismcast_protocol::handshake::AuthResponse;
-use prismcast_protocol::subscription::SubscriptionSet;
+use prismcast_protocol::subscription::{EventCategory, SubscriptionSet};
 
 use crate::auth::AuthConfig;
 use crate::map;
@@ -122,6 +128,8 @@ pub(crate) struct ObsSessionContext {
     pub item_ids: Arc<ItemIdMap>,
     /// Server-wide event fan-out.
     pub fanout: EventFanout,
+    /// Server-wide custom-event bus (`BroadcastCustomEvent` → `CustomEvent`).
+    pub custom_events: broadcast::Sender<serde_json::Value>,
     /// Shutdown signal from the owning server.
     pub shutdown: watch::Receiver<()>,
 }
@@ -163,6 +171,7 @@ async fn run_session_inner(stream: WebSocketStream<TcpStream>, context: ObsSessi
         app,
         item_ids,
         fanout,
+        custom_events,
         mut shutdown,
     } = context;
     let (writer, mut reader) = stream.split();
@@ -176,6 +185,7 @@ async fn run_session_inner(stream: WebSocketStream<TcpStream>, context: ObsSessi
                 app,
                 item_ids,
                 fanout,
+                custom_events,
                 out_tx.clone(),
                 established,
             );
@@ -426,6 +436,11 @@ struct Session {
     session_id: Uuid,
     permissions: Permissions,
     item_ids: Arc<ItemIdMap>,
+    /// Publish half of the custom-event bus (for `BroadcastCustomEvent`).
+    custom_events_tx: broadcast::Sender<serde_json::Value>,
+    /// Receive half; `None` after the bus closed (it never does while the
+    /// server lives, but the select arm treats it like the fan-out).
+    custom_events_rx: Option<broadcast::Receiver<serde_json::Value>>,
     out_tx: mpsc::Sender<ObsOutbound>,
     events: ObsEventPipe,
     rate_limiter: RateLimiter,
@@ -437,6 +452,7 @@ impl Session {
         app: AppHandle,
         item_ids: Arc<ItemIdMap>,
         fanout: EventFanout,
+        custom_events: broadcast::Sender<serde_json::Value>,
         out_tx: mpsc::Sender<ObsOutbound>,
         established: Established,
     ) -> Self {
@@ -450,6 +466,8 @@ impl Session {
             session_id: established.session_id,
             permissions: map::permissions_to_app(&established.permissions),
             item_ids,
+            custom_events_rx: Some(custom_events.subscribe()),
+            custom_events_tx: custom_events,
             out_tx,
             events,
             rate_limiter: RateLimiter::new(REQUEST_BURST),
@@ -462,6 +480,7 @@ impl Session {
             app: &self.app,
             permissions: self.permissions,
             item_ids: &self.item_ids,
+            custom_events: &self.custom_events_tx,
         }
     }
 
@@ -503,6 +522,17 @@ impl Session {
                         warn!(dropped, "obs session event stream lagged; events were dropped");
                     }
                     StreamItem::Closed => self.events.rx = None,
+                },
+                item = recv_custom_event(&mut self.custom_events_rx) => match item {
+                    StreamItem::Item(payload) => {
+                        if let Err(exit) = self.events.handle_custom_event(payload, &self.out_tx) {
+                            return exit;
+                        }
+                    }
+                    StreamItem::Lagged(dropped) => {
+                        warn!(dropped, "obs session custom-event bus lagged; events were dropped");
+                    }
+                    StreamItem::Closed => self.custom_events_rx = None,
                 },
             }
         }
@@ -721,6 +751,7 @@ impl Session {
             app: self.app.clone(),
             permissions: self.permissions,
             item_ids: self.item_ids.clone(),
+            custom_events: self.custom_events_tx.clone(),
         };
         // One slot per member, filled as member tasks finish (out of order).
         let mut outcomes: Vec<Option<requests::RequestOutcome>> =
@@ -882,43 +913,85 @@ impl ObsEventPipe {
             return Ok(());
         }
         for event in self.translator.event_to_obs(&event, snapshot) {
-            match out_tx.try_send(ObsOutbound::Message(proto::envelope(op::EVENT, &event))) {
-                Ok(()) => self.overflow_strikes.reset(),
-                Err(mpsc::error::TrySendError::Full(_)) => {
-                    let shed = self.overflow_strikes.strike();
-                    warn!(
-                        strikes = self.overflow_strikes.strikes(),
-                        "outbound queue full; dropped obs event"
-                    );
-                    if shed {
-                        return Err(ObsExit::close(
-                            proto::close::UNKNOWN_REASON,
-                            "slow consumer: persistent outbound overflow",
-                        ));
-                    }
+            self.deliver(&event, out_tx)?;
+        }
+        Ok(())
+    }
+
+    /// Delivers one custom event (`BroadcastCustomEvent` → `CustomEvent`,
+    /// OBSWS-002): not a domain-event translation but a server-generated
+    /// relay, so the envelope is built here directly. Gated by the native
+    /// `General` category — the same gate domain events use (the obs
+    /// `General` and `Vendors` bits both map to it, §4.2 of the protocol
+    /// doc); `eventIntent` reports the obs `General` bit, like upstream.
+    fn handle_custom_event(
+        &mut self,
+        payload: serde_json::Value,
+        out_tx: &mpsc::Sender<ObsOutbound>,
+    ) -> Result<(), ObsExit> {
+        if self.set.get(EventCategory::General).is_none() {
+            return Ok(());
+        }
+        let event = proto::Event {
+            event_type: "CustomEvent".to_string(),
+            event_intent: proto::subscription::GENERAL,
+            event_data: Some(payload),
+        };
+        self.deliver(&event, out_tx)
+    }
+
+    /// Enqueues one translated event; on a full outbound queue the event is
+    /// dropped and persistent overflow sheds the session (obs has no
+    /// slow-consumer code: 4000 `UnknownReason`).
+    fn deliver(
+        &mut self,
+        event: &proto::Event,
+        out_tx: &mpsc::Sender<ObsOutbound>,
+    ) -> Result<(), ObsExit> {
+        match out_tx.try_send(ObsOutbound::Message(proto::envelope(op::EVENT, event))) {
+            Ok(()) => self.overflow_strikes.reset(),
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                let shed = self.overflow_strikes.strike();
+                warn!(
+                    strikes = self.overflow_strikes.strikes(),
+                    "outbound queue full; dropped obs event"
+                );
+                if shed {
+                    return Err(ObsExit::close(
+                        proto::close::UNKNOWN_REASON,
+                        "slow consumer: persistent outbound overflow",
+                    ));
                 }
-                Err(mpsc::error::TrySendError::Closed(_)) => return Err(ObsExit::Silent),
             }
+            Err(mpsc::error::TrySendError::Closed(_)) => return Err(ObsExit::Silent),
         }
         Ok(())
     }
 }
 
-/// Result of awaiting the session's event receiver.
-enum StreamItem {
-    Item(StreamEvent),
+/// Result of awaiting one of the session's broadcast receivers.
+enum StreamItem<T> {
+    Item(T),
     Lagged(u64),
     Closed,
 }
 
-async fn recv_event(rx: &mut Option<tokio::sync::broadcast::Receiver<StreamEvent>>) -> StreamItem {
+async fn recv_event(rx: &mut Option<broadcast::Receiver<StreamEvent>>) -> StreamItem<StreamEvent> {
+    recv_broadcast(rx).await
+}
+
+async fn recv_custom_event(
+    rx: &mut Option<broadcast::Receiver<serde_json::Value>>,
+) -> StreamItem<serde_json::Value> {
+    recv_broadcast(rx).await
+}
+
+async fn recv_broadcast<T: Clone>(rx: &mut Option<broadcast::Receiver<T>>) -> StreamItem<T> {
     match rx {
         Some(rx) => match rx.recv().await {
             Ok(item) => StreamItem::Item(item),
-            Err(tokio::sync::broadcast::error::RecvError::Lagged(dropped)) => {
-                StreamItem::Lagged(dropped)
-            }
-            Err(tokio::sync::broadcast::error::RecvError::Closed) => StreamItem::Closed,
+            Err(broadcast::error::RecvError::Lagged(dropped)) => StreamItem::Lagged(dropped),
+            Err(broadcast::error::RecvError::Closed) => StreamItem::Closed,
         },
         None => std::future::pending().await,
     }

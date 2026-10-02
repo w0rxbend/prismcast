@@ -80,6 +80,7 @@ const MAX_SLEEP_MILLIS: u64 = 50_000;
 /// `tests/obs_ws_requests.rs` (every entry must dispatch to a non-204
 /// answer through the real socket path).
 pub(crate) const AVAILABLE_REQUESTS: &[&str] = &[
+    "BroadcastCustomEvent",
     "CreateScene",
     "CreateSceneItem",
     "GetCurrentPreviewScene",
@@ -125,7 +126,8 @@ pub(crate) const AVAILABLE_REQUESTS: &[&str] = &[
 ];
 
 /// Everything a request translation needs: the core handle, the session's
-/// authenticated permissions, and the server-wide scene-item ID registry.
+/// authenticated permissions, the server-wide scene-item ID registry, and
+/// the custom-event bus.
 pub(crate) struct RequestContext<'a> {
     /// The application core.
     pub app: &'a AppHandle,
@@ -133,6 +135,8 @@ pub(crate) struct RequestContext<'a> {
     pub permissions: Permissions,
     /// Shared `sceneItemId` registry.
     pub item_ids: &'a ItemIdMap,
+    /// Server-wide custom-event bus (`BroadcastCustomEvent`).
+    pub custom_events: &'a tokio::sync::broadcast::Sender<Value>,
 }
 
 /// An owned, `Send`-able [`RequestContext`] for `Parallel` batch member
@@ -146,6 +150,8 @@ pub(crate) struct OwnedRequestContext {
     pub permissions: Permissions,
     /// Shared `sceneItemId` registry.
     pub item_ids: Arc<ItemIdMap>,
+    /// Server-wide custom-event bus (`BroadcastCustomEvent`).
+    pub custom_events: tokio::sync::broadcast::Sender<Value>,
 }
 
 impl OwnedRequestContext {
@@ -155,6 +161,7 @@ impl OwnedRequestContext {
             app: &self.app,
             permissions: self.permissions,
             item_ids: &self.item_ids,
+            custom_events: &self.custom_events,
         }
     }
 }
@@ -185,6 +192,7 @@ pub(crate) async fn execute(
     let result = match request_type {
         "GetVersion" => get_version(),
         "Sleep" => execute_sleep(request_data, frame_duration).await,
+        "BroadcastCustomEvent" => broadcast_custom_event(ctx, request_data),
         // Scenes
         "GetSceneList" => get_scene_list(ctx),
         "GetCurrentProgramScene" => get_current_program_scene(ctx),
@@ -533,6 +541,21 @@ async fn execute_sleep(data: Option<&Value>, frame_duration: Option<Duration>) -
         }
         (None, None) => Err(missing("sleepMillis")),
     }
+}
+
+// --- custom events (server-generated relay, OBSWS-002) ---
+
+/// `BroadcastCustomEvent`: publishes `eventData` verbatim onto the
+/// server-wide custom-event bus. Every session subscribed to `General`
+/// (including the originator) relays it as a `CustomEvent` — upstream
+/// models this as a pure client-to-clients relay with no core involvement,
+/// so no permission beyond an identified session is required.
+fn broadcast_custom_event(ctx: &RequestContext<'_>, data: Option<&Value>) -> Handler {
+    let event_data = req_object(data, "eventData")?;
+    // `send` fails only when no receiver exists; an empty audience is still
+    // a successful broadcast (upstream answers success unconditionally).
+    let _ = ctx.custom_events.send(event_data.clone());
+    Ok(None)
 }
 
 // --- scenes ---
