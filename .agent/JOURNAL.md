@@ -826,3 +826,14 @@ main tree. 188+ prismcast-remote tests, 37 prismcast-cli tests, deny clean
 exists (verified); AUDIO-001 is the unblock. Next candidates: AUDIO-001
 (mixer/meters) or CAPTURE-004 (PipeWire audio capture). CAPTURE-002 picker
 retry still awaits user coordination.
+
+2026-10-02 INTEGRATE-001
+
+At user request, audited all 41 auxiliary worktrees and merged the remaining
+14 histories into main. Verified every worktree HEAD is reachable from main.
+Retained validated implementations for patch-equivalent cherry-picks and
+previously reconciled paused-agent work; preserved all worktrees/history and
+the one already-integrated local lockfile edit. just ci and just deny passed.
+Details: docs/testing/worktree-reconciliation.md. User explicitly overrides
+branch/worktree workflow: subsequent swarm edits directly on main with
+nonoverlapping file ownership and coordinator-only commits.
