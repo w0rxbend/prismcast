@@ -754,3 +754,36 @@ missing auth rejected with 4009, no secret leakage on stderr). Protocol golden
 tripwire intact. No live/external validation required; auth is localhost-scope
 and non-constant-time comparison is documented. Next candidates: OBSWS-001
 obs-websocket adapter (ADR-0010, now unblocked) or WS-003 TLS wss://.
+
+OBSWS-001 obs-websocket 5.x compatibility adapter integrated on
+agent/OBSWS-001 via four worktree waves under kimi-code orchestration
+(foundation; requests + events in parallel; ID reconciliation + conformance/
+docs in parallel). ADR-0020 records placement (obs_ws module inside
+prismcast-remote), the RequestKind pivot, stateless name resolution with a
+stateful eviction-tracked ItemIdMap, advertisement policy and primary-output
+singletons. session_kit extraction was behavior-neutral as its own commit.
+The adapter speaks obs 5.x {op,d} envelopes on a second WS server (default
+127.0.0.1:4455, disabled by default, obswebsocket.json subprotocol only),
+reuses WS-002 challenge-response verbatim, maps the event bitmask to native
+SubscriptionSet, executes serial batches with haltOnFailure and bounded
+Sleep, and answers unsupported surface with typed status codes. 43 requests
+pivot through map::command_from_wire with authenticated permissions; domain
+events translate through a per-session memoized EventTranslator seeded on
+identify/reidentify. Conformance against the real obws 0.15 client passes
+(RES-007's maintenance open question resolves: usable); it caught an
+upstream-incompatible response field (inputMuted), fixed without alias.
+Merge-era lesson: the events slice going live broke stub-era request tests;
+the harness now skips interleaved op-5 frames like a real client. ItemIdMap
+eviction is eager on request-driven removals, so event translation resolves
+IDs memo-first.
+
+Validation: just ci green on the integrated branch including deny (obws dep
+tree admitted). 158+ remote tests green including real-socket handshake
+matrix, request families, event gating, request/event ID cross-consistency
+and obws conformance. Native protocol schema untouched; golden tripwires
+green. obsVersion reports the crate version, so obws needs
+skip_studio_version_check (OBSWS-002 consideration). Deferred to OBSWS-002+:
+MessagePack, SerialFrame/Parallel, meters, filters, screenshots, stats,
+vendor/persistent data, media control, virtualcam/replay, UI requests.
+Next candidates: OBSWS-002 or WS-003 TLS; CAPTURE-002 picker retry still
+awaits user coordination.

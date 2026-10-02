@@ -888,7 +888,7 @@ async fn input_family_mute_volume_name() {
         Some(serde_json::json!({"inputName": "cam"})),
     )
     .await;
-    assert_eq!(d["responseData"]["inputMutedToggled"], false);
+    assert_eq!(d["responseData"]["inputMuted"], false);
     assert!(
         !bed.app
             .snapshot()

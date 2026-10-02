@@ -109,7 +109,7 @@ are answered with a typed **204** (`UnknownRequestType`), never silently dropped
 | `GetInputList` | snapshot query | scenes-as-sources excluded (upstream parity); `inputKind` filter honored |
 | `GetInputMute` | snapshot query | mixer state |
 | `SetInputMute` | `SetSourceMuted` | |
-| `ToggleInputMute` | `SetSourceMuted` (inverted) | `responseData.inputMuted` (+ `inputMutedToggled` alias, §10) |
+| `ToggleInputMute` | `SetSourceMuted` (inverted) | `responseData.inputMuted` |
 | `GetInputVolume` | snapshot query | both `inputVolumeMul` and `inputVolumeDb` |
 | `SetInputVolume` | `SetSourceVolume` | `inputVolumeMul` preferred when both are given (upstream parity); `mul` 0 → −100 dB |
 | `SetInputName` | `RenameSource` | 601 on duplicate name |
@@ -295,9 +295,6 @@ Unsupported request types get the typed 204, never a silent no-op.
   gains.
 - **`Sleep` is accepted standalone** (upstream registers it for batches only), keeping
   `availableRequests` truthful.
-- **`ToggleInputMute`'s response** carries `inputMutedToggled` in addition to upstream's
-  `inputMuted` (alias kept for the adapter's initial clients; found by the `obws` conformance
-  test, which reads `inputMuted`).
 - **Adapter-specific `inputKind`/`outputKind` strings** (`color_source`, `v4l2_input`,
   `pipewire_display_capture`, `rtmp_output`, `recording_output`, …; `prismcast_*` for kinds with no
   OBS counterpart in events): there is no OBS plugin registry behind them; `unversionedInputKind`

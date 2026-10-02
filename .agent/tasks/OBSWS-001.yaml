@@ -35,7 +35,14 @@ validation:
 - cargo test -p prismcast-remote
 - cargo clippy --workspace --all-targets -- -D warnings
 - just deny
-status: ready
+status: done
+
+validation_notes:
+- Combined just ci passed on the integrated branch (fmt/clippy -D warnings/workspace tests/deny)
+- 158+ remote tests green: golden serde fixtures, handshake/close-code matrix, bitmask gating, request families over real sockets, event translation, request/event sceneItemId cross-consistency, 4 obws 0.15 conformance tests (version, 4009, scene list/program switch, mute toggle)
+- Conformance caught and fixed an upstream-incompatible response field (inputMuted)
+- Merge-era lesson: event slice going live broke stub-era request tests; harness now skips interleaved op-5 events like a real client
+- obws connects with DangerousConnectConfig::skip_studio_version_check because obsVersion reports the crate version; OBS-shaped advertisement is an OBSWS-002 consideration
 
 notes:
 - prismcast-protocol is OUT of scope: the adapter defines its own obs-shaped wire types; native protocol schema untouched (golden tripwire must stay green)

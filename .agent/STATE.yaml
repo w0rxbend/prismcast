@@ -46,11 +46,11 @@ completed:
 - CAPTURE-002
 - CAPTURE-003
 - WS-002
-in_progress:
 - OBSWS-001
+in_progress: []
 blocked: []
 next_candidates:
-- OBSWS-001
+- OBSWS-002
 - WS-003
 decisions:
 - ADR-0001
@@ -72,6 +72,7 @@ decisions:
 - ADR-0017
 - ADR-0018
 - ADR-0019
+- ADR-0020
 verification:
   cargo_fmt: pass
   cargo_clippy: pass
@@ -84,6 +85,7 @@ verification:
   v4l2_discovery: live_enumeration_pass_show_all_devices_required
   ws_auth: challenge_response_ws_ipc_integration_pass
   cli_auth: password_token_e2e_real_socket_pass
+  obs_websocket: obws_0_15_conformance_pass
 last_agent:
   model: kimi-code
   session: capture-003-orchestration
@@ -111,6 +113,7 @@ open_questions:
 - Broadcaster unsubscribe API missing; server-wide fanout workaround remains (IPC-001/WS-002)
 - Meter event producer absent (media/audio layer); throttling machinery exists but is unexercised against real load
 - TLS wss:// and non-loopback bind deferred to WS-003; msgpack subprotocol reserved but unimplemented
-- obs-websocket 5.x compatibility adapter deferred to OBSWS-001 (ADR-0010; last prerequisite was WS-002 auth)
+- obs-websocket adapter MVP shipped (OBSWS-001); OBSWS-002+ defers MessagePack, SerialFrame/Parallel batches, meters, filters, screenshots, stats, vendor/persistent data, media control, virtualcam/replay
+- GetVersion reports crate version as obsVersion; obws's default studio-version gate needs skip_studio_version_check — consider OBS-shaped version advertisement in OBSWS-002
 implementation_access:
   ultracode: dynamic agent orchestration (user clarified); available
