@@ -1,7 +1,7 @@
 schema_version: 1
 project_phase: phase-3-linux-capture
 head_commit: 90d200b
-current_objective: Scope CAPTURE-004 PipeWire audio input/output/application capture against the AUDIO-001 graph; preserve direct-main swarm ownership preference
+current_objective: Implement CAPTURE-004 command-authorized PipeWire audio capture with disjoint swarm ownership directly on main
 completed:
 - RESUME-001
 - SKILL-001
@@ -51,7 +51,7 @@ completed:
 - WS-003
 - INTEGRATE-001
 - AUDIO-001
-in_progress: []
+in_progress: [CAPTURE-004]
 blocked: []
 next_candidates:
 - CAPTURE-004
@@ -79,6 +79,7 @@ decisions:
 - ADR-0021
 - ADR-0022
 - ADR-0023
+- ADR-0024
 verification:
   cargo_fmt: pass
   cargo_clippy: pass

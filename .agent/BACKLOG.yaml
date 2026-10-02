@@ -230,5 +230,5 @@ tasks:
   - id: CAPTURE-004
     title: PipeWire audio input/output/application capture
     priority: 64
-    depends_on: [CAPTURE-001]
-    status: ready
+    depends_on: [CAPTURE-001, AUDIO-001]
+    status: in_progress

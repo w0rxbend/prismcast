@@ -1,0 +1,36 @@
+id: CAPTURE-004
+title: Command-authorized PipeWire input, sink monitor and application audio
+goal: Capture selected PipeWire audio nodes through transient Core authorization and the bounded native mixer, exposing actual levels and lifecycle to GTK and native controllers.
+depends_on: [CAPTURE-001, AUDIO-001]
+allowed_scope:
+- crates/prismcast-core/
+- crates/prismcast-app/
+- crates/prismcast-capture/
+- crates/prismcast-media-gst/
+- crates/prismcast-preview/
+- crates/prismcast-ui/
+- crates/prismcast-remote/tests/
+- docs/adr/
+- docs/research/
+- docs/testing/
+- Cargo.toml
+- Cargo.lock
+acceptance:
+- Versioned bounded advisory node-name settings distinguish microphone input, sink monitor and one application playback stream; unsupported versions, unknown fields, invalid targets and kind/mode mismatches fail explicitly
+- Read-only bounded target discovery and exact class/name resolution use installed PipeWire facilities; serials and capture grants are never persisted
+- Existing AuthorizeSourceCapture routes frozen generation/settings effects to a bounded AudioOwner receiver, preserving video owner isolation and permission checks
+- SourceRuntime Active accepts no video dimensions for audio; owner/generation/revision checks reject stale status and measurements
+- Restore, enable and gain/routing changes never authorize capture; settings change, disable/removal, owner loss and generation replacement revoke existing grants
+- Native pipewiresrc selects exact granted object.serial, uses sink-monitor semantics only for output mode, bounds buffers and prevents reconnection/default fallback; graph rebuilds reject replaced identities
+- Active follows genuine measurements; terminal errors stop the graph, clear readings and require explicit authorization to reopen physical audio
+- Shared runtime retention is capped at eight entries, with atomic oldest-terminal retirement and no eviction of live captures; total mixer remains bounded at 32 sources/eight buses
+- GTK offers asynchronous target selection and separate command-driven Start/Retry, status/error presentation, gain/mute/solo and atomic all-route removal without media logic
+- Real isolated PipeWire input, sink monitor and application stream tests establish measured capture, gain/mute and teardown; deterministic app/service tests establish consent/invalidation/failure and stale-generation protection
+- Native socket tests cover audio runtime and generation-bound meter delivery/invalidation using the unchanged protocol shape
+- Hardware capture, sandbox permissions, aggregate application capture, monitoring/playback and encoded output remain clearly documented limits
+validation: [just ci, just deny, focused authorization and service lifecycle tests, isolated real PipeWire capture fixture, separately recorded Wayland GTK regression]
+status: in_progress
+notes:
+- ADR-0024 accepted before implementation
+- User explicitly requested direct-main swarm development; agents own disjoint files and coordinator commits/pushes
+- Core/app ownership audio_integration_scope; capture/native ownership audio_research; service/UI ownership worktree_audit; coordinator owns task/state/docs and native socket regression
