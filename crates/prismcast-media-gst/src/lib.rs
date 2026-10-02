@@ -82,3 +82,5 @@ pub use test_pattern::{
 };
 pub mod compositor;
 pub use compositor::GstCompositor;
+pub mod audio;
+pub use audio::GstAudioMixer;

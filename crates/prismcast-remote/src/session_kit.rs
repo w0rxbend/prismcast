@@ -221,6 +221,19 @@ impl Throttle {
         self.last_sent.clear();
         self.pending.clear();
     }
+
+    /// Discards older measurements while preserving the delivery cadence.
+    pub(crate) fn invalidate_meters(&mut self) {
+        self.pending
+            .retain(|(category, _), _| *category != EventCategory::Meter);
+    }
+
+    /// Retires a source's meter window when its producer lifecycle ends.
+    pub(crate) fn retire_meter(&mut self, source_id: Uuid) {
+        let key = (EventCategory::Meter, Some(source_id));
+        self.last_sent.remove(&key);
+        self.pending.remove(&key);
+    }
 }
 
 /// Fixed-window inbound request rate limiter (protocol doc §1: 100 req/s,
@@ -388,6 +401,41 @@ mod tests {
             }),
             now,
         ));
+    }
+
+    #[test]
+    fn configuration_change_discards_meter_slots_and_preserves_control_throttle() {
+        let mut throttle = Throttle::default();
+        let now = Instant::now();
+        let interval = Duration::from_millis(100);
+        let source_id = Uuid::new_v4();
+        let meter_key = (Cat::Meter, Some(source_id));
+        let meter = WireEvent::Meter(prismcast_protocol::event::MeterEvent::Levels {
+            source_id,
+            peak_dbfs: vec![-6.0; 2],
+            rms_dbfs: vec![-9.0; 2],
+        });
+        throttle.offer(meter_key, interval, meter.clone(), now);
+        throttle.offer(meter_key, interval, meter, now);
+        let scene_key = (Cat::Scene, Some(Uuid::new_v4()));
+        throttle.offer(scene_key, interval, wire_scene_event("first"), now);
+        throttle.offer(scene_key, interval, wire_scene_event("pending"), now);
+        throttle.invalidate_meters();
+        assert!(throttle.last_sent.contains_key(&meter_key));
+        assert!(!throttle.pending.contains_key(&meter_key));
+        assert!(throttle.last_sent.contains_key(&scene_key));
+        assert_eq!(throttle.take_expired(now + interval).len(), 1);
+        // Configuration changes discard pending telemetry, but cannot bypass
+        // the client's requested minimum delivery interval.
+        let meter = WireEvent::Meter(prismcast_protocol::event::MeterEvent::Levels {
+            source_id,
+            peak_dbfs: vec![-12.0; 2],
+            rms_dbfs: vec![-15.0; 2],
+        });
+        assert_deferred(throttle.offer(meter_key, interval, meter, now));
+        throttle.retire_meter(source_id);
+        assert!(!throttle.last_sent.contains_key(&meter_key));
+        assert!(!throttle.pending.contains_key(&meter_key));
     }
 
     #[test]

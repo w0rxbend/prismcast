@@ -3,6 +3,7 @@
 //! carry user intents up to the root component, which alone talks to the
 //! core (AGENTS.md: no media/domain logic in Relm4 components).
 
+pub mod audio;
 pub mod outputs;
 pub mod scenes;
 pub mod sources;

@@ -22,7 +22,7 @@
 //! | `Vendors` | `General` |
 //! | `Ui` | `System` |
 //! | `Canvases` | — (no native equivalent; accepted, inert) |
-//! | `InputVolumeMeters` | `Meter` (inert until meter producers exist) |
+//! | `InputVolumeMeters` | `Meter` (OBS translation deferred; native telemetry is available) |
 //! | `InputActiveStateChanged`, `InputShowStateChanged`, `SceneItemTransformChanged` | — (high-volume; accepted, inert without producers) |
 //!
 //! Inert bits are accepted silently (subscribing is not an error); they

@@ -200,9 +200,12 @@ Semantics (RES-007 conclusion 7):
   "scene_id":"11111111-1111-4111-8111-111111111111","name":"Main"}}
 ```
 
-`WireEvent` mirrors `prismcast_core::Event` variant-for-variant (domains `scene`, `source`,
-`audio`, `output`, `system`) plus a `meter` domain for high-volume media-layer telemetry
-(`levels` with per-channel `peak_dbfs`/`rms_dbfs`), which has no domain-store counterpart.
+`WireEvent` mirrors `prismcast_core::Event` (domains `scene`, `source`,
+`audio`, `output`, `system`, `meter`). Meter levels are transient observations
+with per-channel `peak_dbfs`/`rms_dbfs`, outside persisted state and undo history.
+AUDIO-001 produces post-gain/mute levels for explicit diagnostic audio sources;
+see [audio mixer verification](../testing/audio-mixer.md). Meter delivery
+requires opt-in and uses the existing source filtering and throttling rules.
 
 ### Subscriptions
 

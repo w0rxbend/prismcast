@@ -1,9 +1,9 @@
 //! The [`Event`] enum: every state change, strongly typed (PLAN.md §58).
 //!
-//! Events are notifications of committed changes produced by
-//! [`crate::state::apply`], not a storage format (ADR-0005). There is exactly
-//! one event hierarchy; GTK, WebSocket, IPC, CLI, and the web UI all consume
-//! the same variants.
+//! Events notify committed changes produced by [`crate::state::apply`] and
+//! transient media observations accepted by the application actor; they are
+//! not a storage format (ADR-0005, ADR-0023). There is exactly one event
+//! hierarchy; GTK, WebSocket, IPC, CLI, and the web UI consume the same variants.
 
 use serde::{Deserialize, Serialize};
 
@@ -15,7 +15,7 @@ use crate::scene::SceneItem;
 use crate::source::Source;
 use crate::transition::Transition;
 
-/// A committed state change.
+/// A committed state change or transient media observation.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "domain", rename_all = "snake_case")]
 pub enum Event {
@@ -25,10 +25,27 @@ pub enum Event {
     Source(SourceEvent),
     /// Audio mixer/routing changes.
     Audio(AudioEvent),
+    /// Transient audio levels; never stored in project state.
+    Meter(MeterEvent),
     /// Output graph changes.
     Output(OutputEvent),
     /// Studio mode, transitions, profiles, collections.
     System(SystemEvent),
+}
+
+/// Transient source audio observations (ADR-0023).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "event", rename_all = "snake_case")]
+pub enum MeterEvent {
+    /// Per-channel levels measured after source gain and mute.
+    Levels {
+        /// Shared source identity.
+        source_id: SourceId,
+        /// Peak levels in dBFS, with finite silence floor.
+        peak_dbfs: Vec<f32>,
+        /// RMS levels in dBFS, with finite silence floor.
+        rms_dbfs: Vec<f32>,
+    },
 }
 
 /// Scene-domain events.

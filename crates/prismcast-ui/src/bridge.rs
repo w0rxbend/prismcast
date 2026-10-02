@@ -62,6 +62,41 @@ impl SnapshotRefresh {
     }
 }
 
+/// One outstanding meter wakeup; reads the latest watch cell after acknowledgement.
+#[derive(Clone)]
+pub struct MeterRefresh {
+    levels: tokio::sync::watch::Receiver<Arc<prismcast_app::MeterSnapshot>>,
+    pending: Arc<AtomicBool>,
+}
+impl std::fmt::Debug for MeterRefresh {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MeterRefresh").finish_non_exhaustive()
+    }
+}
+impl MeterRefresh {
+    pub fn new(handle: &AppHandle) -> Self {
+        Self {
+            levels: handle.subscribe_meters(),
+            pending: Arc::new(AtomicBool::new(false)),
+        }
+    }
+    fn notify(&self, send: impl FnOnce(Self) -> bool) -> bool {
+        if self.pending.swap(true, Ordering::AcqRel) {
+            return true;
+        }
+        if send(self.clone()) {
+            true
+        } else {
+            self.pending.store(false, Ordering::Release);
+            false
+        }
+    }
+    pub fn read(&self) -> Arc<prismcast_app::MeterSnapshot> {
+        self.pending.store(false, Ordering::Release);
+        self.levels.borrow().clone()
+    }
+}
+
 /// Owns the core actor and the Tokio runtime it runs on.
 ///
 /// Cheap to move into the root component; the actor itself is shared through
@@ -125,6 +160,27 @@ impl CoreBridge {
         &self.handle
     }
 
+    /// Forwards at most one outstanding latest-meter notification to a panel.
+    pub fn spawn_meter_pump<M>(
+        &self,
+        sender: relm4::Sender<M>,
+        map: impl Fn(MeterRefresh) -> M + Send + 'static,
+    ) -> tokio::task::JoinHandle<()>
+    where
+        M: Send + 'static,
+    {
+        let mut levels = self.handle.subscribe_meters();
+        let refresh = MeterRefresh::new(&self.handle);
+        self.runtime.spawn(async move {
+            while levels.changed().await.is_ok() {
+                levels.borrow_and_update();
+                if !refresh.notify(|wake| sender.send(map(wake)).is_ok()) {
+                    return;
+                }
+            }
+        })
+    }
+
     /// Watches committed snapshots and sends coalesced wakeups to the UI.
     /// The returned task must be aborted when its component is destroyed.
     pub fn spawn_snapshot_pump<M>(
@@ -153,6 +209,29 @@ mod tests {
     use super::*;
     use prismcast_core::Command;
     use std::sync::atomic::AtomicUsize;
+
+    #[test]
+    fn meter_notifications_are_coalesced_and_failed_delivery_releases_budget() {
+        let (bridge, thread) = CoreBridge::spawn_background().unwrap();
+        let refresh = MeterRefresh::new(bridge.handle());
+        let sends = AtomicUsize::new(0);
+        for _ in 0..10_000 {
+            assert!(refresh.notify(|_| {
+                sends.fetch_add(1, Ordering::Relaxed);
+                true
+            }));
+        }
+        assert_eq!(sends.load(Ordering::Relaxed), 1);
+        assert!(refresh.read().levels.is_empty());
+        assert!(!refresh.notify(|_| false));
+        assert!(refresh.notify(|_| {
+            sends.fetch_add(1, Ordering::Relaxed);
+            true
+        }));
+        assert_eq!(sends.load(Ordering::Relaxed), 2);
+        bridge.runtime.block_on(bridge.handle.shutdown());
+        thread.join().unwrap();
+    }
 
     #[test]
     fn ordinary_thread_boot_dispatch_shutdown() {

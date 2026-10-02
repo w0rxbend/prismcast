@@ -17,12 +17,13 @@ use prismcast_core::id::{EncoderId, OutputId, SceneId};
 use prismcast_core::output::{Output, OutputKind};
 use prismcast_core::source::SourceKind;
 use prismcast_core::Command;
-use prismcast_preview::{PreviewSession, PreviewStatus};
+use prismcast_preview::{AudioSession, AudioStatus, PreviewSession, PreviewStatus};
 use relm4::component::{AsyncComponent, AsyncComponentParts};
 use relm4::{AsyncComponentSender, Component, ComponentController, Controller};
 use tracing::{debug, info, warn};
 
 use crate::bridge::{CoreBridge, SnapshotRefresh};
+use crate::components::audio::{AudioInput, AudioOutput, AudioPanel, AudioStatusRefresh};
 use crate::components::outputs::{OutputsInput, OutputsOutput, OutputsPanel};
 use crate::components::scenes::{ScenesInput, ScenesOutput, ScenesPanel};
 use crate::components::sources::{SourcesInput, SourcesOutput, SourcesPanel};
@@ -79,6 +80,8 @@ pub enum AppMsg {
     FinishShutdown,
     BeginShutdown,
     PreviewWake,
+    AudioCommand(Box<Command>),
+    AddTestTone,
     PreviewCommand(Box<Command>),
 }
 
@@ -106,6 +109,11 @@ pub struct AppModel {
     shutting_down: Rc<Cell<bool>>,
     bridge: CoreBridge,
     preview_session: Option<PreviewSession>,
+    audio_session: Option<AudioSession>,
+    audio_status_pump: Option<gtk::glib::JoinHandle<()>>,
+    meter_pump: tokio::task::JoinHandle<()>,
+    audio_refresh: SnapshotRefresh,
+    audio: Controller<AudioPanel>,
     preview_editor: PreviewEditor,
     preview_status: Option<tokio::sync::watch::Receiver<PreviewStatus>>,
     preview_pump: Option<gtk::glib::JoinHandle<()>>,
@@ -153,6 +161,10 @@ impl AppModel {
         });
         self.output_refresh.notify(|wake| {
             self.outputs.emit(OutputsInput::Refresh(wake));
+            true
+        });
+        self.audio_refresh.notify(|wake| {
+            self.audio.emit(AudioInput::Refresh(wake));
             true
         });
         self.preview_editor.refresh(snapshot.clone());
@@ -550,7 +562,15 @@ impl AsyncComponent for AppModel {
             })
         });
 
-        // --- Panels: scenes | sources | audio mixer placeholder ---
+        let audio_session = match AudioSession::start(bridge.handle().clone()).await {
+            Ok(session) => Some(session),
+            Err(error) => {
+                warn!(%error, "audio attachment failed");
+                None
+            }
+        };
+
+        // --- Panels: scenes | sources | audio mixer ---
         let scenes = ScenesPanel::builder()
             .launch(())
             .forward(sender.input_sender(), |message| match message {
@@ -584,14 +604,32 @@ impl AsyncComponent for AppModel {
         panels.append(scenes.widget());
         panels.append(sources.widget());
 
-        let mixer = gtk::Frame::new(Some("Audio Mixer"));
-        mixer.set_width_request(260);
-        let mixer_label = gtk::Label::new(Some("Mixer meters arrive with the audio graph."));
-        mixer_label.set_wrap(true);
-        mixer_label.set_max_width_chars(24);
-        mixer_label.add_css_class("dim-label");
-        mixer.set_child(Some(&mixer_label));
-        panels.append(&mixer);
+        let audio = AudioPanel::builder()
+            .launch(())
+            .forward(sender.input_sender(), |message| match message {
+                AudioOutput::Command(command) => AppMsg::AudioCommand(command),
+                AudioOutput::AddTestTone => AppMsg::AddTestTone,
+            });
+        panels.append(audio.widget());
+        let audio_status_pump = audio_session.as_ref().map(|session| {
+            let mut status = session.subscribe_status();
+            let input = audio.sender().clone();
+            let refresh = AudioStatusRefresh::new(status.clone());
+            relm4::spawn_local(async move {
+                refresh.notify(&input);
+                while status.changed().await.is_ok() {
+                    status.borrow_and_update();
+                    if !refresh.notify(&input) {
+                        break;
+                    }
+                }
+            })
+        });
+        if audio_session.is_none() {
+            audio.emit(AudioInput::Status(AudioStatus::Failed(
+                "Audio unavailable".into(),
+            )));
+        }
         content.append(&panels);
 
         // --- Bottom bar: transition selector + outputs/controls ---
@@ -669,6 +707,8 @@ impl AsyncComponent for AppModel {
         let scene_refresh = SnapshotRefresh::new(bridge.handle().clone());
         let source_refresh = SnapshotRefresh::new(bridge.handle().clone());
         let output_refresh = SnapshotRefresh::new(bridge.handle().clone());
+        let audio_refresh = SnapshotRefresh::new(bridge.handle().clone());
+        let meter_pump = bridge.spawn_meter_pump(audio.sender().clone(), AudioInput::Meters);
 
         let model = Self {
             capture_parent,
@@ -677,6 +717,11 @@ impl AsyncComponent for AppModel {
             shutting_down,
             bridge,
             preview_session,
+            audio_session,
+            audio_status_pump,
+            audio_refresh,
+            meter_pump,
+            audio,
             preview_editor,
             preview_status,
             preview_pump,
@@ -716,6 +761,11 @@ impl AsyncComponent for AppModel {
                 self.publish_snapshot();
             }
             AppMsg::SceneCommand(command) => self.dispatch(&sender, command),
+            AppMsg::AudioCommand(command) => self.dispatch(&sender, *command),
+            AppMsg::AddTestTone => {
+                let handle = self.bridge.handle().clone();
+                sender.oneshot_command(async move { create_test_tone(&handle).await });
+            }
             AppMsg::SelectScene(scene_id) => {
                 self.dispatch(&sender, Command::SetCurrentScene { scene_id });
             }
@@ -863,6 +913,7 @@ impl AsyncComponent for AppModel {
             AppMsg::BeginShutdown => {
                 self.shutting_down.set(true);
                 let preview = self.preview_session.take();
+                let audio = self.audio_session.take();
                 let parent = self.capture_parent.borrow_mut().take();
                 let handle = self.bridge.handle().clone();
                 let input = sender.input_sender().clone();
@@ -870,6 +921,11 @@ impl AsyncComponent for AppModel {
                     if let Some(preview) = preview {
                         if let Err(error) = preview.shutdown().await {
                             warn!(%error, "preview shutdown failed");
+                        }
+                    }
+                    if let Some(audio) = audio {
+                        if let Err(error) = audio.shutdown().await {
+                            warn!(%error, "audio shutdown failed");
                         }
                     }
                     // The GTK-local export outlives pending portal/native work,
@@ -938,10 +994,63 @@ impl AsyncComponent for AppModel {
 impl Drop for AppModel {
     fn drop(&mut self) {
         self.snapshot_pump.abort();
+        self.meter_pump.abort();
+        if let Some(pump) = self.audio_status_pump.take() {
+            pump.abort();
+        }
         if let Some(pump) = self.preview_pump.take() {
             pump.abort();
         }
     }
+}
+
+/// Explicit test signal creation uses the same source/settings/route command API.
+async fn create_test_tone(handle: &prismcast_app::AppHandle) -> AppCmd {
+    let snapshot = handle.snapshot();
+    let Some(bus_id) = snapshot
+        .state()
+        .audio
+        .buses
+        .iter()
+        .find(|bus| bus.name == prismcast_core::audio::MASTER_BUS_NAME)
+        .or_else(|| snapshot.state().audio.buses.first())
+        .map(|bus| bus.id)
+    else {
+        return AppCmd::Dispatched(Err(HandleError::Core(prismcast_core::Error::InvalidInput(
+            "Create an audio bus before adding a test tone".into(),
+        ))));
+    };
+    let response = match handle
+        .dispatch(Command::AddSource {
+            kind: SourceKind::TestPattern,
+            name: "Test tone".into(),
+        })
+        .await
+    {
+        Ok(response) => response,
+        Err(error) => return AppCmd::Dispatched(Err(error)),
+    };
+    let Some(source_id) = created_source_id(&response.events) else {
+        return AppCmd::SourceEventMissing;
+    };
+    if let Err(error) = handle
+        .dispatch(Command::SetSourceSettings {
+            source_id,
+            settings: serde_json::json!({"audio_test": true}),
+        })
+        .await
+    {
+        return AppCmd::Dispatched(Err(error));
+    }
+    AppCmd::Dispatched(
+        handle
+            .dispatch(Command::SetAudioRoute {
+                source_id,
+                bus_id,
+                tracks: prismcast_core::audio::TrackMask::stereo_pair(),
+            })
+            .await,
+    )
 }
 
 /// AddSource → optional device settings → AddSceneItem, in committed order.
@@ -1155,6 +1264,22 @@ mod shell_display_tests {
         None
     }
 
+    fn button(widget: &gtk::Widget, label: &str) -> Option<gtk::Button> {
+        if let Ok(button) = widget.clone().downcast::<gtk::Button>() {
+            if button.label().as_deref() == Some(label) {
+                return Some(button);
+            }
+        }
+        let mut child = widget.first_child();
+        while let Some(widget) = child {
+            if let Some(button) = button(&widget, label) {
+                return Some(button);
+            }
+            child = widget.next_sibling();
+        }
+        None
+    }
+
     async fn exercise(
         app: &adw::Application,
         handle: &prismcast_app::AppHandle,
@@ -1245,12 +1370,54 @@ mod shell_display_tests {
         if invalidations.get() == 0 {
             return Err("shell paintable stopped updating after a command".into());
         }
+        // The actual GTK action must create, configure and route the explicit
+        // signal before real audio observations arrive through the service.
+        button(window.upcast_ref(), "Add test tone")
+            .ok_or("audio action missing")?
+            .emit_clicked();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let snapshot = handle.snapshot();
+            if let Some(tone) = snapshot.state().sources.values().find(|source| {
+                source.kind == SourceKind::TestPattern
+                    && source
+                        .settings
+                        .get("audio_test")
+                        .and_then(|value| value.as_bool())
+                        == Some(true)
+            }) {
+                let routed = snapshot
+                    .state()
+                    .audio
+                    .routes
+                    .iter()
+                    .any(|route| route.source_id == tone.id);
+                let meters = handle.subscribe_meters();
+                if routed
+                    && meters.borrow().levels.get(&tone.id).is_some_and(|levels| {
+                        levels
+                            .peak_dbfs
+                            .iter()
+                            .all(|level| *level > -10.0 && *level < -3.0)
+                    })
+                {
+                    break;
+                }
+            }
+            if Instant::now() > deadline {
+                return Err("GTK test tone did not produce routed native audio levels".into());
+            }
+            gtk::glib::timeout_future(Duration::from_millis(30)).await;
+        }
         // Exercise the actual production callback, including repeated close.
         window.close();
         window.close();
         gtk::glib::future_with_timeout(Duration::from_secs(5), handle.closed())
             .await
             .map_err(|error| error.to_string())?;
+        if !handle.subscribe_meters().borrow().levels.is_empty() {
+            return Err("audio observations survived production owner shutdown".into());
+        }
         Ok(())
     }
 

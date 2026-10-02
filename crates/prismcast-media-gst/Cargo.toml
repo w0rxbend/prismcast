@@ -12,6 +12,7 @@ thiserror.workspace = true
 tracing.workspace = true
 prismcast-core = { path = "../prismcast-core" }
 prismcast-media = { path = "../prismcast-media" }
+prismcast-audio = { path = "../prismcast-audio", version = "0.1.0" }
 serde.workspace = true
 serde_json.workspace = true
 prismcast-compositor = { path = "../prismcast-compositor", version = "0.1.0" }

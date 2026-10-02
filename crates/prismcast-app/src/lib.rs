@@ -43,6 +43,7 @@
 //! ```
 
 pub mod actor;
+pub mod audio;
 pub mod broadcaster;
 pub mod capture;
 pub mod dispatch;
@@ -54,6 +55,7 @@ pub use actor::{
     AppControllerId, AppHandle, CommandEnvelope, CommandResponse, CoreConfig, HandleError,
     DEFAULT_COMMAND_CAPACITY,
 };
+pub use audio::{AudioOwner, AudioRuntimeHandle, MeterSnapshot, SourceMeter};
 pub use broadcaster::{
     category_of, primary_entity, EventBroadcaster, EventCategory, EventFilter, EventStream,
     StreamEvent, DEFAULT_SUBSCRIBER_CAPACITY, MIN_SUBSCRIBER_CAPACITY,

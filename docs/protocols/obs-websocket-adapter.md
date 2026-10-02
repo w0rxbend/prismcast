@@ -227,7 +227,7 @@ counterpart in MVP scope and is never emitted.
 | `Vendors` (512) | `General` |
 | `Ui` (1024) | `System` |
 | `Canvases` (2048) | — (no native equivalent; accepted, inert) |
-| `InputVolumeMeters` (1<<16) | `Meter` (inert until meter producers exist) |
+| `InputVolumeMeters` (1<<16) | `Meter` (translation deferred; native post-fader meters available) |
 | `InputActiveStateChanged`, `InputShowStateChanged`, `SceneItemTransformChanged` (1<<17..19) | — (high-volume; accepted, inert without producers) |
 
 Absent `eventSubscriptions` in `Identify` means `All` (category bits 0–11, no high-volume). Inert
@@ -290,13 +290,18 @@ tungstenite clients (handshake matrix, auth, subprotocols, batches, status codes
 
 ## 9. Not implemented (OBSWS-002+)
 
-Meter and other
-high-volume event producers (`InputVolumeMeters`, `InputActiveStateChanged`,
+OBS meter translation and other
+high-volume events (`InputVolumeMeters`, `InputActiveStateChanged`,
 `InputShowStateChanged`, `SceneItemTransformChanged`), filters, screenshots, stats
 (`GetStats`/`GetOutputStats`; output runtime metrics read as zero), vendor and persistent data,
 media-input control, virtualcam and replay-buffer requests, UI-reaching requests, source settings
 (`GetInputSettings`/`SetInputSettings`), the obs-websocket 4.x protocol, and TLS (WS-003).
 Unsupported request types get the typed 204, never a silent no-op.
+
+AUDIO-001 supplies native post-fader source peak/RMS telemetry. OBS
+`InputVolumeMeters` remains deferred: its channel triples also include a
+distinct input-peak measurement, which the current graph does not produce.
+No inferred or duplicated input peak is advertised.
 
 ## 10. Documented divergences from upstream obs-websocket
 

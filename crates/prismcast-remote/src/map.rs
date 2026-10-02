@@ -13,7 +13,9 @@ use prismcast_app::dispatch::{Permission as AppPermission, Permissions as AppPer
 use prismcast_app::snapshot::AppSnapshot;
 use prismcast_core::audio::{self, AudioMixerConfig, AudioMixerState, MonitorMode, TrackMask};
 use prismcast_core::error::Error;
-use prismcast_core::event::{AudioEvent, Event, OutputEvent, SceneEvent, SourceEvent, SystemEvent};
+use prismcast_core::event::{
+    AudioEvent, Event, MeterEvent, OutputEvent, SceneEvent, SourceEvent, SystemEvent,
+};
 use prismcast_core::id::{
     AudioBusId, EncoderId, FilterId, OutputId, ProfileId, SceneCollectionId, SceneId, SceneItemId,
     ServiceId, SourceId,
@@ -172,11 +174,11 @@ pub fn wire_error(error: &Error) -> WireError {
 // --- subscriptions ---
 
 /// The application-layer category for a wire category, if the domain emits
-/// events for it. `General` (session notices) and `Meter` (media telemetry,
-/// not yet emitted by the domain) have no `prismcast-app` counterpart.
+/// events for it. `General` session notices have no application counterpart.
 pub fn category_to_app(category: EventCategory) -> Option<prismcast_app::EventCategory> {
     match category {
-        EventCategory::General | EventCategory::Meter => None,
+        EventCategory::General => None,
+        EventCategory::Meter => Some(prismcast_app::EventCategory::Meter),
         EventCategory::Scene => Some(prismcast_app::EventCategory::Scene),
         EventCategory::Source => Some(prismcast_app::EventCategory::Source),
         EventCategory::Audio => Some(prismcast_app::EventCategory::Audio),
@@ -564,6 +566,15 @@ pub fn response_data_for(request_tag: &str, events: &[Event]) -> ResponseData {
 /// Maps a committed domain event onto its wire mirror.
 pub fn event_to_wire(event: &Event) -> WireEvent {
     match event {
+        Event::Meter(MeterEvent::Levels {
+            source_id,
+            peak_dbfs,
+            rms_dbfs,
+        }) => WireEvent::Meter(prismcast_protocol::event::MeterEvent::Levels {
+            source_id: *source_id.as_uuid(),
+            peak_dbfs: peak_dbfs.clone(),
+            rms_dbfs: rms_dbfs.clone(),
+        }),
         Event::Scene(event) => WireEvent::Scene(match event {
             SceneEvent::Added { scene_id, name } => data_scene_event_added(*scene_id, name),
             SceneEvent::Removed { scene_id } => prismcast_protocol::event::SceneEvent::Removed {
@@ -1680,7 +1691,10 @@ mod tests {
             category_to_app(EventCategory::Scene),
             Some(prismcast_app::EventCategory::Scene)
         );
-        assert_eq!(category_to_app(EventCategory::Meter), None);
+        assert_eq!(
+            category_to_app(EventCategory::Meter),
+            Some(prismcast_app::EventCategory::Meter)
+        );
         assert_eq!(category_to_app(EventCategory::General), None);
         let set = SubscriptionSet {
             entries: vec![Subscription::category(EventCategory::Scene)],

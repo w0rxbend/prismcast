@@ -37,6 +37,9 @@ use prismcast_core::error::Error;
 use prismcast_core::event::Event;
 use prismcast_core::state::{apply, AppState};
 
+use crate::audio::{
+    validate_levels, AudioOwner, AudioRuntimeHandle, MeterSnapshot, SourceMeter, MAX_METER_SOURCES,
+};
 use crate::broadcaster::{EventBroadcaster, EventFilter, EventStream};
 use crate::capture::{
     validate_runtime, CaptureAuthorizationRequest, CaptureOwner, CaptureParentWindow,
@@ -129,6 +132,21 @@ pub enum HandleError {
 }
 
 pub(crate) enum ActorMessage {
+    ClearAudioLevels {
+        owner_id: uuid::Uuid,
+        reply: oneshot::Sender<Result<(), Error>>,
+    },
+    AttachAudioOwner {
+        tx: mpsc::Sender<ActorMessage>,
+        snapshots: watch::Receiver<Arc<AppSnapshot>>,
+        reply: oneshot::Sender<Result<AudioOwner, Error>>,
+    },
+    AudioLevels {
+        owner_id: uuid::Uuid,
+        revision: u64,
+        levels: SourceMeter,
+        reply: oneshot::Sender<Result<(), Error>>,
+    },
     AttachCaptureOwner {
         tx: mpsc::Sender<ActorMessage>,
         snapshots: watch::Receiver<Arc<AppSnapshot>>,
@@ -168,6 +186,7 @@ pub struct AppHandle {
     controller_id: AppControllerId,
     tx: mpsc::Sender<ActorMessage>,
     snapshots: watch::Receiver<Arc<AppSnapshot>>,
+    meters: watch::Receiver<Arc<MeterSnapshot>>,
     broadcaster: EventBroadcaster,
 }
 
@@ -203,6 +222,7 @@ impl AppHandle {
     ) -> Self {
         let (tx, rx) = mpsc::channel(config.command_capacity.max(1));
         let (snapshot_tx, snapshot_rx) = watch::channel(AppSnapshot::new(0, state.clone()));
+        let (meter_tx, meters) = watch::channel(Arc::new(MeterSnapshot::default()));
         let broadcaster = EventBroadcaster::new(config.event_queue_capacity);
         let actor = CoreActor {
             state,
@@ -218,12 +238,15 @@ impl AppHandle {
             capture: None,
             capture_runtime: HashMap::new(),
             capture_generation: 0,
+            audio: None,
+            meter_tx,
         };
         tokio::spawn(actor.run());
         Self {
             controller_id: AppControllerId::new(),
             tx,
             snapshots: snapshot_rx,
+            meters,
             broadcaster,
         }
     }
@@ -291,6 +314,28 @@ impl AppHandle {
             .await
             .map_err(|_| HandleError::Shutdown)?
             .map_err(HandleError::Core)
+    }
+
+    /// Attaches the exclusive trusted native audio owner (local service API).
+    pub async fn attach_audio_owner(&self) -> Result<AudioOwner, HandleError> {
+        let (reply, result) = oneshot::channel();
+        self.tx
+            .send(ActorMessage::AttachAudioOwner {
+                tx: self.tx.clone(),
+                snapshots: self.subscribe_snapshots(),
+                reply,
+            })
+            .await
+            .map_err(|_| HandleError::Shutdown)?;
+        result
+            .await
+            .map_err(|_| HandleError::Shutdown)?
+            .map_err(HandleError::Core)
+    }
+
+    /// Reads latest-only bounded source meters without command snapshot churn.
+    pub fn subscribe_meters(&self) -> watch::Receiver<Arc<MeterSnapshot>> {
+        self.meters.clone()
     }
 
     async fn dispatch_context(
@@ -502,6 +547,12 @@ struct CoreActor {
     capture: Option<CaptureAttachment>,
     capture_runtime: HashMap<SourceId, SourceRuntime>,
     capture_generation: u64,
+    audio: Option<AudioAttachment>,
+    meter_tx: watch::Sender<Arc<MeterSnapshot>>,
+}
+struct AudioAttachment {
+    owner_id: uuid::Uuid,
+    closed: oneshot::Receiver<()>,
 }
 struct CaptureAttachment {
     owner_id: uuid::Uuid,
@@ -582,6 +633,14 @@ async fn capture_owner_closed(owner: &mut Option<CaptureAttachment>) {
     }
 }
 
+async fn audio_owner_closed(owner: &mut Option<AudioAttachment>) {
+    if let Some(owner) = owner {
+        let _ = (&mut owner.closed).await;
+    } else {
+        std::future::pending::<()>().await;
+    }
+}
+
 impl CoreActor {
     #[instrument(name = "core_actor", skip_all)]
     async fn run(mut self) {
@@ -589,10 +648,39 @@ impl CoreActor {
         loop {
             let message = tokio::select! {
                 biased;
+                _ = audio_owner_closed(&mut self.audio) => { self.audio = None; self.clear_meters(); continue; }
                 _ = capture_owner_closed(&mut self.capture) => { self.capture_disconnected(); continue; }
                 message = self.rx.recv() => match message { Some(message) => message, None => break },
             };
             match message {
+                ActorMessage::ClearAudioLevels { owner_id, reply } => {
+                    let result =
+                        if self.audio.as_ref().map(|owner| owner.owner_id) == Some(owner_id) {
+                            self.clear_meters();
+                            Ok(())
+                        } else {
+                            Err(Error::Unauthorized(
+                                "audio owner capability is stale".into(),
+                            ))
+                        };
+                    let _ = reply.send(result);
+                }
+                ActorMessage::AttachAudioOwner {
+                    tx,
+                    snapshots,
+                    reply,
+                } => {
+                    let result = self.attach_audio(tx, snapshots);
+                    let _ = reply.send(result);
+                }
+                ActorMessage::AudioLevels {
+                    owner_id,
+                    revision,
+                    levels,
+                    reply,
+                } => {
+                    let _ = reply.send(self.report_audio(owner_id, revision, levels));
+                }
                 ActorMessage::AttachCaptureOwner {
                     tx,
                     snapshots,
@@ -657,8 +745,86 @@ impl CoreActor {
                 }
             }
         }
+        self.clear_meters();
         self.broadcaster.close_all();
         info!("core actor stopped");
+    }
+
+    fn attach_audio(
+        &mut self,
+        tx: mpsc::Sender<ActorMessage>,
+        snapshots: watch::Receiver<Arc<AppSnapshot>>,
+    ) -> Result<AudioOwner, Error> {
+        if self.audio.is_some() {
+            return Err(Error::InvalidInput(
+                "audio owner is already attached".into(),
+            ));
+        }
+        let owner_id = uuid::Uuid::new_v4();
+        let (liveness, closed) = oneshot::channel();
+        self.audio = Some(AudioAttachment { owner_id, closed });
+        Ok(AudioOwner {
+            runtime: AudioRuntimeHandle { tx, owner_id },
+            snapshots,
+            _liveness: liveness,
+        })
+    }
+
+    fn report_audio(
+        &mut self,
+        owner_id: uuid::Uuid,
+        revision: u64,
+        levels: SourceMeter,
+    ) -> Result<(), Error> {
+        if self.audio.as_ref().map(|owner| owner.owner_id) != Some(owner_id) {
+            return Err(Error::Unauthorized(
+                "audio owner capability is stale".into(),
+            ));
+        }
+        if revision != self.revision {
+            return Err(Error::InvalidInput(
+                "audio snapshot revision is stale".into(),
+            ));
+        }
+        validate_levels(&levels)?;
+        let source_id = levels.source_id;
+        let source = self
+            .state
+            .source(source_id)
+            .ok_or_else(|| Error::NotFound(format!("source {source_id}")))?;
+        if !source.enabled
+            || source.kind != prismcast_core::SourceKind::TestPattern
+            || source
+                .settings
+                .get("audio_test")
+                .and_then(serde_json::Value::as_bool)
+                != Some(true)
+        {
+            return Err(Error::InvalidInput("audio source is inactive".into()));
+        }
+        let mut meters = self.meter_tx.borrow().as_ref().clone();
+        if !meters.levels.contains_key(&source_id) && meters.levels.len() >= MAX_METER_SOURCES {
+            return Err(Error::InvalidInput(
+                "audio meter source capacity exhausted".into(),
+            ));
+        }
+        let event = Event::Meter(prismcast_core::MeterEvent::Levels {
+            source_id,
+            peak_dbfs: levels.peak_dbfs.clone(),
+            rms_dbfs: levels.rms_dbfs.clone(),
+        });
+        meters.levels.insert(source_id, levels);
+        self.meter_tx.send_replace(Arc::new(meters));
+        self.broadcaster.publish(self.next_seq, &event);
+        self.next_seq += 1;
+        Ok(())
+    }
+
+    fn clear_meters(&self) {
+        if !self.meter_tx.borrow().levels.is_empty() {
+            self.meter_tx
+                .send_replace(Arc::new(MeterSnapshot::default()));
+        }
     }
 
     fn attach_capture(
@@ -997,6 +1163,8 @@ impl CoreActor {
     /// Broadcasts committed events (with sequence numbers) and publishes the
     /// post-command snapshot. Called only after a successful apply.
     fn commit(&mut self, mut events: Vec<Event>) -> Vec<Event> {
+        // Every published command revision invalidates the graph's measurements.
+        self.clear_meters();
         self.invalidate_capture(&mut events);
         for event in &events {
             self.broadcaster.publish(self.next_seq, event);

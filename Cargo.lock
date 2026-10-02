@@ -1833,6 +1833,9 @@ dependencies = [
 [[package]]
 name = "prismcast-audio"
 version = "0.1.0"
+dependencies = [
+ "prismcast-core",
+]
 
 [[package]]
 name = "prismcast-capture"
@@ -1895,6 +1898,7 @@ name = "prismcast-media-gst"
 version = "0.1.0"
 dependencies = [
  "gstreamer",
+ "prismcast-audio",
  "prismcast-capture",
  "prismcast-compositor",
  "prismcast-core",
@@ -1929,6 +1933,7 @@ dependencies = [
  "gstreamer",
  "gtk4",
  "prismcast-app",
+ "prismcast-audio",
  "prismcast-capture",
  "prismcast-core",
  "prismcast-media",

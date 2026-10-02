@@ -29,7 +29,7 @@ pub use audio::{AudioBus, AudioMixerConfig, AudioMixerState, AudioRoute, Monitor
 pub use capture::{CaptureGeneration, CaptureStatus, SourceDimensions, SourceRuntime};
 pub use command::Command;
 pub use error::{Error, Result};
-pub use event::{AudioEvent, Event, OutputEvent, SceneEvent, SourceEvent, SystemEvent};
+pub use event::{AudioEvent, Event, MeterEvent, OutputEvent, SceneEvent, SourceEvent, SystemEvent};
 pub use id::{
     AudioBusId, CanvasId, EncoderId, FilterId, OutputId, ProfileId, SceneCollectionId, SceneId,
     SceneItemId, ServiceId, SourceId,

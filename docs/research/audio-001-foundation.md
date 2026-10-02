@@ -97,3 +97,22 @@ start/stop and request-pad cleanup. Bound queues, bus processing and event histo
 A latest-only meter consumer must survive slow/non-consuming UI without retaining
 unbounded samples. Validate owner shutdown completion on source/core removal.
 A 32-source deterministic stress fixture matches PLAN Phase 5.
+
+## Implementation follow-up
+
+ADR-0023 retains native post-fader source peak/RMS and diagnostic bus levels.
+The OBS adapter's input-volume channel representation has three multipliers
+(magnitude, peak and input peak), while this foundation supplies only two
+post-fader observations. Its translation remains deferred rather than
+inventing the additional input measurement. Verified against the installed
+obws 0.15 InputVolumeMeter type and upstream meter handling/VolumeMeter
+callback contract:
+
+- [OBS meter event handler](https://github.com/obsproject/obs-websocket/blob/master/src/eventhandler/EventHandler_Inputs.cpp)
+- [OBS volume meter measurements](https://github.com/obsproject/obs-studio/blob/master/frontend/components/VolumeMeter.cpp)
+
+Track masks are output track assignments, not stereo channel masks. Native
+terminal sinks remain fakesinks, so successful metering establishes mixing
+and control, not recording or physical playback. Backend implementation
+uses a conservative aggregate gain bound f32::MAX / 32 and treats malformed
+native measurement messages as terminal failures.

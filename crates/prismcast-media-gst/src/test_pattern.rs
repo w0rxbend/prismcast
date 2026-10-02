@@ -51,6 +51,8 @@ pub struct TestPatternSettings {
     pub pattern: Pattern,
     /// None streams indefinitely; finite counts support diagnostics/tests.
     pub num_buffers: Option<u32>,
+    /// Explicit diagnostic audio; false never opens an audio device.
+    pub audio_test: bool,
 }
 impl Default for TestPatternSettings {
     fn default() -> Self {
@@ -60,6 +62,7 @@ impl Default for TestPatternSettings {
             fps: 30,
             pattern: Pattern::Smpte,
             num_buffers: None,
+            audio_test: false,
         }
     }
 }
@@ -89,6 +92,7 @@ impl TestPatternSettings {
             "height":{"type":"integer","minimum":1,"maximum":8192,"default":1080},
             "fps":{"type":"integer","minimum":1,"maximum":240,"default":30},
             "pattern":{"type":"string","enum":["smpte","black","white","red","green","blue","ball"],"default":"smpte"},
+            "audio_test":{"type":"boolean","default":false},
             "num_buffers":{"type":["integer","null"],"minimum":1,"maximum":2147483647,"default":null}
         }})
     }

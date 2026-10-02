@@ -25,9 +25,8 @@
 //! direction is `app <- remote`, so the remote crate maps its wire
 //! `EventCategory` onto [`EventCategory`]).
 //!
-//! Meter coalescing (PLAN.md §56) is intentionally out of scope here: the
-//! domain emits no meter events yet. The filter type already carries
-//! per-entity restrictions so throttled meter delivery can layer on later.
+//! Meter events share this bounded fan-out and source filtering. Interface
+//! adapters apply delivery throttling; the app's meter watch is latest-only.
 
 use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -38,7 +37,9 @@ use tokio::sync::Notify;
 use tracing::warn;
 use uuid::Uuid;
 
-use prismcast_core::event::{AudioEvent, Event, OutputEvent, SceneEvent, SourceEvent, SystemEvent};
+use prismcast_core::event::{
+    AudioEvent, Event, MeterEvent, OutputEvent, SceneEvent, SourceEvent, SystemEvent,
+};
 
 /// Default per-subscriber queue capacity.
 pub const DEFAULT_SUBSCRIBER_CAPACITY: usize = 256;
@@ -50,8 +51,7 @@ pub const MIN_SUBSCRIBER_CAPACITY: usize = 2;
 
 /// Event domain categories, mirroring the top-level [`Event`] variants.
 ///
-/// Deliberately matches `prismcast_protocol::EventCategory` minus `Meter`
-/// (the domain emits no meter events yet); the remote crate maps between the
+/// Matches the domain groups of `prismcast_protocol::EventCategory`; the remote crate maps between the
 /// two without this crate depending on the protocol crate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -62,6 +62,8 @@ pub enum EventCategory {
     Source,
     /// Audio mixer/routing changes.
     Audio,
+    /// High-volume transient source audio observations.
+    Meter,
     /// Output graph changes.
     Output,
     /// Studio mode, transitions, profiles, collections.
@@ -74,6 +76,7 @@ pub fn category_of(event: &Event) -> EventCategory {
         Event::Scene(_) => EventCategory::Scene,
         Event::Source(_) => EventCategory::Source,
         Event::Audio(_) => EventCategory::Audio,
+        Event::Meter(_) => EventCategory::Meter,
         Event::Output(_) => EventCategory::Output,
         Event::System(_) => EventCategory::System,
     }
@@ -105,6 +108,7 @@ pub fn primary_entity(event: &Event) -> Option<Uuid> {
             | SourceEvent::RuntimeChanged { source_id, .. }
             | SourceEvent::EnabledChanged { source_id, .. } => source_id.as_uuid(),
         },
+        Event::Meter(MeterEvent::Levels { source_id, .. }) => source_id.as_uuid(),
         Event::Audio(audio) => match audio {
             AudioEvent::MixerChanged { source_id, .. }
             | AudioEvent::RouteChanged { source_id, .. }

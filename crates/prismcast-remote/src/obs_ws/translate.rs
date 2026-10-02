@@ -154,6 +154,10 @@ impl EventTranslator {
         snapshot: &AppSnapshot,
     ) -> Vec<proto::Event> {
         match event {
+            // Native source telemetry currently measures post-fader peak/RMS.
+            // OBS additionally requires input-peak data; adapter support is
+            // deferred until that distinct measurement exists.
+            Event::Meter(_) => Vec::new(),
             Event::Scene(event) => self.scene_event(event, snapshot),
             Event::Source(event) => self.source_event(event, snapshot),
             Event::Audio(event) => self.audio_event(event, snapshot),

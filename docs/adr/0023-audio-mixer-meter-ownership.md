@@ -34,7 +34,10 @@ the snapshot reconciled by that owner. Reports after configuration changes,
 source removal/disable or owner replacement are rejected. Meter events are
 transient Core Events: they use broadcaster sequencing and category/source
 filtering, but do not commit an AppState revision, alter undo/persistence, or
-clone the full state for every sample. A latest-only app meter watch serves
+clone the full state for every sample. Owner-authenticated invalidation clears
+the observation watch after a graph failure without fabricating a signal.
+Terminal native failures stop the graph and retry only on a later command
+revision. A latest-only app meter watch serves
 GTK without unbounded wakeups; the existing native wire shape is reused.
 Silence is clamped to -120 dBFS so JSON payloads stay finite.
 

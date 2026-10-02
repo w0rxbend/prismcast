@@ -797,6 +797,8 @@ impl EventPipe {
     fn note_lagged(&mut self, dropped: u64) {
         warn!(dropped, "session event stream lagged; signaling seq gap");
         self.next_seq = self.next_seq.saturating_add(dropped);
+        // Lost source-lifecycle events can no longer validate cached telemetry.
+        self.throttle.clear();
     }
 
     /// Filters, throttles, and delivers one domain event.
@@ -813,6 +815,23 @@ impl EventPipe {
             }
             StreamEvent::Event { event, .. } => event,
         };
+        if !matches!(event, prismcast_core::Event::Meter(_)) {
+            // Meter reports are revision-checked at ingress. A state event
+            // invalidates any older reports waiting in session throttles,
+            // even when this client did not subscribe to that state category.
+            self.throttle.invalidate_meters();
+        }
+        if let prismcast_core::Event::Source(
+            prismcast_core::SourceEvent::Removed { source_id }
+            | prismcast_core::SourceEvent::SettingsChanged { source_id }
+            | prismcast_core::SourceEvent::EnabledChanged {
+                source_id,
+                enabled: false,
+            },
+        ) = &event
+        {
+            self.throttle.retire_meter(*source_id.as_uuid());
+        }
         let wire = map::event_to_wire(&event);
         let category = wire.category();
         let Some(entry) = self.set.get(category) else {

@@ -9,6 +9,7 @@ license.workspace = true
 [dependencies]
 prismcast-app.workspace = true
 prismcast-core.workspace = true
+prismcast-audio.workspace = true
 prismcast-media.workspace = true
 prismcast-capture = { path = "../prismcast-capture", version = "0.1.0" }
 prismcast-media-gst = { path = "../prismcast-media-gst", version = "0.1.0" }
