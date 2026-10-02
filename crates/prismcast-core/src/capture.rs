@@ -47,7 +47,7 @@ pub struct SourceRuntime {
     pub generation: CaptureGeneration,
     /// Current lifecycle.
     pub status: CaptureStatus,
-    /// Actual native caps; required for Active and absent on terminal failure.
+    /// Actual video caps; required for Active video, absent for audio and failure.
     pub dimensions: Option<SourceDimensions>,
     /// Bounded sanitized user-facing diagnostic.
     pub message: Option<String>,

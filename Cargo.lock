@@ -1846,6 +1846,8 @@ dependencies = [
  "gstreamer",
  "gstreamer-app",
  "prismcast-core",
+ "serde_json",
+ "socket2",
  "thiserror",
  "tokio",
  "tracing",

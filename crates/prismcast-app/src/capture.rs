@@ -7,7 +7,9 @@ use prismcast_core::{CaptureGeneration, CaptureStatus, SourceDimensions, SourceI
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot, watch};
 
-/// Maximum queued requests and retained runtime observations.
+/// Shared maximum retained video/audio runtime observations. Each owner's
+/// explicit request queue uses this same bound. New admissions may retire the
+/// oldest terminal observation; live Authorizing/Active entries are never evicted.
 pub const CAPTURE_CAPACITY: usize = 8;
 /// Maximum bytes in an ephemeral exported parent identifier.
 pub const MAX_CAPTURE_PARENT_BYTES: usize = 2048;
@@ -95,17 +97,7 @@ impl CaptureRuntimeHandle {
         dimensions: Option<SourceDimensions>,
         message: Option<String>,
     ) -> Result<(), HandleError> {
-        let message = message.map(|text| {
-            let mut bounded = String::new();
-            for c in text.chars() {
-                let c = if c.is_control() { ' ' } else { c };
-                if bounded.len() + c.len_utf8() > MAX_CAPTURE_MESSAGE_BYTES {
-                    break;
-                }
-                bounded.push(c);
-            }
-            bounded
-        });
+        let message = sanitize_message(message);
         let runtime = SourceRuntime {
             generation,
             status,
@@ -129,6 +121,29 @@ impl CaptureRuntimeHandle {
             .map_err(HandleError::Core)
     }
 }
+pub(crate) fn sanitize_message(message: Option<String>) -> Option<String> {
+    message.map(|text| {
+        let mut bounded = String::new();
+        for c in text.chars() {
+            let c = if c.is_control() { ' ' } else { c };
+            if bounded.len() + c.len_utf8() > MAX_CAPTURE_MESSAGE_BYTES {
+                break;
+            }
+            bounded.push(c);
+        }
+        bounded
+    })
+}
+
+pub(crate) fn validate_audio_runtime(runtime: &SourceRuntime) -> Result<(), prismcast_core::Error> {
+    if runtime.status == CaptureStatus::Authorizing || runtime.dimensions.is_some() {
+        return Err(prismcast_core::Error::InvalidInput(
+            "invalid audio capture lifecycle".into(),
+        ));
+    }
+    validate_message(runtime)
+}
+
 pub(crate) fn validate_runtime(runtime: &SourceRuntime) -> Result<(), prismcast_core::Error> {
     if runtime.status == CaptureStatus::Authorizing {
         return Err(prismcast_core::Error::InvalidInput(
@@ -145,6 +160,10 @@ pub(crate) fn validate_runtime(runtime: &SourceRuntime) -> Result<(), prismcast_
             "invalid negotiated capture dimensions".into(),
         ));
     }
+    validate_message(runtime)
+}
+
+fn validate_message(runtime: &SourceRuntime) -> Result<(), prismcast_core::Error> {
     if runtime
         .message
         .as_ref()

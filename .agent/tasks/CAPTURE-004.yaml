@@ -29,8 +29,21 @@ acceptance:
 - Native socket tests cover audio runtime and generation-bound meter delivery/invalidation using the unchanged protocol shape
 - Hardware capture, sandbox permissions, aggregate application capture, monitoring/playback and encoded output remain clearly documented limits
 validation: [just ci, just deny, focused authorization and service lifecycle tests, isolated real PipeWire capture fixture, separately recorded Wayland GTK regression]
-status: in_progress
+status: done
 notes:
 - ADR-0024 accepted before implementation
 - User explicitly requested direct-main swarm development; agents own disjoint files and coordinator commits/pushes
 - Core/app ownership audio_integration_scope; capture/native ownership audio_research; service/UI ownership worktree_audit; coordinator owns task/state/docs and native socket regression
+
+validation_notes:
+- Final just ci passed; 679 workspace tests passed, 18 environment-dependent tests ignored
+- just deny passed with existing duplicate/unmatched warnings; socket2 was already in the lockfile
+- Nine app capture tests and five service supervision tests passed, including generation/revision checks, no implicit opening, atomic capacity and revocation before blocked discovery
+- Real isolated native fixture passed all three modes, sentinel exclusion, gain/mute, removal/replacement, daemon restart with reused serial and fresh authorization in about 1.56 seconds
+- Direct supplied-old-FD probe passed; replacement capture prevented, upstream synchronous startup timeout measured at about 30 seconds
+- Final real Core/AudioSession fixture passed actual capture/meters/gain/mute, disable/enable without reopening, explicit retry and joined shutdown in about 1.25 seconds
+- Native WebSocket authorization/runtime/meter-generation/pending-invalidation regression passed
+- Separate Wayland/Cairo/fatal-critical GTK picker, capture controls, atomic removal and actual application tone/meter/close regressions passed
+- All 42 worktree heads (main plus 41 auxiliary) remain ancestors of main; no new worktrees created
+- Physical microphone, desktop policy and sandbox validation remain unverified; source stalls conservatively revoke grants, and late daemon death can still incur the documented upstream startup timeout
+- Evidence and exact commands are recorded in docs/testing/pipewire-audio.md

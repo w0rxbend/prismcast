@@ -14,4 +14,6 @@ tokio.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 gstreamer.workspace = true
+serde_json.workspace = true
+socket2 = "0.6"
 gstreamer-app = { version = "0.25", features = ["v1_26"] }

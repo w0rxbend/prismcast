@@ -150,6 +150,14 @@ Queries are read-only request kinds: `get_version`, `get_snapshot`, `list_scenes
 `list_sources`, `get_source`, `list_outputs`, `get_output`, `get_audio_state`, `list_profiles`,
 `list_scene_collections`. Session requests: `update_subscriptions`, `get_subscriptions`.
 
+`authorize_source_capture` requires `control_scenes` (or `admin`) for every
+capture kind, including audio. CAPTURE-004 keeps the existing request/event
+shape: PipeWire audio targets are advisory versioned source settings; only
+an explicit authorization command opens capture. Audio `runtime_changed`
+observations have `dimensions: null` even when `status: active`; video Active
+observations contain negotiated pixel dimensions. Target serials and native
+grants are never exposed or persisted. See [PipeWire audio verification](../testing/pipewire-audio.md).
+
 `transaction` members must be command kinds (queries are rejected); nesting `transaction` inside
 `transaction` is rejected. It maps to `Command::Transaction` — atomic, all-or-nothing
 (PLAN §59).
@@ -204,7 +212,9 @@ Semantics (RES-007 conclusion 7):
 `audio`, `output`, `system`, `meter`). Meter levels are transient observations
 with per-channel `peak_dbfs`/`rms_dbfs`, outside persisted state and undo history.
 AUDIO-001 produces post-gain/mute levels for explicit diagnostic audio sources;
-see [audio mixer verification](../testing/audio-mixer.md). Meter delivery
+CAPTURE-004 adds explicitly authorized PipeWire audio sources. Native ingress
+checks the active capture generation and reconciled snapshot revision.
+See [audio mixer verification](../testing/audio-mixer.md). Meter delivery
 requires opt-in and uses the existing source filtering and throttling rules.
 
 ### Subscriptions

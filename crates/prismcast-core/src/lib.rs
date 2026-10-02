@@ -13,6 +13,7 @@
 //! with structured ID context fields (`source_id=`, `output_id=`, ...).
 
 pub mod audio;
+pub mod audio_capture;
 pub mod capture;
 pub mod command;
 pub mod error;
@@ -26,6 +27,7 @@ pub mod state;
 pub mod transition;
 
 pub use audio::{AudioBus, AudioMixerConfig, AudioMixerState, AudioRoute, MonitorMode, TrackMask};
+pub use audio_capture::{PipeWireAudioMode, PipeWireAudioSettings};
 pub use capture::{CaptureGeneration, CaptureStatus, SourceDimensions, SourceRuntime};
 pub use command::Command;
 pub use error::{Error, Result};

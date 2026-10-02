@@ -6,6 +6,7 @@ use prismcast_app::{AppHandle, CoreConfig};
 use prismcast_core::{Command, Event, SourceEvent, SourceId, SourceKind};
 use prismcast_protocol::event::{MeterEvent, WireEvent};
 use prismcast_protocol::handshake::Permission;
+use prismcast_protocol::request::RequestKind;
 use prismcast_protocol::subscription::{EventCategory, Subscription, SubscriptionSet};
 use prismcast_remote::auth::AuthConfig;
 use prismcast_remote::ws_client::{WsClient, WsClientConfig};
@@ -179,5 +180,210 @@ async fn disabled_source_discards_pending_meter_even_for_meter_only_client() {
     client.close().await;
     drop(owner);
     server.shutdown().await;
+    app.shutdown().await;
+}
+
+/// Transport/owner-contract coverage; measurements are deliberately injected
+/// here. Real PipeWire signal evidence belongs to the native fixture.
+#[tokio::test]
+async fn audio_capture_authorization_runtime_and_generation_meters_cross_native_socket() {
+    use prismcast_core::CaptureStatus;
+    use prismcast_protocol::data::CaptureStatus as WireStatus;
+    use prismcast_protocol::event::SourceEvent as WireSourceEvent;
+
+    let app = AppHandle::spawn(CoreConfig::default());
+    let source_id = app
+        .dispatch(Command::AddSource {
+            kind: SourceKind::PipeWireAppAudio,
+            name: "Selected playback stream".into(),
+        })
+        .await
+        .unwrap()
+        .events
+        .iter()
+        .find_map(|event| match event {
+            Event::Source(SourceEvent::Added { source }) => Some(source.id),
+            _ => None,
+        })
+        .unwrap();
+    app.dispatch(Command::SetSourceSettings {
+        source_id,
+        settings: serde_json::json!({
+            "schema_version": 1,
+            "target": "prismcast-fixture-playback",
+            "mode": "application"
+        }),
+    })
+    .await
+    .unwrap();
+    let mut owner = app.attach_audio_owner().await.unwrap();
+    assert!(
+        owner.requests.try_recv().is_err(),
+        "restore must not authorize"
+    );
+    let reader_server = WsServer::bind(
+        app.clone(),
+        WsServerConfig {
+            enabled: true,
+            bind: SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
+            auth: AuthConfig::token("meter-test", vec![Permission::Read]),
+            ..WsServerConfig::default()
+        },
+    )
+    .await
+    .unwrap();
+    let server = WsServer::bind(
+        app.clone(),
+        WsServerConfig {
+            enabled: true,
+            bind: SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
+            auth: AuthConfig::token(
+                "meter-test",
+                vec![Permission::Read, Permission::ControlScenes],
+            ),
+            ..WsServerConfig::default()
+        },
+    )
+    .await
+    .unwrap();
+    let mut reader = connect(reader_server.local_addr(), None).await;
+    let revision = app.snapshot().revision();
+    assert!(reader
+        .request_data(RequestKind::AuthorizeSourceCapture {
+            source_id: *source_id.as_uuid(),
+        })
+        .await
+        .is_err());
+    assert_eq!(app.snapshot().revision(), revision);
+    assert!(owner.requests.try_recv().is_err());
+    let mut controller = connect(
+        server.local_addr(),
+        Some(SubscriptionSet {
+            entries: vec![Subscription::category(EventCategory::Source)],
+        }),
+    )
+    .await;
+    let mut meters = connect(
+        reader_server.local_addr(),
+        Some(SubscriptionSet {
+            entries: vec![Subscription::meters(vec![*source_id.as_uuid()], Some(200))],
+        }),
+    )
+    .await;
+    controller
+        .request_data(RequestKind::AuthorizeSourceCapture {
+            source_id: *source_id.as_uuid(),
+        })
+        .await
+        .unwrap();
+    let request = tokio::time::timeout(DEADLINE, owner.requests.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(request.source_id, source_id);
+    assert_eq!(request.settings.target, "prismcast-fixture-playback");
+    owner
+        .runtime
+        .report_capture(source_id, request.generation, CaptureStatus::Active, None)
+        .await
+        .unwrap();
+    tokio::time::timeout(DEADLINE, async {
+        loop {
+            let message = controller.next_event().await.unwrap();
+            if let WireEvent::Source(WireSourceEvent::RuntimeChanged {
+                source_id: id,
+                runtime: Some(runtime),
+            }) = message.event
+            {
+                if id == *source_id.as_uuid() && runtime.status == WireStatus::Active {
+                    assert!(runtime.dimensions.is_none());
+                    break;
+                }
+            }
+        }
+    })
+    .await
+    .unwrap();
+    let revision = app.snapshot().revision();
+    owner
+        .runtime
+        .report_capture_levels(
+            revision,
+            request.generation,
+            source_id,
+            vec![-6.0; 2],
+            vec![-9.0; 2],
+        )
+        .await
+        .unwrap();
+    let first = tokio::time::timeout(DEADLINE, meters.next_event())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(first.event, WireEvent::Meter(MeterEvent::Levels {
+        source_id: id, peak_dbfs, ..
+    }) if id == *source_id.as_uuid() && peak_dbfs == vec![-6.0; 2]));
+    assert_eq!(app.snapshot().revision(), revision);
+    owner
+        .runtime
+        .report_capture_levels(
+            revision,
+            request.generation,
+            source_id,
+            vec![-12.0; 2],
+            vec![-15.0; 2],
+        )
+        .await
+        .unwrap();
+    owner
+        .runtime
+        .report_capture(
+            source_id,
+            request.generation,
+            CaptureStatus::Failed,
+            Some("fixture disconnected".into()),
+        )
+        .await
+        .unwrap();
+    assert!(app.subscribe_meters().borrow().levels.is_empty());
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), meters.next_event())
+            .await
+            .is_err(),
+        "terminal runtime must discard throttled readings"
+    );
+    controller
+        .request_data(RequestKind::AuthorizeSourceCapture {
+            source_id: *source_id.as_uuid(),
+        })
+        .await
+        .unwrap();
+    let retry = owner.requests.recv().await.unwrap();
+    assert_ne!(request.generation, retry.generation);
+    owner
+        .runtime
+        .report_capture(source_id, retry.generation, CaptureStatus::Active, None)
+        .await
+        .unwrap();
+    assert!(
+        owner
+            .runtime
+            .report_capture_levels(
+                app.snapshot().revision(),
+                request.generation,
+                source_id,
+                vec![-6.0; 2],
+                vec![-9.0; 2]
+            )
+            .await
+            .is_err(),
+        "old generation must not report against the new revision"
+    );
+    reader.close().await;
+    controller.close().await;
+    meters.close().await;
+    drop(owner);
+    server.shutdown().await;
+    reader_server.shutdown().await;
     app.shutdown().await;
 }

@@ -63,7 +63,7 @@ pub enum SourceKind {
     PipeWireWindow,
     /// V4L2 camera device.
     V4l2Camera,
-    /// PipeWire audio input (microphone).
+    /// PipeWire audio input or selected sink monitor (`settings.mode`).
     PipeWireAudioInput,
     /// PipeWire per-application audio capture.
     PipeWireAppAudio,

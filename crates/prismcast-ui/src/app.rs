@@ -82,6 +82,8 @@ pub enum AppMsg {
     PreviewWake,
     AudioCommand(Box<Command>),
     AddTestTone,
+    AddAudioCapture,
+    AudioCaptureSubmitted(crate::audio_sources::AudioSelection),
     PreviewCommand(Box<Command>),
 }
 
@@ -98,6 +100,10 @@ pub enum AppCmd {
         error: HandleError,
     },
     SourceEventMissing,
+    AudioConfigurationFailed {
+        source_id: prismcast_core::SourceId,
+        error: HandleError,
+    },
 }
 
 /// The root application model. Holds the core bridge, the panel controllers,
@@ -609,6 +615,8 @@ impl AsyncComponent for AppModel {
             .forward(sender.input_sender(), |message| match message {
                 AudioOutput::Command(command) => AppMsg::AudioCommand(command),
                 AudioOutput::AddTestTone => AppMsg::AddTestTone,
+                AudioOutput::AddCapture => AppMsg::AddAudioCapture,
+                AudioOutput::Authorize(source_id) => AppMsg::AuthorizeCapture(source_id),
             });
         panels.append(audio.widget());
         let audio_status_pump = audio_session.as_ref().map(|session| {
@@ -762,6 +770,17 @@ impl AsyncComponent for AppModel {
             }
             AppMsg::SceneCommand(command) => self.dispatch(&sender, command),
             AppMsg::AudioCommand(command) => self.dispatch(&sender, *command),
+            AppMsg::AddAudioCapture => {
+                let input = sender.input_sender().clone();
+                crate::audio_sources::present(root, move |selection| {
+                    input.emit(AppMsg::AudioCaptureSubmitted(selection))
+                });
+            }
+            AppMsg::AudioCaptureSubmitted(selection) => {
+                let handle = self.bridge.handle().clone();
+                sender
+                    .oneshot_command(async move { create_audio_capture(&handle, selection).await });
+            }
             AppMsg::AddTestTone => {
                 let handle = self.bridge.handle().clone();
                 sender.oneshot_command(async move { create_test_tone(&handle).await });
@@ -798,7 +817,13 @@ impl AsyncComponent for AppModel {
                     SourceKind::PipeWireDisplay | SourceKind::PipeWireWindow
                 );
                 if !source.enabled
-                    || !(portal || matches!(source.kind, SourceKind::V4l2Camera))
+                    || !(portal
+                        || matches!(
+                            source.kind,
+                            SourceKind::V4l2Camera
+                                | SourceKind::PipeWireAudioInput
+                                | SourceKind::PipeWireAppAudio
+                        ))
                     || snapshot.source_runtime(source_id).is_some_and(|runtime| {
                         matches!(
                             runtime.status,
@@ -972,6 +997,9 @@ impl AsyncComponent for AppModel {
                 warn!(%source_id, %error, "shared source created but placement failed");
                 self.toast_overlay.add_toast(adw::Toast::new(&format!("Source was created, but could not be placed: {error}. Place it from Shared sources.")));
             }
+            AppCmd::AudioConfigurationFailed { source_id, error } => {
+                self.toast_overlay.add_toast(adw::Toast::new(&format!("Audio source {source_id} was created but setup failed: {error}. Remove it from the mixer or shared sources before retrying.")));
+            }
             AppCmd::SourceEventMissing => {
                 self.toast_overlay.add_toast(adw::Toast::new("Source creation returned no source ID; inspect Shared sources before retrying."));
             }
@@ -1000,6 +1028,80 @@ impl Drop for AppModel {
         }
         if let Some(pump) = self.preview_pump.take() {
             pump.abort();
+        }
+    }
+}
+
+/// Saving a selected target creates no grant; capture starts only on a later command.
+async fn create_audio_capture(
+    handle: &prismcast_app::AppHandle,
+    selection: crate::audio_sources::AudioSelection,
+) -> AppCmd {
+    if let Err(error) = selection.settings.validate_for_kind(selection.kind) {
+        return AppCmd::Dispatched(Err(HandleError::Core(error)));
+    }
+    let snapshot = handle.snapshot();
+    let Some(bus_id) = snapshot
+        .state()
+        .audio
+        .buses
+        .iter()
+        .find(|bus| bus.name == prismcast_core::audio::MASTER_BUS_NAME)
+        .or_else(|| snapshot.state().audio.buses.first())
+        .map(|bus| bus.id)
+    else {
+        return AppCmd::Dispatched(Err(HandleError::Core(prismcast_core::Error::InvalidInput(
+            "Create an audio bus before adding a capture source".into(),
+        ))));
+    };
+    let settings = match serde_json::to_value(&selection.settings) {
+        Ok(settings) => settings,
+        Err(error) => {
+            return AppCmd::Dispatched(Err(HandleError::Core(prismcast_core::Error::InvalidInput(
+                error.to_string(),
+            ))))
+        }
+    };
+    let response = match handle
+        .dispatch(Command::AddSource {
+            kind: selection.kind,
+            name: selection.name,
+        })
+        .await
+    {
+        Ok(response) => response,
+        Err(error) => return AppCmd::Dispatched(Err(error)),
+    };
+    let Some(source_id) = created_source_id(&response.events) else {
+        return AppCmd::SourceEventMissing;
+    };
+    match handle
+        .dispatch(Command::Transaction {
+            commands: vec![
+                Command::SetSourceSettings {
+                    source_id,
+                    settings,
+                },
+                Command::SetAudioRoute {
+                    source_id,
+                    bus_id,
+                    tracks: prismcast_core::audio::TrackMask::stereo_pair(),
+                },
+            ],
+        })
+        .await
+    {
+        Ok(response) => AppCmd::Dispatched(Ok(response)),
+        Err(error) => {
+            if handle
+                .dispatch(Command::RemoveSource { source_id })
+                .await
+                .is_ok()
+            {
+                AppCmd::Dispatched(Err(error))
+            } else {
+                AppCmd::AudioConfigurationFailed { source_id, error }
+            }
         }
     }
 }
@@ -1100,6 +1202,72 @@ fn created_source_id(events: &[prismcast_core::Event]) -> Option<prismcast_core:
         }
         _ => None,
     })
+}
+
+#[cfg(test)]
+mod audio_creation_tests {
+    use super::*;
+    #[test]
+    fn selected_audio_target_is_configured_and_routed_without_authorization() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let handle = prismcast_app::AppHandle::spawn(prismcast_app::CoreConfig::default());
+            let selection = crate::audio_sources::AudioSelection {
+                name: "Selected system audio".into(),
+                kind: SourceKind::PipeWireAudioInput,
+                settings: prismcast_core::PipeWireAudioSettings {
+                    schema_version: 1,
+                    target: "fixture.output".into(),
+                    mode: prismcast_core::PipeWireAudioMode::Output,
+                },
+            };
+            assert!(matches!(
+                create_audio_capture(&handle, selection.clone()).await,
+                AppCmd::Dispatched(Ok(_))
+            ));
+            let snapshot = handle.snapshot();
+            assert!(snapshot.current_scene().is_none());
+            let source = snapshot.sources().next().unwrap();
+            assert_eq!(source.kind, selection.kind);
+            assert_eq!(
+                prismcast_core::PipeWireAudioSettings::from_source(source).unwrap(),
+                selection.settings
+            );
+            assert!(snapshot
+                .state()
+                .audio
+                .routes
+                .iter()
+                .any(|route| route.source_id == source.id));
+            assert!(snapshot.source_runtime(source.id).is_none());
+            let mut owner = handle.attach_audio_owner().await.unwrap();
+            assert!(owner.requests.try_recv().is_err());
+            assert!(handle.subscribe_meters().borrow().levels.is_empty());
+            let count = snapshot.state().sources.len();
+            let invalid = crate::audio_sources::AudioSelection {
+                settings: prismcast_core::PipeWireAudioSettings {
+                    mode: prismcast_core::PipeWireAudioMode::Application,
+                    ..selection.settings
+                },
+                ..selection
+            };
+            assert!(matches!(
+                create_audio_capture(&handle, invalid).await,
+                AppCmd::Dispatched(Err(_))
+            ));
+            assert_eq!(
+                handle.snapshot().state().sources.len(),
+                count,
+                "invalid selection must not create an orphan source"
+            );
+            drop(owner);
+            handle.shutdown().await;
+        });
+    }
 }
 
 #[cfg(test)]

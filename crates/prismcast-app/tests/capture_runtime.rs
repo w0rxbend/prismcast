@@ -551,8 +551,8 @@ async fn runtime_observations_are_bounded_and_non_capture_sources_reject_authori
         .report(
             source_id,
             first.generation,
-            CaptureStatus::Denied,
-            None,
+            CaptureStatus::Active,
+            pixels(),
             None,
         )
         .await

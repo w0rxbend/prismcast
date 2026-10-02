@@ -4,14 +4,22 @@
 //! does not determine its duration. Source disable/removal/session stop does.
 use gstreamer::{self as gst, prelude::*};
 use prismcast_audio::{finite_dbfs, BusMeter, MixerPlan, SourceMeter};
-use prismcast_core::{AppState, AudioBusId, Error, Result, SourceId, SourceKind};
+use prismcast_capture::audio::{
+    check_audio_remote, connect_authorized_audio_sources, disconnect_audio_remote,
+    AuthorizedAudioTarget,
+};
+use prismcast_core::{
+    AppState, AudioBusId, Error, PipeWireAudioSettings, Result, SourceId, SourceKind,
+};
 use std::{
     collections::HashMap,
+    os::fd::OwnedFd,
     sync::{
         atomic::{AtomicBool, Ordering},
         mpsc::{self, Receiver},
         Arc, Mutex,
     },
+    time::{Duration, Instant},
 };
 
 fn media(error: impl std::fmt::Display) -> Error {
@@ -54,6 +62,7 @@ fn caps() -> gst::Caps {
 
 #[derive(Clone)]
 struct Measurement {
+    observed: Instant,
     peak: Vec<f32>,
     rms: Vec<f32>,
 }
@@ -73,6 +82,7 @@ fn measurement(message: &gst::Message) -> Option<Measurement> {
             .collect()
     };
     Some(Measurement {
+        observed: Instant::now(),
         peak: values("peak")?,
         rms: values("rms")?,
     })
@@ -87,9 +97,18 @@ struct Graph {
     observations: Arc<Mutex<Vec<Option<Measurement>>>>,
     terminal: Receiver<String>,
     failed: Arc<AtomicBool>,
+    last_samples: HashMap<SourceId, Instant>,
+    remotes: Vec<OwnedFd>,
 }
 impl Graph {
-    fn build(plan: &MixerPlan) -> Result<Self> {
+    fn build(plan: &MixerPlan, authorized: &[AuthorizedAudioTarget]) -> Result<Self> {
+        let mut connected = HashMap::new();
+        let mut remotes = Vec::new();
+        for source in connect_authorized_audio_sources(authorized)? {
+            let (id, element, remote) = source.into_parts();
+            connected.insert(id, element);
+            remotes.push(remote);
+        }
         let pipeline = gst::Pipeline::new();
         let (terminal_tx, terminal) = mpsc::sync_channel(1);
         let observations = Arc::new(Mutex::new(Vec::new()));
@@ -102,6 +121,11 @@ impl Graph {
             observations,
             terminal,
             failed,
+            last_samples: authorized
+                .iter()
+                .map(|target| (target.source_id(), Instant::now()))
+                .collect(),
+            remotes,
         };
         let mut mixer_elements = HashMap::new();
         let mut levels = Vec::new();
@@ -135,14 +159,19 @@ impl Graph {
         }
         let mut source_levels = Vec::new();
         for source in &plan.sources {
-            tracing::debug!(source_id=%source.source_id, "building diagnostic audio branch");
-            let tone = gst::ElementFactory::make("audiotestsrc")
-                .property("is-live", true)
-                .property("freq", 440.0_f64)
-                .property("volume", 0.5_f64)
-                .property_from_str("wave", "sine")
-                .build()
-                .map_err(media)?;
+            let tone = if let Some(element) = connected.remove(&source.source_id) {
+                tracing::debug!(source_id=%source.source_id, "building authorized PipeWire audio branch");
+                element
+            } else {
+                tracing::debug!(source_id=%source.source_id, "building diagnostic audio branch");
+                gst::ElementFactory::make("audiotestsrc")
+                    .property("is-live", true)
+                    .property("freq", 440.0_f64)
+                    .property("volume", 0.5_f64)
+                    .property_from_str("wave", "sine")
+                    .build()
+                    .map_err(media)?
+            };
             let convert = element("audioconvert")?;
             let resample = element("audioresample")?;
             let filter = gst::ElementFactory::make("capsfilter")
@@ -255,6 +284,9 @@ impl Graph {
             // Dropping EVERY message prevents an unbounded native bus backlog.
             gst::BusSyncReply::Drop
         });
+        for remote in &graph.remotes {
+            check_audio_remote(remote)?;
+        }
         graph
             .pipeline
             .set_state(gst::State::Playing)
@@ -269,11 +301,17 @@ impl Graph {
         Ok(pad)
     }
     fn stop(&mut self) -> Result<()> {
-        let transition = self.pipeline.set_state(gst::State::Null).map_err(media);
-        let (settled, state, _) = self.pipeline.state(gst::ClockTime::from_seconds(2));
+        // PipeWire on-disconnect=error can report removal during deliberate
+        // NULL teardown. Retire callbacks first and drop all later bus traffic.
         if let Some(bus) = self.pipeline.bus() {
+            bus.set_flushing(true);
             bus.unset_sync_handler();
         }
+        for remote in &self.remotes {
+            disconnect_audio_remote(remote);
+        }
+        let transition = self.pipeline.set_state(gst::State::Null).map_err(media);
+        let (settled, state, _) = self.pipeline.state(gst::ClockTime::from_seconds(2));
         for (element, pad) in self.requests.drain(..) {
             if let Some(peer) = pad.peer() {
                 if pad.direction() == gst::PadDirection::Src {
@@ -289,6 +327,7 @@ impl Graph {
         if state != gst::State::Null {
             return Err(media("audio teardown did not reach NULL before deadline"));
         }
+        self.remotes.clear();
         Ok(())
     }
     fn take(&mut self) -> Result<(Vec<SourceMeter>, Vec<BusMeter>)> {
@@ -308,6 +347,9 @@ impl Graph {
         for (index, slot) in values.iter_mut().enumerate() {
             if let Some(value) = slot.take() {
                 if index < self.sources.len() {
+                    if let Some(last) = self.last_samples.get_mut(&self.sources[index]) {
+                        *last = value.observed;
+                    }
                     sources.push(SourceMeter {
                         source_id: self.sources[index],
                         peak_dbfs: value.peak,
@@ -322,6 +364,13 @@ impl Graph {
                 }
             }
         }
+        if let Some((source_id, _)) = self
+            .last_samples
+            .iter()
+            .find(|(_, last)| last.elapsed() >= Duration::from_secs(3))
+        {
+            return Err(media(format!("PipeWire audio source {source_id} delivered no fresh samples before its deadline; retry authorization")));
+        }
         Ok((sources, buses))
     }
 }
@@ -332,11 +381,13 @@ impl Drop for Graph {
 }
 
 /// Synchronous backend; construct, reconcile, poll and stop on its owner thread.
-/// Outputs terminate in fakesinks: no capture or playback device is opened.
+/// Outputs terminate in fakesinks. PipeWire streams open only from an explicit
+/// authorization allowlist; ordinary reconciliation creates diagnostic tones.
 pub struct GstAudioMixer {
     plan: Option<MixerPlan>,
     graph: Option<Graph>,
     bus_meters: Vec<BusMeter>,
+    authorized: Vec<AuthorizedAudioTarget>,
 }
 impl GstAudioMixer {
     pub fn new() -> Result<Self> {
@@ -345,13 +396,52 @@ impl GstAudioMixer {
             plan: None,
             graph: None,
             bus_meters: Vec::new(),
+            authorized: Vec::new(),
         })
     }
     /// Rebuild only for an effective signal/routing change. Video/UI changes
     /// leave the running audio clock and graph untouched.
     pub fn reconcile(&mut self, state: &AppState) -> Result<()> {
+        self.reconcile_authorized(state, &[])
+    }
+    /// Open only explicitly granted physical sources. Persisted settings alone
+    /// never create capture. Verify one current inventory before each rebuild.
+    pub fn reconcile_authorized(
+        &mut self,
+        state: &AppState,
+        authorized: &[AuthorizedAudioTarget],
+    ) -> Result<()> {
+        if authorized.len() > 8 {
+            return Err(Error::InvalidInput(
+                "audio capture supports at most eight grants".into(),
+            ));
+        }
+        for target in authorized {
+            let source = state
+                .source(target.source_id())
+                .ok_or_else(|| Error::NotFound("authorized audio source was removed".into()))?;
+            if !source.enabled || PipeWireAudioSettings::from_source(source)? != *target.settings()
+            {
+                return Err(Error::InvalidInput(
+                    "authorized audio source settings changed or source disabled".into(),
+                ));
+            }
+        }
         let mut active = Vec::new();
         for source in state.sources.values() {
+            if source.enabled
+                && authorized
+                    .iter()
+                    .any(|target| target.source_id() == source.id)
+            {
+                if active.len() == prismcast_audio::MAX_AUDIO_SOURCES {
+                    return Err(Error::InvalidInput(
+                        "audio graph supports at most 32 sources".into(),
+                    ));
+                }
+                active.push(source.id);
+                continue;
+            }
             if source.enabled && source.kind == SourceKind::TestPattern {
                 if let Some(flag) = source.settings.get("audio_test") {
                     if !flag.is_boolean() {
@@ -370,14 +460,15 @@ impl GstAudioMixer {
             }
         }
         let plan = MixerPlan::from_state(state, &active)?;
-        if self.plan.as_ref() == Some(&plan) {
+        if self.plan.as_ref() == Some(&plan) && self.authorized == authorized {
             return Ok(());
         }
         self.stop()?;
         if !plan.sources.is_empty() {
-            self.graph = Some(Graph::build(&plan)?);
+            self.graph = Some(Graph::build(&plan, authorized)?);
         }
         self.plan = Some(plan);
+        self.authorized = authorized.to_vec();
         Ok(())
     }
     pub fn poll(&mut self) -> Result<Vec<SourceMeter>> {
@@ -405,6 +496,7 @@ impl GstAudioMixer {
     }
     pub fn stop(&mut self) -> Result<()> {
         self.plan = None;
+        self.authorized.clear();
         self.bus_meters.clear();
         match self.graph.take() {
             Some(mut graph) => graph.stop(),
@@ -436,6 +528,30 @@ mod tests {
         });
         state.sources.insert(source.id, source);
         state
+    }
+    #[test]
+    fn captured_sample_watchdog_rejects_stale_callbacks_but_accepts_fresh_silence() {
+        let mut mixer = GstAudioMixer::new().unwrap();
+        mixer.reconcile(&state()).unwrap();
+        let graph = mixer.graph.as_mut().unwrap();
+        graph.pipeline.set_state(gst::State::Null).unwrap();
+        let id = graph.sources[0];
+        let stale = Instant::now() - Duration::from_secs(4);
+        graph.last_samples.insert(id, stale);
+        // A queued old observation cannot make a stalled stream appear fresh.
+        graph.observations.lock().unwrap()[0] = Some(Measurement {
+            observed: stale,
+            peak: vec![-6.0; 2],
+            rms: vec![-9.0; 2],
+        });
+        assert!(graph.take().is_err());
+        graph.observations.lock().unwrap()[0] = Some(Measurement {
+            observed: Instant::now(),
+            peak: vec![-120.0; 2],
+            rms: vec![-120.0; 2],
+        });
+        assert_eq!(graph.take().unwrap().0[0].peak_dbfs, vec![-120.0; 2]);
+        mixer.stop().unwrap();
     }
     #[test]
     fn unrelated_reconciliation_keeps_graph_and_stop_releases_pads_and_callback() {
@@ -471,6 +587,7 @@ mod tests {
         mixer.reconcile(&state()).unwrap();
         let graph = mixer.graph.as_mut().unwrap();
         graph.observations.lock().unwrap()[0] = Some(Measurement {
+            observed: Instant::now(),
             peak: vec![-6.0; 2],
             rms: vec![-9.0; 2],
         });

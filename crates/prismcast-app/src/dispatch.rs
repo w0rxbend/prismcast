@@ -214,6 +214,9 @@ impl<'de> Deserialize<'de> for Permissions {
 /// The permission a command requires (PLAN.md §24; see module docs for the
 /// mapping rationale).
 pub fn required_permission(command: &Command) -> Permission {
+    // AuthorizeSourceCapture preserves its existing ControlScenes policy for
+    // both source families; controller authorization is independent of the
+    // local video/audio owner capability (ADR-0024).
     use Command as C;
     match command {
         C::AddScene { .. }

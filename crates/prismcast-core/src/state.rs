@@ -48,7 +48,7 @@ use crate::source::{Source, SourceKind};
 use crate::transition::Transition;
 
 /// The pure in-memory domain store.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AppState {
     /// Known profiles; exactly one is active.
     pub profiles: IndexMap<ProfileId, Profile>,
@@ -402,11 +402,19 @@ pub fn apply(state: &mut AppState, command: &Command) -> Result<Vec<Event>> {
                     SourceKind::PipeWireDisplay
                         | SourceKind::PipeWireWindow
                         | SourceKind::V4l2Camera
+                        | SourceKind::PipeWireAudioInput
+                        | SourceKind::PipeWireAppAudio
                 )
             {
                 return Err(Error::InvalidInput(
                     "capture authorization requires an enabled capture source".into(),
                 ));
+            }
+            if matches!(
+                source.kind,
+                SourceKind::PipeWireAudioInput | SourceKind::PipeWireAppAudio
+            ) {
+                crate::PipeWireAudioSettings::from_source(source)?;
             }
             Ok(vec![Event::Source(
                 SourceEvent::CaptureAuthorizationRequested {

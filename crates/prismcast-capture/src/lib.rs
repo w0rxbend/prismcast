@@ -12,6 +12,7 @@ use std::{
 };
 use tokio::sync::{oneshot, watch, Notify, OwnedSemaphorePermit, Semaphore};
 
+pub mod audio;
 pub mod camera;
 pub mod devices;
 mod portal;

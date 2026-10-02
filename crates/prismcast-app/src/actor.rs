@@ -38,12 +38,13 @@ use prismcast_core::event::Event;
 use prismcast_core::state::{apply, AppState};
 
 use crate::audio::{
-    validate_levels, AudioOwner, AudioRuntimeHandle, MeterSnapshot, SourceMeter, MAX_METER_SOURCES,
+    validate_levels, AudioCaptureAuthorizationRequest, AudioOwner, AudioRuntimeHandle,
+    MeterSnapshot, SourceMeter, MAX_METER_SOURCES,
 };
 use crate::broadcaster::{EventBroadcaster, EventFilter, EventStream};
 use crate::capture::{
-    validate_runtime, CaptureAuthorizationRequest, CaptureOwner, CaptureParentWindow,
-    CaptureRuntimeHandle, CAPTURE_CAPACITY,
+    validate_audio_runtime, validate_runtime, CaptureAuthorizationRequest, CaptureOwner,
+    CaptureParentWindow, CaptureRuntimeHandle, CAPTURE_CAPACITY,
 };
 use crate::dispatch::{Permissions, Query, QueryResponse};
 use crate::persistence::PersistenceHandle;
@@ -144,7 +145,14 @@ pub(crate) enum ActorMessage {
     AudioLevels {
         owner_id: uuid::Uuid,
         revision: u64,
+        generation: Option<CaptureGeneration>,
         levels: SourceMeter,
+        reply: oneshot::Sender<Result<(), Error>>,
+    },
+    AudioCaptureRuntime {
+        owner_id: uuid::Uuid,
+        source_id: SourceId,
+        runtime: SourceRuntime,
         reply: oneshot::Sender<Result<(), Error>>,
     },
     AttachCaptureOwner {
@@ -552,7 +560,33 @@ struct CoreActor {
 }
 struct AudioAttachment {
     owner_id: uuid::Uuid,
+    requests: mpsc::Sender<AudioCaptureAuthorizationRequest>,
     closed: oneshot::Receiver<()>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CaptureFamily {
+    Video,
+    Audio,
+}
+
+fn capture_family(kind: prismcast_core::SourceKind) -> Option<CaptureFamily> {
+    use prismcast_core::SourceKind;
+    match kind {
+        SourceKind::PipeWireDisplay | SourceKind::PipeWireWindow | SourceKind::V4l2Camera => {
+            Some(CaptureFamily::Video)
+        }
+        SourceKind::PipeWireAudioInput | SourceKind::PipeWireAppAudio => Some(CaptureFamily::Audio),
+        _ => None,
+    }
+}
+
+enum CaptureAdmission {
+    Video(mpsc::OwnedPermit<CaptureAuthorizationRequest>),
+    Audio(
+        mpsc::OwnedPermit<AudioCaptureAuthorizationRequest>,
+        prismcast_core::PipeWireAudioSettings,
+    ),
 }
 struct CaptureAttachment {
     owner_id: uuid::Uuid,
@@ -635,7 +669,10 @@ async fn capture_owner_closed(owner: &mut Option<CaptureAttachment>) {
 
 async fn audio_owner_closed(owner: &mut Option<AudioAttachment>) {
     if let Some(owner) = owner {
-        let _ = (&mut owner.closed).await;
+        tokio::select! {
+            _ = &mut owner.closed => {},
+            _ = owner.requests.closed() => {},
+        }
     } else {
         std::future::pending::<()>().await;
     }
@@ -648,8 +685,8 @@ impl CoreActor {
         loop {
             let message = tokio::select! {
                 biased;
-                _ = audio_owner_closed(&mut self.audio) => { self.audio = None; self.clear_meters(); continue; }
-                _ = capture_owner_closed(&mut self.capture) => { self.capture_disconnected(); continue; }
+                _ = audio_owner_closed(&mut self.audio) => { self.capture_disconnected(CaptureFamily::Audio); continue; }
+                _ = capture_owner_closed(&mut self.capture) => { self.capture_disconnected(CaptureFamily::Video); continue; }
                 message = self.rx.recv() => match message { Some(message) => message, None => break },
             };
             match message {
@@ -676,10 +713,24 @@ impl CoreActor {
                 ActorMessage::AudioLevels {
                     owner_id,
                     revision,
+                    generation,
                     levels,
                     reply,
                 } => {
-                    let _ = reply.send(self.report_audio(owner_id, revision, levels));
+                    let _ = reply.send(self.report_audio(owner_id, revision, generation, levels));
+                }
+                ActorMessage::AudioCaptureRuntime {
+                    owner_id,
+                    source_id,
+                    runtime,
+                    reply,
+                } => {
+                    let _ = reply.send(self.report_capture(
+                        owner_id,
+                        source_id,
+                        runtime,
+                        CaptureFamily::Audio,
+                    ));
                 }
                 ActorMessage::AttachCaptureOwner {
                     tx,
@@ -695,7 +746,12 @@ impl CoreActor {
                     runtime,
                     reply,
                 } => {
-                    let _ = reply.send(self.report_capture(owner_id, source_id, runtime));
+                    let _ = reply.send(self.report_capture(
+                        owner_id,
+                        source_id,
+                        runtime,
+                        CaptureFamily::Video,
+                    ));
                 }
                 ActorMessage::Command(envelope) => self.handle_command(envelope),
                 ActorMessage::Undo { permissions, reply } => {
@@ -762,8 +818,14 @@ impl CoreActor {
         }
         let owner_id = uuid::Uuid::new_v4();
         let (liveness, closed) = oneshot::channel();
-        self.audio = Some(AudioAttachment { owner_id, closed });
+        let (requests, rx) = mpsc::channel(CAPTURE_CAPACITY);
+        self.audio = Some(AudioAttachment {
+            owner_id,
+            requests,
+            closed,
+        });
         Ok(AudioOwner {
+            requests: rx,
             runtime: AudioRuntimeHandle { tx, owner_id },
             snapshots,
             _liveness: liveness,
@@ -774,6 +836,7 @@ impl CoreActor {
         &mut self,
         owner_id: uuid::Uuid,
         revision: u64,
+        generation: Option<CaptureGeneration>,
         levels: SourceMeter,
     ) -> Result<(), Error> {
         if self.audio.as_ref().map(|owner| owner.owner_id) != Some(owner_id) {
@@ -792,14 +855,23 @@ impl CoreActor {
             .state
             .source(source_id)
             .ok_or_else(|| Error::NotFound(format!("source {source_id}")))?;
-        if !source.enabled
-            || source.kind != prismcast_core::SourceKind::TestPattern
-            || source
-                .settings
-                .get("audio_test")
-                .and_then(serde_json::Value::as_bool)
-                != Some(true)
-        {
+        let valid_source = match generation {
+            None => {
+                source.kind == prismcast_core::SourceKind::TestPattern
+                    && source
+                        .settings
+                        .get("audio_test")
+                        .and_then(serde_json::Value::as_bool)
+                        == Some(true)
+            }
+            Some(generation) => {
+                capture_family(source.kind) == Some(CaptureFamily::Audio)
+                    && self.capture_runtime.get(&source_id).is_some_and(|runtime| {
+                        runtime.status == CaptureStatus::Active && runtime.generation == generation
+                    })
+            }
+        };
+        if !source.enabled || !valid_source {
             return Err(Error::InvalidInput("audio source is inactive".into()));
         }
         let mut meters = self.meter_tx.borrow().as_ref().clone();
@@ -860,20 +932,68 @@ impl CoreActor {
     ) -> Result<CommandResponse, Error> {
         let command = Command::AuthorizeSourceCapture { source_id };
         let mut events = apply(&mut self.state, &command)?;
-        if !self.capture_runtime.contains_key(&source_id)
+        let retirement = if !self.capture_runtime.contains_key(&source_id)
             && self.capture_runtime.len() >= CAPTURE_CAPACITY
         {
-            return Err(Error::InvalidInput(
-                "capture runtime capacity exhausted".into(),
-            ));
-        }
-        let owner = self
-            .capture
-            .as_ref()
-            .ok_or_else(|| Error::InvalidInput("capture owner is unavailable".into()))?;
-        let permit = owner.requests.clone().try_reserve_owned().map_err(|_| {
-            Error::InvalidInput("capture request receiver is full or unavailable".into())
-        })?;
+            Some(
+                self.capture_runtime
+                    .iter()
+                    .filter(|(_, runtime)| {
+                        !matches!(
+                            runtime.status,
+                            CaptureStatus::Authorizing | CaptureStatus::Active
+                        )
+                    })
+                    .min_by_key(|(_, runtime)| runtime.generation)
+                    .map(|(source_id, _)| *source_id)
+                    .ok_or_else(|| {
+                        Error::InvalidInput("capture runtime capacity exhausted".into())
+                    })?,
+            )
+        } else {
+            None
+        };
+        let source = self
+            .state
+            .source(source_id)
+            .ok_or_else(|| Error::NotFound(format!("source {source_id}")))?;
+        // Reserve effect delivery before allocating or retiring any runtime.
+        let unavailable =
+            || Error::InvalidInput("capture request receiver is full or unavailable".into());
+        let admission = match capture_family(source.kind) {
+            Some(CaptureFamily::Audio) => {
+                let settings = prismcast_core::PipeWireAudioSettings::from_source(source)?;
+                let owner = self.audio.as_ref().ok_or_else(|| {
+                    Error::InvalidInput("audio capture owner is unavailable".into())
+                })?;
+                CaptureAdmission::Audio(
+                    owner
+                        .requests
+                        .clone()
+                        .try_reserve_owned()
+                        .map_err(|_| unavailable())?,
+                    settings,
+                )
+            }
+            Some(CaptureFamily::Video) => {
+                let owner = self
+                    .capture
+                    .as_ref()
+                    .ok_or_else(|| Error::InvalidInput("capture owner is unavailable".into()))?;
+                CaptureAdmission::Video(
+                    owner
+                        .requests
+                        .clone()
+                        .try_reserve_owned()
+                        .map_err(|_| unavailable())?,
+                )
+            }
+            None => {
+                return Err(Error::InvalidInput(
+                    "source does not support capture".into(),
+                ))
+            }
+        };
         self.capture_generation = self
             .capture_generation
             .checked_add(1)
@@ -885,6 +1005,13 @@ impl CoreActor {
             dimensions: None,
             message: None,
         };
+        if let Some(retired) = retirement {
+            self.capture_runtime.remove(&retired);
+            events.push(Event::Source(SourceEvent::RuntimeChanged {
+                source_id: retired,
+                runtime: None,
+            }));
+        }
         self.capture_runtime.insert(source_id, runtime.clone());
         events.push(Event::Source(SourceEvent::RuntimeChanged {
             source_id,
@@ -893,11 +1020,22 @@ impl CoreActor {
         let events = self.commit(events);
         // Reserved admission cannot be lost to queue saturation; publish first
         // so the receiver sees this generation in its initial snapshot read.
-        permit.send(CaptureAuthorizationRequest {
-            source_id,
-            generation,
-            parent_window: parent.map(|p| p.0),
-        });
+        match admission {
+            CaptureAdmission::Video(permit) => {
+                permit.send(CaptureAuthorizationRequest {
+                    source_id,
+                    generation,
+                    parent_window: parent.map(|p| p.0),
+                });
+            }
+            CaptureAdmission::Audio(permit, settings) => {
+                permit.send(AudioCaptureAuthorizationRequest {
+                    source_id,
+                    generation,
+                    settings,
+                });
+            }
+        }
         Ok(CommandResponse {
             label: command.label(),
             events,
@@ -909,25 +1047,26 @@ impl CoreActor {
         owner_id: uuid::Uuid,
         source_id: SourceId,
         runtime: SourceRuntime,
+        family: CaptureFamily,
     ) -> Result<(), Error> {
-        if self.capture.as_ref().map(|o| o.owner_id) != Some(owner_id) {
+        let current_owner = match family {
+            CaptureFamily::Video => self.capture.as_ref().map(|owner| owner.owner_id),
+            CaptureFamily::Audio => self.audio.as_ref().map(|owner| owner.owner_id),
+        };
+        if current_owner != Some(owner_id) {
             return Err(Error::Unauthorized(
                 "capture owner capability is stale".into(),
             ));
         }
-        validate_runtime(&runtime)?;
+        match family {
+            CaptureFamily::Video => validate_runtime(&runtime)?,
+            CaptureFamily::Audio => validate_audio_runtime(&runtime)?,
+        }
         let source = self
             .state
             .source(source_id)
             .ok_or_else(|| Error::NotFound(format!("source {source_id}")))?;
-        if !source.enabled
-            || !matches!(
-                source.kind,
-                prismcast_core::SourceKind::PipeWireDisplay
-                    | prismcast_core::SourceKind::PipeWireWindow
-                    | prismcast_core::SourceKind::V4l2Camera
-            )
-        {
+        if !source.enabled || capture_family(source.kind) != Some(family) {
             return Err(Error::InvalidInput("capture source is inactive".into()));
         }
         let previous = self
@@ -956,18 +1095,39 @@ impl CoreActor {
         Ok(())
     }
 
-    fn capture_disconnected(&mut self) {
-        self.capture = None;
+    fn capture_disconnected(&mut self, family: CaptureFamily) {
+        match family {
+            CaptureFamily::Video => self.capture = None,
+            CaptureFamily::Audio => {
+                self.audio = None;
+                self.clear_meters();
+            }
+        }
         let mut events = Vec::new();
         for (source_id, runtime) in &mut self.capture_runtime {
-            if matches!(
-                runtime.status,
-                CaptureStatus::Authorizing | CaptureStatus::Active
-            ) {
+            if self
+                .state
+                .source(*source_id)
+                .and_then(|source| capture_family(source.kind))
+                == Some(family)
+                && matches!(
+                    runtime.status,
+                    CaptureStatus::Authorizing | CaptureStatus::Active
+                )
+            {
                 runtime.status = CaptureStatus::Failed;
                 runtime.dimensions = None;
-                runtime.message =
-                    Some("Capture service disconnected; authorize again to retry".into());
+                runtime.message = Some(
+                    match family {
+                        CaptureFamily::Video => {
+                            "Capture service disconnected; authorize again to retry"
+                        }
+                        CaptureFamily::Audio => {
+                            "Audio capture service disconnected; authorize again to retry"
+                        }
+                    }
+                    .into(),
+                );
                 events.push(Event::Source(SourceEvent::RuntimeChanged {
                     source_id: *source_id,
                     runtime: Some(runtime.clone()),

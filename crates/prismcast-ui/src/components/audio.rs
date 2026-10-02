@@ -65,6 +65,8 @@ impl AudioStatusRefresh {
 pub enum AudioOutput {
     Command(Box<Command>),
     AddTestTone,
+    AddCapture,
+    Authorize(prismcast_core::SourceId),
 }
 struct AudioRow {
     widget: gtk::Box,
@@ -79,6 +81,10 @@ struct AudioRow {
     dragging: Rc<Cell<bool>>,
     remove: gtk::Button,
     removal: Rc<RefCell<Option<Command>>>,
+    start: gtk::Button,
+    capture_status: gtk::Label,
+    can_start: Rc<Cell<bool>>,
+    enabled: gtk::CheckButton,
 }
 impl SimpleComponent for AudioPanel {
     type Input = AudioInput;
@@ -101,12 +107,16 @@ impl SimpleComponent for AudioPanel {
         let output = sender.output_sender().clone();
         add.connect_clicked(move |_| output.emit(AudioOutput::AddTestTone));
         content.append(&add);
+        let capture = gtk::Button::with_label("Add audio capture");
+        let output = sender.output_sender().clone();
+        capture.connect_clicked(move |_| output.emit(AudioOutput::AddCapture));
+        content.append(&capture);
         let health = gtk::Label::new(Some("Starting audio…"));
         health.set_wrap(true);
         health.add_css_class("caption");
         content.append(&health);
         let empty = gtk::Label::new(Some(
-            "Add a test tone to measure audio. Device audio capture is coming next.",
+            "Add an audio capture source or a test tone to measure audio.",
         ));
         empty.set_wrap(true);
         empty.add_css_class("dim-label");
@@ -182,6 +192,7 @@ impl AudioPanel {
             if !row.dragging.get() && (row.gain.value() - f64::from(mixer.volume_db)).abs() > 0.01 {
                 row.gain.set_value(f64::from(mixer.volume_db));
             }
+            row.enabled.set_active(source.enabled);
             row.muted.set_active(mixer.muted);
             row.solo.set_active(mixer.solo);
             row.gain.set_sensitive(source.enabled);
@@ -214,7 +225,50 @@ impl AudioPanel {
                     .get("audio_test")
                     .and_then(|value| value.as_bool())
                     == Some(true);
-            row.remove.set_visible(is_tone);
+            let physical = matches!(
+                source.kind,
+                SourceKind::PipeWireAudioInput | SourceKind::PipeWireAppAudio
+            );
+            row.remove.set_visible(is_tone || physical);
+            row.remove.set_label(if physical {
+                "Remove audio source"
+            } else {
+                "Remove test tone"
+            });
+            row.start.set_visible(physical);
+            row.capture_status.set_visible(physical);
+            let runtime = snapshot.source_runtime(source.id);
+            let available = source.enabled
+                && !runtime.is_some_and(|runtime| {
+                    matches!(
+                        runtime.status,
+                        prismcast_core::CaptureStatus::Authorizing
+                            | prismcast_core::CaptureStatus::Active
+                    )
+                });
+            row.can_start.set(available);
+            row.start.set_sensitive(available);
+            row.start.set_label(if runtime.is_none() {
+                "Start capture"
+            } else {
+                "Retry capture"
+            });
+            let status = match runtime.map(|runtime| runtime.status) {
+                None => "Capture stopped",
+                Some(prismcast_core::CaptureStatus::Authorizing) => "Starting capture…",
+                Some(prismcast_core::CaptureStatus::Active) => "Capturing audio",
+                Some(prismcast_core::CaptureStatus::Cancelled) => "Capture cancelled",
+                Some(prismcast_core::CaptureStatus::Denied) => "Capture denied",
+                Some(prismcast_core::CaptureStatus::Revoked) => "Capture revoked",
+                Some(prismcast_core::CaptureStatus::Failed) => "Capture failed",
+            };
+            row.capture_status.set_label(&if let Some(message) =
+                runtime.and_then(|runtime| runtime.message.as_deref())
+            {
+                format!("{status}: {message}")
+            } else {
+                status.into()
+            });
             let mut commands: Vec<_> = state
                 .audio
                 .routes
@@ -270,6 +324,8 @@ impl AudioRow {
         gain.set_value(0.0);
         gain.set_hexpand(true);
         gain.set_tooltip_text(Some("Gain in decibels"));
+        let enabled = gtk::CheckButton::with_label("Enabled");
+        widget.append(&enabled);
         let muted = gtk::CheckButton::with_label("Mute");
         let solo = gtk::CheckButton::with_label("Solo");
         controls.append(&gain);
@@ -317,6 +373,18 @@ impl AudioRow {
                 }
             }
         });
+        enabled.connect_toggled({
+            let restoring = restoring.clone();
+            let output = sender.output_sender().clone();
+            move |button| {
+                if !restoring.get() {
+                    output.emit(AudioOutput::Command(Box::new(Command::SetSourceEnabled {
+                        source_id,
+                        enabled: button.is_active(),
+                    })));
+                }
+            }
+        });
         muted.connect_toggled({
             let restoring = restoring.clone();
             let output = sender.output_sender().clone();
@@ -360,6 +428,24 @@ impl AudioRow {
             }
         });
         widget.append(&remove);
+        let start = gtk::Button::with_label("Start capture");
+        let can_start = Rc::new(Cell::new(false));
+        start.connect_clicked({
+            let allowed = can_start.clone();
+            let output = sender.output_sender().clone();
+            move |_| {
+                if allowed.get() {
+                    output.emit(AudioOutput::Authorize(source_id));
+                }
+            }
+        });
+        widget.append(&start);
+        let capture_status = gtk::Label::new(Some("Capture stopped"));
+        capture_status.set_wrap(true);
+        capture_status.set_xalign(0.0);
+        capture_status.add_css_class("caption");
+        widget.append(&capture_status);
+
         Self {
             widget,
             name,
@@ -373,6 +459,10 @@ impl AudioRow {
             dragging,
             remove,
             removal,
+            start,
+            can_start,
+            capture_status,
+            enabled,
         }
     }
 }
@@ -534,6 +624,101 @@ mod tests {
         window.close();
         drop(panel);
         drain();
+        runtime.block_on(handle.shutdown());
+        thread.join().unwrap();
+    }
+    #[test]
+    #[ignore = "requires a real GTK display; run separately with --ignored --test-threads=1"]
+    fn audio_capture_controls_separate_enable_start_and_atomic_removal() {
+        adw::init().unwrap();
+        let (bridge, thread) = crate::bridge::CoreBridge::spawn_background().unwrap();
+        let handle = bridge.handle().clone();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (id,mut owner) = runtime.block_on(async {
+            let owner = handle.attach_audio_owner().await.unwrap();
+            let response = handle.dispatch(Command::AddSource { kind:SourceKind::PipeWireAudioInput, name:"Capture controls".into() }).await.unwrap();
+            let id = response.events.iter().find_map(|event| match event { prismcast_core::Event::Source(prismcast_core::SourceEvent::Added { source }) => Some(source.id), _ => None }).unwrap();
+            let bus_id = handle.snapshot().state().audio.buses[0].id;
+            handle.dispatch(Command::Transaction { commands:vec![Command::SetSourceSettings { source_id:id,settings:serde_json::json!({"schema_version":1,"target":"fixture.mic","mode":"input"}) }, Command::SetAudioRoute { source_id:id,bus_id,tracks:prismcast_core::audio::TrackMask::stereo_pair() }] }).await.unwrap();
+            (id,owner)
+        });
+        assert!(handle.snapshot().source_runtime(id).is_none());
+        let outputs = Rc::new(RefCell::new(Vec::new()));
+        let capture = outputs.clone();
+        let panel = AudioPanel::builder()
+            .launch(())
+            .connect_receiver(move |_, message| capture.borrow_mut().push(message));
+        let window = adw::Window::new();
+        window.set_default_size(420, 350);
+        window.set_content(Some(panel.widget()));
+        window.present();
+        panel.emit(AudioInput::Refresh(SnapshotRefresh::new(handle.clone())));
+        drain();
+        let start = panel.model().rows[&id].start.clone();
+        let enabled = panel.model().rows[&id].enabled.clone();
+        assert!(outputs.borrow().is_empty());
+        assert!(start.is_sensitive());
+        assert_eq!(start.label().as_deref(), Some("Start capture"));
+        start.emit_clicked();
+        drain();
+        assert!(matches!(&outputs.borrow()[0],AudioOutput::Authorize(source) if *source==id));
+        runtime
+            .block_on(handle.dispatch(Command::AuthorizeSourceCapture { source_id: id }))
+            .unwrap();
+        let effect = runtime.block_on(owner.requests.recv()).unwrap();
+        assert_eq!(effect.source_id, id);
+        panel.emit(AudioInput::Refresh(SnapshotRefresh::new(handle.clone())));
+        drain();
+        assert!(!start.is_sensitive());
+        start.emit_clicked();
+        drain();
+        assert_eq!(outputs.borrow().len(), 1);
+        enabled.set_active(false);
+        drain();
+        assert!(
+            matches!(&outputs.borrow()[1],AudioOutput::Command(command) if matches!(command.as_ref(),Command::SetSourceEnabled { enabled:false,.. }))
+        );
+        runtime
+            .block_on(handle.dispatch(Command::SetSourceEnabled {
+                source_id: id,
+                enabled: false,
+            }))
+            .unwrap();
+        panel.emit(AudioInput::Refresh(SnapshotRefresh::new(handle.clone())));
+        drain();
+        assert!(!start.is_sensitive());
+        enabled.set_active(true);
+        drain();
+        runtime
+            .block_on(handle.dispatch(Command::SetSourceEnabled {
+                source_id: id,
+                enabled: true,
+            }))
+            .unwrap();
+        panel.emit(AudioInput::Refresh(SnapshotRefresh::new(handle.clone())));
+        drain();
+        assert!(start.is_sensitive());
+        assert!(handle.snapshot().source_runtime(id).is_none());
+        assert_eq!(
+            outputs.borrow().len(),
+            3,
+            "enable and snapshot refresh must not authorize capture"
+        );
+        panel.model().rows[&id].remove.emit_clicked();
+        drain();
+        let removal = match outputs.borrow().last().unwrap() {
+            AudioOutput::Command(command) => command.as_ref().clone(),
+            _ => panic!("expected atomic removal"),
+        };
+        assert!(matches!(&removal,Command::Transaction { commands } if commands.len()==2));
+        runtime.block_on(handle.dispatch(removal)).unwrap();
+        assert!(!handle.snapshot().state().sources.contains_key(&id));
+        window.close();
+        drop(panel);
+        drop(owner);
         runtime.block_on(handle.shutdown());
         thread.join().unwrap();
     }
