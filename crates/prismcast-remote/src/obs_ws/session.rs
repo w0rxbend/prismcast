@@ -53,6 +53,8 @@ use tracing::{debug, info, info_span, warn, Instrument};
 use uuid::Uuid;
 
 use prismcast_app::broadcaster::StreamEvent;
+use prismcast_app::snapshot::AppSnapshot;
+use prismcast_app::AppHandle;
 use prismcast_protocol::handshake::AuthResponse;
 use prismcast_protocol::subscription::SubscriptionSet;
 
@@ -98,6 +100,10 @@ pub(crate) struct ObsSessionConfig {
 pub(crate) struct ObsSessionContext {
     /// Transport-independent tuning.
     pub config: Arc<ObsSessionConfig>,
+    /// Snapshot reads for event translation (name resolution, primary
+    /// output designation) — an `Arc` clone out of a watch cell, never
+    /// blocking (PLAN.md §57).
+    pub app: AppHandle,
     /// Server-wide event fan-out.
     pub fanout: EventFanout,
     /// Shutdown signal from the owning server.
@@ -137,6 +143,7 @@ pub(crate) async fn run_session(
 async fn run_session_inner(stream: WebSocketStream<TcpStream>, context: ObsSessionContext) {
     let ObsSessionContext {
         config,
+        app,
         fanout,
         mut shutdown,
     } = context;
@@ -146,7 +153,7 @@ async fn run_session_inner(stream: WebSocketStream<TcpStream>, context: ObsSessi
 
     let exit = match handshake(&mut reader, &out_tx, &config).await {
         Ok(established) => {
-            let session = Session::new(config.clone(), fanout, out_tx.clone(), established);
+            let session = Session::new(config.clone(), app, fanout, out_tx.clone(), established);
             session
                 .steady_state(&mut reader, &mut shutdown, config.max_message_size)
                 .await
@@ -382,6 +389,7 @@ async fn handshake(
 /// Live session state for the steady-state loop.
 struct Session {
     config: Arc<ObsSessionConfig>,
+    app: AppHandle,
     session_id: Uuid,
     out_tx: mpsc::Sender<ObsOutbound>,
     events: ObsEventPipe,
@@ -391,15 +399,21 @@ struct Session {
 impl Session {
     fn new(
         config: Arc<ObsSessionConfig>,
+        app: AppHandle,
         fanout: EventFanout,
         out_tx: mpsc::Sender<ObsOutbound>,
         established: Established,
     ) -> Self {
+        let mut events = ObsEventPipe::new(&fanout, established.subscriptions);
+        // Seed name/state memos so renames and removals of pre-existing
+        // entities resolve to names, not UUID fallbacks.
+        events.translator.seed(&app.snapshot());
         Self {
             config,
+            app,
             session_id: established.session_id,
             out_tx,
-            events: ObsEventPipe::new(&fanout, established.subscriptions),
+            events,
             rate_limiter: RateLimiter::new(REQUEST_BURST),
         }
     }
@@ -427,7 +441,11 @@ impl Session {
                 },
                 item = recv_event(&mut self.events.rx) => match item {
                     StreamItem::Item(stream_event) => {
-                        if let Err(exit) = self.events.handle(stream_event, &self.out_tx) {
+                        // The snapshot at processing time is at-or-after the
+                        // event's commit; removal paths use the translator's
+                        // name memo instead.
+                        let snapshot = self.app.snapshot();
+                        if let Err(exit) = self.events.handle(stream_event, &self.out_tx, &snapshot) {
                             return exit;
                         }
                     }
@@ -462,6 +480,10 @@ impl Session {
                     if let Some(mask) = reidentify.event_subscriptions {
                         self.events
                             .replace_set(bitmask::subscription_set_from_bitmask(mask));
+                        // Re-seed the translator's name/state memos so
+                        // entities created while unsubscribed (or while the
+                        // receiver was dropped at mask 0) resolve correctly.
+                        self.events.translator.seed(&self.app.snapshot());
                         debug!(%self.session_id, event_subscriptions = mask, "obs reidentify");
                     }
                     // Upstream answers Reidentify with a fresh Identified.
@@ -676,11 +698,13 @@ async fn execute_sleep(data: Option<&serde_json::Value>) -> RequestStatus {
 }
 
 /// Per-session event pipeline: the subscription set translated from the obs
-/// bitmask, the fan-out receiver, and slow-consumer strike state.
+/// bitmask, the fan-out receiver, the event translator, and slow-consumer
+/// strike state.
 struct ObsEventPipe {
     rx: Option<tokio::sync::broadcast::Receiver<StreamEvent>>,
     fanout: EventFanout,
     set: SubscriptionSet,
+    translator: translate::EventTranslator,
     overflow_strikes: OverflowStrikes,
 }
 
@@ -690,6 +714,7 @@ impl ObsEventPipe {
             rx: (!set.entries.is_empty()).then(|| fanout.subscribe()),
             fanout: fanout.clone(),
             set,
+            translator: translate::EventTranslator::new(),
             overflow_strikes: OverflowStrikes::default(),
         }
     }
@@ -706,13 +731,15 @@ impl ObsEventPipe {
     }
 
     /// Gates one domain event by the subscription bitmask and delivers the
-    /// translated obs event. On a full outbound queue the event is dropped;
-    /// persistent overflow sheds the session (obs has no slow-consumer code:
-    /// 4000 `UnknownReason`).
+    /// translated obs events (one domain event can imply several, e.g. a
+    /// primary output's state change). On a full outbound queue the event is
+    /// dropped; persistent overflow sheds the session (obs has no
+    /// slow-consumer code: 4000 `UnknownReason`).
     fn handle(
         &mut self,
         stream_event: StreamEvent,
         out_tx: &mpsc::Sender<ObsOutbound>,
+        snapshot: &AppSnapshot,
     ) -> Result<(), ObsExit> {
         let event = match stream_event {
             StreamEvent::Lagged { dropped } => {
@@ -730,31 +757,26 @@ impl ObsEventPipe {
         if self.set.get(category).is_none() {
             return Ok(());
         }
-        let Some(event) = translate::event_to_obs(&event) else {
-            return Ok(());
-        };
-        match out_tx.try_send(ObsOutbound::Message(proto::envelope(op::EVENT, &event))) {
-            Ok(()) => {
-                self.overflow_strikes.reset();
-                Ok(())
-            }
-            Err(mpsc::error::TrySendError::Full(_)) => {
-                let shed = self.overflow_strikes.strike();
-                warn!(
-                    strikes = self.overflow_strikes.strikes(),
-                    "outbound queue full; dropped obs event"
-                );
-                if shed {
-                    Err(ObsExit::close(
-                        proto::close::UNKNOWN_REASON,
-                        "slow consumer: persistent outbound overflow",
-                    ))
-                } else {
-                    Ok(())
+        for event in self.translator.event_to_obs(&event, snapshot) {
+            match out_tx.try_send(ObsOutbound::Message(proto::envelope(op::EVENT, &event))) {
+                Ok(()) => self.overflow_strikes.reset(),
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    let shed = self.overflow_strikes.strike();
+                    warn!(
+                        strikes = self.overflow_strikes.strikes(),
+                        "outbound queue full; dropped obs event"
+                    );
+                    if shed {
+                        return Err(ObsExit::close(
+                            proto::close::UNKNOWN_REASON,
+                            "slow consumer: persistent outbound overflow",
+                        ));
+                    }
                 }
+                Err(mpsc::error::TrySendError::Closed(_)) => return Err(ObsExit::Silent),
             }
-            Err(mpsc::error::TrySendError::Closed(_)) => Err(ObsExit::Silent),
         }
+        Ok(())
     }
 }
 

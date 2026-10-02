@@ -158,6 +158,7 @@ impl ObsWsServer {
         let accept_task = tokio::spawn(
             accept_loop(
                 listener,
+                app,
                 session_config,
                 websocket_config,
                 fanout,
@@ -288,6 +289,7 @@ fn negotiate_subprotocol(
 
 async fn accept_loop(
     listener: TcpListener,
+    app: AppHandle,
     config: Arc<ObsSessionConfig>,
     websocket_config: WebSocketConfig,
     fanout: EventFanout,
@@ -307,6 +309,7 @@ async fn accept_loop(
                     debug!(connection_id = next_connection, %peer, "accepted connection");
                     let context = ObsSessionContext {
                         config: config.clone(),
+                        app: app.clone(),
                         fanout: fanout.clone(),
                         shutdown: shutdown.clone(),
                     };
