@@ -14,7 +14,7 @@ obs-websocket are justified per section with pointers to `docs/research/obs-webs
 
 | Transport | Framing | Codec | Auth context |
 |---|---|---|---|
-| WebSocket (`ws://`, `wss://`, PLAN §22) | One message per WS frame | JSON text frames (v1) | TLS + token, or challenge-response |
+| WebSocket (`ws://` loopback, `wss://` anywhere, PLAN §22) | One message per WS frame | JSON text frames (v1) | token or challenge-response; TLS per the bind policy below |
 | Unix socket (`$XDG_RUNTIME_DIR/prismcast/control.sock`, ADR-0006) | Length-prefixed frames (`u32` BE length + payload) | MessagePack | filesystem permissions + optional challenge-response |
 
 One serde data model serves both codecs; the protocol crate defines no codec logic. MessagePack
@@ -22,6 +22,20 @@ over WebSocket (an `obswebsocket.msgpack`-style subprotocol) is **deferred** —
 question 1 answered: JSON-only for v1, the subprotocol name `prismcast.msgpack` is reserved.
 On WebSocket the encoding is selected via `Sec-WebSocket-Protocol: prismcast.json` (the default
 when no subprotocol is requested).
+
+**TLS (`wss://`)** is implemented by the native WebSocket server (ADR-0022): `prismcast-remote`
+terminates rustls (ring provider) at the accept loop, before the WebSocket upgrade — the same
+framing and handshake then run over the encrypted stream unchanged. The server takes
+operator-provided PEM files (`WsServerConfig::tls`: a leaf-first certificate chain and a
+PKCS#8/PKCS#1 private key); there is no built-in self-signed generation. Bind hardening is
+enforced at bind time: **a non-loopback bind without TLS fails** (`WsError::TlsRequired`), so
+exposing the control plane on a network interface requires `wss://`; plaintext `ws://` remains
+valid on loopback only. The TLS handshake on each accepted connection is bounded (10 s), so a
+plaintext client pointed at a `wss://` port fails fast without stalling other clients. Client
+trust is the native system roots plus an optional extra CA bundle, with an explicit
+warn-logged danger-insecure escape hatch (library surface in `prismcast-remote::tls`; CLI flags
+follow). The obs-websocket adapter (Phase 9) is **not** covered: it stays plaintext, matching
+upstream obs-websocket, where a reverse proxy is the ecosystem pattern.
 
 Limits (enforced by `prismcast-remote`, not expressible in the type layer): max frame/message
 size is **per-transport** — **4 MiB** on Unix IPC (`codec::DEFAULT_MAX_FRAME_SIZE`) and **1 MiB**
@@ -95,11 +109,13 @@ Two methods (`AuthResponse`, tagged `method`):
   `AuthChallenge` in `hello.authentication` for every session: the salt is stable per server
   start, the challenge is freshly generated per session. The client answers in
   `identify.authentication`; a wrong or missing response closes with `AuthenticationFailed`
-  (4009). For the Unix-IPC and plain-`ws://` local paths where TLS is absent; the IPC server
-  optionally offers the same challenge-response (parity with WebSocket) on top of its
-  filesystem-permission gate.
+  (4009). Suitable for the Unix-IPC and plain-`ws://` loopback paths where TLS is absent; the
+  IPC server optionally offers the same challenge-response (parity with WebSocket) on top of
+  its filesystem-permission gate.
 - `token` — configured bearer token (PLAN §24), unchanged: the client presents the configured
-  token verbatim in `identify.authentication`. For TLS-terminated paths.
+  token verbatim in `identify.authentication`. Valid on both WebSocket schemes; off loopback
+  it always travels over `wss://`, because the server refuses non-loopback plaintext binds
+  (§1, ADR-0022).
 
 The `password` and `token` keys are mutually exclusive in `remote.toml` — configure exactly one
 server-side credential.
