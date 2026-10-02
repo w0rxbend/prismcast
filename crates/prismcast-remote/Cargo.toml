@@ -23,14 +23,14 @@ sha2 = "0.10"
 thiserror.workspace = true
 tokio.workspace = true
 tokio-rustls.workspace = true
-tokio-tungstenite = "0.30"
+# rustls-tls-native-roots unlocks Connector::Rustls + connect_async_tls_with_config
+# for WsClient's wss:// arm — required on the main dependency, not just dev,
+# so the crate compiles outside a dev-feature-unified build.
+tokio-tungstenite = { version = "0.30", features = ["rustls-tls-native-roots"] }
 tracing.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
 obws = { version = "0.15", default-features = false }
 rcgen = "0.13"
-# rustls-tls-native-roots unlocks Connector::Rustls for scripted wss:// test
-# clients (features unify with the main dependency above).
-tokio-tungstenite = { version = "0.30", features = ["rustls-tls-native-roots"] }
 tracing-subscriber.workspace = true

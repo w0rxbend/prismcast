@@ -13,11 +13,6 @@ prismcast-remote.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
-# rustls-tls-native-roots unlocks Connector::Rustls for the wss:// arm of
-# prismcast-remote's WsClient (features unify with prismcast-remote's main
-# dependency above). Without it prismcast-remote does not compile outside a
-# dev-feature-unified workspace build.
-tokio-tungstenite = { version = "0.30", features = ["rustls-tls-native-roots"] }
 uuid.workspace = true
 
 [dev-dependencies]
