@@ -37,6 +37,7 @@ use prismcast_app::{AppHandle, DEFAULT_SUBSCRIBER_CAPACITY};
 use crate::auth::AuthConfig;
 use crate::server::EventFanout;
 
+use super::names;
 use super::proto::SUBPROTOCOL_JSON;
 use super::session::{run_session, ObsSessionConfig, ObsSessionContext};
 
@@ -129,6 +130,7 @@ pub struct ObsWsServer {
     local_addr: SocketAddr,
     accept_task: JoinHandle<()>,
     fanout_task: JoinHandle<()>,
+    item_id_task: JoinHandle<()>,
     sessions: Arc<Mutex<Vec<JoinHandle<()>>>>,
     shutdown_tx: watch::Sender<()>,
 }
@@ -154,14 +156,25 @@ impl ObsWsServer {
         let websocket_config = ws_protocol_config(config.max_message_size);
         let (shutdown_tx, shutdown_rx) = watch::channel(());
         let (fanout, fanout_task) = EventFanout::spawn(&app, config.event_queue_capacity);
+        // Server-wide scene-item ID registry with its eviction listener on
+        // the fan-out (ADR-0020 §c: evict on every removal path).
+        let item_ids = names::ItemIdMap::shared();
+        let item_id_task = tokio::spawn(names::eviction_listener(
+            fanout.subscribe(),
+            item_ids.clone(),
+        ));
         let sessions: Arc<Mutex<Vec<JoinHandle<()>>>> = Arc::new(Mutex::new(Vec::new()));
+        let shared = SharedServices {
+            app,
+            fanout,
+            item_ids,
+        };
         let accept_task = tokio::spawn(
             accept_loop(
                 listener,
-                app,
                 session_config,
                 websocket_config,
-                fanout,
+                shared,
                 sessions.clone(),
                 shutdown_rx,
             )
@@ -171,6 +184,7 @@ impl ObsWsServer {
             local_addr,
             accept_task,
             fanout_task,
+            item_id_task,
             sessions,
             shutdown_tx,
         })
@@ -223,6 +237,7 @@ impl ObsWsServer {
             }
         }
         self.fanout_task.abort();
+        self.item_id_task.abort();
         info!("obs-websocket server stopped");
     }
 }
@@ -232,6 +247,7 @@ impl Drop for ObsWsServer {
         let _ = self.shutdown_tx.send(());
         self.accept_task.abort();
         self.fanout_task.abort();
+        self.item_id_task.abort();
         for session in self.lock_sessions().drain(..) {
             session.abort();
         }
@@ -287,12 +303,19 @@ fn negotiate_subprotocol(
     Err(rejection)
 }
 
+/// Handles shared by every session: the core handle, the event fan-out, and
+/// the server-wide scene-item ID registry.
+struct SharedServices {
+    app: AppHandle,
+    fanout: EventFanout,
+    item_ids: Arc<names::ItemIdMap>,
+}
+
 async fn accept_loop(
     listener: TcpListener,
-    app: AppHandle,
     config: Arc<ObsSessionConfig>,
     websocket_config: WebSocketConfig,
-    fanout: EventFanout,
+    shared: SharedServices,
     sessions: Arc<Mutex<Vec<JoinHandle<()>>>>,
     mut shutdown: watch::Receiver<()>,
 ) {
@@ -309,8 +332,9 @@ async fn accept_loop(
                     debug!(connection_id = next_connection, %peer, "accepted connection");
                     let context = ObsSessionContext {
                         config: config.clone(),
-                        app: app.clone(),
-                        fanout: fanout.clone(),
+                        app: shared.app.clone(),
+                        item_ids: shared.item_ids.clone(),
+                        fanout: shared.fanout.clone(),
                         shutdown: shutdown.clone(),
                     };
                     let handle = tokio::spawn(

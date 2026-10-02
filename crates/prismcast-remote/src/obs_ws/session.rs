@@ -25,12 +25,12 @@
 //!    `Request` (op 6) / `RequestBatch` (op 8) are dispatched; a second
 //!    `Identify` closes 4008; any other opcode closes 4006.
 //!
-//! Request translation is the follow-up slice's job: for the foundation,
-//! every request is answered with a typed 204 (`UnknownRequestType`) stub.
-//! What *is* real: opcode dispatch, envelope mirroring of
-//! `requestType`/`requestId`, serial batch execution with `haltOnFailure`
-//! and bounded `Sleep`, and the whole-batch 206 answer for execution types
-//! 1/2.
+//! Request translation lives in [`super::requests`]: opcode dispatch,
+//! envelope mirroring of `requestType`/`requestId`, serial batch execution
+//! with `haltOnFailure`, and the whole-batch 206 answer for execution types
+//! 1/2 stay here; per-request semantics (name resolution, RequestKind pivot,
+//! status codes) are there. Genuinely unknown request types still get the
+//! typed 204 (`UnknownRequestType`) stub.
 //!
 //! obs-websocket defines no backpressure policy (RES-007 weakness 5); this
 //! engine applies Prismcast's: a bounded outbound queue, drop + strike on
@@ -54,7 +54,7 @@ use uuid::Uuid;
 
 use prismcast_app::broadcaster::StreamEvent;
 use prismcast_app::snapshot::AppSnapshot;
-use prismcast_app::AppHandle;
+use prismcast_app::{AppHandle, Permissions};
 use prismcast_protocol::handshake::AuthResponse;
 use prismcast_protocol::subscription::SubscriptionSet;
 
@@ -64,17 +64,14 @@ use crate::server::EventFanout;
 use crate::session_kit::{OverflowStrikes, RateLimiter};
 
 use super::bitmask;
+use super::names::ItemIdMap;
 use super::proto::{self, op, RequestStatus};
-use super::translate;
+use super::{requests, translate};
 
 /// Inbound request rate limit (burst per 1 s window), matching the native
 /// protocol's budget (protocol doc §1). obs-websocket has no rate limiting;
 /// excess requests get a typed 702 response instead of a silent drop.
 const REQUEST_BURST: u32 = 200;
-
-/// `Sleep` requests may delay a serial batch by at most this many
-/// milliseconds (upstream's `sleepMillis` cap).
-const MAX_SLEEP_MILLIS: u64 = 50_000;
 
 /// WebSocket close code used when the server shuts down: RFC 6455
 /// `going_away`, matching upstream ("Server stopping.").
@@ -101,9 +98,11 @@ pub(crate) struct ObsSessionContext {
     /// Transport-independent tuning.
     pub config: Arc<ObsSessionConfig>,
     /// Snapshot reads for event translation (name resolution, primary
-    /// output designation) — an `Arc` clone out of a watch cell, never
-    /// blocking (PLAN.md §57).
+    /// output designation) and request dispatch — an `Arc` clone out of a
+    /// watch cell, never blocking (PLAN.md §57).
     pub app: AppHandle,
+    /// Server-wide obs `sceneItemId` registry (ADR-0020 §c).
+    pub item_ids: Arc<ItemIdMap>,
     /// Server-wide event fan-out.
     pub fanout: EventFanout,
     /// Shutdown signal from the owning server.
@@ -144,6 +143,7 @@ async fn run_session_inner(stream: WebSocketStream<TcpStream>, context: ObsSessi
     let ObsSessionContext {
         config,
         app,
+        item_ids,
         fanout,
         mut shutdown,
     } = context;
@@ -153,7 +153,14 @@ async fn run_session_inner(stream: WebSocketStream<TcpStream>, context: ObsSessi
 
     let exit = match handshake(&mut reader, &out_tx, &config).await {
         Ok(established) => {
-            let session = Session::new(config.clone(), app, fanout, out_tx.clone(), established);
+            let session = Session::new(
+                config.clone(),
+                app,
+                item_ids,
+                fanout,
+                out_tx.clone(),
+                established,
+            );
             session
                 .steady_state(&mut reader, &mut shutdown, config.max_message_size)
                 .await
@@ -263,6 +270,8 @@ async fn read_value(
 struct Established {
     session_id: Uuid,
     subscriptions: SubscriptionSet,
+    /// Permissions granted by `Identify` auth, in wire form.
+    permissions: Vec<prismcast_protocol::handshake::Permission>,
 }
 
 /// Server-first handshake: `Hello` (op 0) → `Identify` (op 1) → `Identified`
@@ -383,6 +392,7 @@ async fn handshake(
     Ok(Established {
         session_id,
         subscriptions,
+        permissions,
     })
 }
 
@@ -391,6 +401,8 @@ struct Session {
     config: Arc<ObsSessionConfig>,
     app: AppHandle,
     session_id: Uuid,
+    permissions: Permissions,
+    item_ids: Arc<ItemIdMap>,
     out_tx: mpsc::Sender<ObsOutbound>,
     events: ObsEventPipe,
     rate_limiter: RateLimiter,
@@ -400,6 +412,7 @@ impl Session {
     fn new(
         config: Arc<ObsSessionConfig>,
         app: AppHandle,
+        item_ids: Arc<ItemIdMap>,
         fanout: EventFanout,
         out_tx: mpsc::Sender<ObsOutbound>,
         established: Established,
@@ -412,9 +425,20 @@ impl Session {
             config,
             app,
             session_id: established.session_id,
+            permissions: map::permissions_to_app(&established.permissions),
+            item_ids,
             out_tx,
             events,
             rate_limiter: RateLimiter::new(REQUEST_BURST),
+        }
+    }
+
+    /// The translation context for one request dispatch.
+    fn request_context(&self) -> requests::RequestContext<'_> {
+        requests::RequestContext {
+            app: &self.app,
+            permissions: self.permissions,
+            item_ids: &self.item_ids,
         }
     }
 
@@ -521,26 +545,37 @@ impl Session {
         }
     }
 
-    /// Answers one request. The opcode dispatch and the response envelope
-    /// are real; per-request translation is the follow-up slice's job, so
-    /// every type is answered with a typed 204 (`UnknownRequestType`) stub.
+    /// Answers one request: rate-limit first, then translate through
+    /// [`requests::execute`]; unknown types get the typed 204 stub.
     async fn handle_request(&mut self, request: proto::Request) -> Option<ObsExit> {
         debug!(%self.session_id, request_id = %request.request_id, request_type = %request.request_type, "obs request");
-        let status = if !self.rate_limiter.check() {
-            RequestStatus::error(
-                proto::status::REQUEST_PROCESSING_FAILED,
-                "request rate limit exceeded",
-            )
+        let outcome = if !self.rate_limiter.check() {
+            requests::RequestOutcome {
+                status: RequestStatus::error(
+                    proto::status::REQUEST_PROCESSING_FAILED,
+                    "request rate limit exceeded",
+                ),
+                data: None,
+            }
         } else {
-            unknown_request_status(&request.request_type)
+            requests::execute(
+                &self.request_context(),
+                &request.request_type,
+                request.request_data.as_ref(),
+            )
+            .await
+            .unwrap_or_else(|| requests::RequestOutcome {
+                status: unknown_request_status(&request.request_type),
+                data: None,
+            })
         };
         self.send(proto::envelope(
             op::REQUEST_RESPONSE,
             &proto::RequestResponse {
                 request_type: request.request_type,
                 request_id: request.request_id,
-                request_status: status,
-                response_data: None,
+                request_status: outcome.status,
+                response_data: outcome.data,
             },
         ))
         .await
@@ -612,26 +647,37 @@ impl Session {
         .await
     }
 
-    /// Serial batch body: requests run in order; `haltOnFailure` stops at
-    /// the first failed result.
+    /// Serial batch body: requests run in order through the same translation
+    /// path as standalone requests; `haltOnFailure` stops at the first failed
+    /// result.
     async fn run_serial_batch(&mut self, batch: &proto::RequestBatch) -> Vec<proto::BatchResult> {
         let mut results = Vec::with_capacity(batch.requests.len());
         for request in &batch.requests {
-            let status = if !self.rate_limiter.check() {
-                RequestStatus::error(
-                    proto::status::REQUEST_PROCESSING_FAILED,
-                    "request rate limit exceeded",
-                )
-            } else if request.request_type == "Sleep" {
-                execute_sleep(request.request_data.as_ref()).await
+            let outcome = if !self.rate_limiter.check() {
+                requests::RequestOutcome {
+                    status: RequestStatus::error(
+                        proto::status::REQUEST_PROCESSING_FAILED,
+                        "request rate limit exceeded",
+                    ),
+                    data: None,
+                }
             } else {
-                unknown_request_status(&request.request_type)
+                requests::execute(
+                    &self.request_context(),
+                    &request.request_type,
+                    request.request_data.as_ref(),
+                )
+                .await
+                .unwrap_or_else(|| requests::RequestOutcome {
+                    status: unknown_request_status(&request.request_type),
+                    data: None,
+                })
             };
-            let failed = !status.result;
+            let failed = !outcome.status.result;
             results.push(proto::BatchResult {
                 request_type: request.request_type.clone(),
-                request_status: status,
-                response_data: None,
+                request_status: outcome.status,
+                response_data: outcome.data,
             });
             if failed && batch.halt_on_failure {
                 break;
@@ -659,42 +705,13 @@ impl Session {
     }
 }
 
-/// The foundation-slice request stub: a typed 204, never a silent no-op.
+/// The answer for request types the adapter does not implement: a typed 204,
+/// never a silent no-op.
 fn unknown_request_status(request_type: &str) -> RequestStatus {
     RequestStatus::error(
         proto::status::UNKNOWN_REQUEST_TYPE,
         format!("request type '{request_type}' is not implemented by this server"),
     )
-}
-
-/// The batch-only `Sleep` request: real for `SerialRealtime` batches, with
-/// upstream's 50 000 ms cap. `sleepFrames` belongs to the unsupported
-/// `SerialFrame` execution type.
-async fn execute_sleep(data: Option<&serde_json::Value>) -> RequestStatus {
-    let field = |data: Option<&serde_json::Value>, key: &str| {
-        data.and_then(|d| d.get(key))
-            .and_then(serde_json::Value::as_u64)
-    };
-    let sleep_millis = field(data, "sleepMillis");
-    let sleep_frames = field(data, "sleepFrames");
-    match (sleep_millis, sleep_frames) {
-        (Some(ms), _) if ms > MAX_SLEEP_MILLIS => RequestStatus::error(
-            proto::status::REQUEST_FIELD_OUT_OF_RANGE,
-            format!("sleepMillis {ms} exceeds the maximum of {MAX_SLEEP_MILLIS}"),
-        ),
-        (Some(ms), _) => {
-            tokio::time::sleep(Duration::from_millis(ms)).await;
-            RequestStatus::ok()
-        }
-        (None, Some(_)) => RequestStatus::error(
-            proto::status::INVALID_REQUEST_FIELD,
-            "sleepFrames requires SerialFrame execution, which this server does not support",
-        ),
-        (None, None) => RequestStatus::error(
-            proto::status::MISSING_REQUEST_FIELD,
-            "Sleep requires a `sleepMillis` field",
-        ),
-    }
 }
 
 /// Per-session event pipeline: the subscription set translated from the obs

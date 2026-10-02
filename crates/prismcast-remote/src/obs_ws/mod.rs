@@ -30,10 +30,14 @@
 //! subscription updates, event gating by bitmask, **domain event → obs event
 //! translation** ([`translate`]: scenes/program/preview, scene items, input
 //! CRUD + mute/volume, output state incl. the stream/record primaries, studio
-//! mode), and the RequestBatch scaffolding (serial execution,
+//! mode), the RequestBatch scaffolding (serial execution,
 //! `haltOnFailure`, bounded `Sleep`, whole-batch 206 for
-//! `SerialFrame`/`Parallel`). Per-request translation is the follow-up
-//! slice's job: until then every request is answered with a typed 204
+//! `SerialFrame`/`Parallel`), and **request translation**
+//! (`requests`: the advertised MVP request set pivots through native
+//! `RequestKind` → [`map::command_from_wire`](crate::map::command_from_wire)
+//! → Core Commands; queries read snapshots; `names`: stateless name→ID
+//! resolution plus the stateful, eviction-tracked `ItemIdMap` for numeric
+//! `sceneItemId`s). Unknown request types get a typed 204
 //! (`UnknownRequestType`).
 //!
 //! ## Documented divergences from upstream obs-websocket
@@ -65,7 +69,9 @@
 //!   admitted by the `Config`/`Transitions`/`Ui` bits, not by `Scenes`.
 
 pub mod bitmask;
+mod names;
 pub mod proto;
+mod requests;
 mod server;
 mod session;
 pub(crate) mod translate;

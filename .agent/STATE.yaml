@@ -46,7 +46,8 @@ completed:
 - CAPTURE-002
 - CAPTURE-003
 - WS-002
-in_progress: []
+in_progress:
+- OBSWS-001
 blocked: []
 next_candidates:
 - OBSWS-001
