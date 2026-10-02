@@ -1,7 +1,7 @@
 schema_version: 1
-project_phase: phase-3-linux-capture
-head_commit: 90d200b
-current_objective: Implement CAPTURE-004 command-authorized PipeWire audio capture with disjoint swarm ownership directly on main
+project_phase: phase-4-scene-editor
+head_commit: 6150504
+current_objective: Scope CORE-006 canonical Undo/Redo commands and controller integration; preserve direct-main swarm ownership preference
 completed:
 - RESUME-001
 - SKILL-001
@@ -51,10 +51,11 @@ completed:
 - WS-003
 - INTEGRATE-001
 - AUDIO-001
-in_progress: [CAPTURE-004]
+- CAPTURE-004
+in_progress: []
 blocked: []
 next_candidates:
-- CAPTURE-004
+- CORE-006
 decisions:
 - ADR-0001
 - ADR-0002
@@ -83,7 +84,7 @@ decisions:
 verification:
   cargo_fmt: pass
   cargo_clippy: pass
-  cargo_test: pass_659_tests_12_environment_tests_ignored
+  cargo_test: pass_679_tests_18_environment_tests_ignored
   cargo_deny: pass
   portal_capture: live_window_three_frame_probe_pass
   shared_capture_preview: picker_granted_wrong_window_thrice_then_no_selection; raw consumer diagnostic armed
@@ -98,11 +99,21 @@ verification:
   audio_native_protocol: real_socket_opt_in_filter_latest_throttle_invalidation_pass
   audio_gtk: wayland_cairo_fatal_criticals_controls_two_route_removal_pass
   audio_app_shell: actual_add_tone_real_meters_repeated_close_join_pass
+  pipewire_audio_native: isolated_input_monitor_app_sentinel_gain_mute_removal_reused_serial_restart_pass
+  pipewire_audio_service: final_real_core_authorization_meters_gain_mute_disable_retry_join_pass
+  pipewire_audio_owner: five_consent_revocation_timeout_stale_resolver_concurrent_fault_tests_pass
+  pipewire_audio_ingress: nine_frozen_effect_family_generation_revision_capacity_tests_pass
+  pipewire_audio_protocol: real_socket_permission_audio_runtime_generation_pending_meter_invalidation_pass
+  pipewire_audio_gtk: wayland_cairo_fatal_criticals_picker_enable_start_atomic_removal_pass
   worktree_reconciliation: all_41_auxiliary_heads_ancestors_of_main
 last_agent:
   model: codex
-  session: audio-001-direct-main-swarm
+  session: capture-004-direct-main-swarm
 open_questions:
+- PipeWire audio physical microphone, desktop policies and sandbox/Flatpak permissions remain unverified; isolated fixtures open only synthetic nodes
+- PipeWire GStreamer startup can block about 30 seconds on late daemon death after final EOF preflight; cancellation waits native return, no replacement-daemon capture occurs
+- PipeWire audio three-second data watchdog conservatively requires Retry after paused/stalled streams cease buffer delivery; one fault currently revokes all physical audio grants
+- Application capture selects one current playback stream; multi-stream grouping by application identity remains a follow-up
 - Integrated live window preview: picker grants landed but selected windows were not the fixture (white/dark/black composites, constant 6144x3456); raw consumer diagnostic test armed, awaiting a coordinated selection retry
 - KDE/X11 capture and monitor validation remain unverified
 - Camera device paths renumber across replug; sysfs/serial-stable identity is a follow-up (persisted path is advisory, missing device is recoverable)
@@ -124,7 +135,7 @@ open_questions:
 - SaveProject command missing from core Command enum (CORE-004 follow-up)
 - Encoder/service registries have no domain home; profiles save empty lists (CORE-004)
 - Broadcaster unsubscribe API missing; server-wide fanout workaround remains (IPC-001/WS-002)
-- Audio foundation supplies native post-fader source meters; PipeWire audio producers, pre-fader OBS input peak, output statistics and encoded audio tracks remain follow-ups
+- PipeWire audio input/sink-monitor/single-application producers and post-fader source meters are implemented; pre-fader OBS input peak, output statistics and encoded audio tracks remain follow-ups
 - OBSWS-002 MessagePack, SerialFrame/Parallel batches and custom events are implemented; OBS meters, filters, screenshots, stats, vendor/persistent data, media control, virtualcam/replay remain deferred
 implementation_access:
   ultracode: dynamic agent orchestration (user clarified); available

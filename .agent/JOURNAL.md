@@ -860,3 +860,48 @@ just deny passed (existing warnings only). Both Wayland GTK regressions pass
 with Cairo/fatal criticals. Implementation: 90d200b. Evidence and runtime
 limits: docs/testing/audio-mixer.md. State/handoff/task/backlog updated; next
 candidate is CAPTURE-004. Full OBS-class application remains under development.
+
+---
+
+2026-10-02 CAPTURE-004
+
+Completed command-authorized PipeWire audio input, sink monitor and one selected
+application playback stream in 6150504. Continued the user's direct-main swarm
+preference with disjoint core/app, capture/native and service/GTK ownership;
+coordinator alone integrated and pushed. All 41 auxiliary worktree heads remain
+ancestors of main, and existing auxiliary edits/worktrees remain preserved.
+
+ADR-0024 establishes frozen versioned advisory targets, generation-bound local
+audio authorization, family-isolated lifecycle, exact revision/generation meters,
+atomic oldest-terminal retirement within the shared eight-entry runtime budget,
+and pinned fresh daemon sockets. Review found and fixed daemon-epoch first-open
+race, revocation delayed behind discovery, concurrent edits absorbed by failure
+cleanup, and stale post-start readings. FDs are retained through NULL and protocol
+waits interrupted before teardown; sources never fall back or reconnect.
+
+GTK now offers async input/system/application selection, separate Add/Start/Retry,
+Enabled control, diagnostics and atomic all-route removal. Native wire shapes
+remain unchanged. Read-only discovery has a two-second/2 MiB/128-target budget;
+Unix connect backlog waits are capped at 250 ms; native source freshness is three
+seconds with a five-second service first-data backstop. Existing mixer limits
+remain 32 total sources/eight buses.
+
+Final just ci passed: 679 tests passed, 18 environment-dependent ignored. just deny
+passed with existing warnings; no new external packages (socket2 was already
+transitive). Real isolated native fixture passed all modes, unrelated-sentinel
+isolation, gain/mute, node removal/replacement and same-serial daemon restart
+(~1.56s). Final real Core/AudioSession fixture passed actual authorization,
+finite stereo meters, gain/mute, disable/enable without reopening, fresh Retry
+and joined shutdown (~1.25s). Native WebSocket regression and separate Wayland
+Cairo/fatal-critical GTK picker/control/application lifecycle tests passed.
+
+Additional direct old-FD native probe proved replacement capture cannot occur
+but measured upstream synchronous startup timeout (~30s, ~31.6s total fixture).
+EOF preflight avoids known closed sockets; late daemon death can still delay
+cancellation until native return. Hardware/desktop/sandbox coverage, aggregate
+application streams, monitoring, encoded tracks and per-source failure isolation
+remain explicit limits. See docs/testing/pipewire-audio.md and research notes.
+
+Next ready task CORE-006 closes canonical Undo/Redo command/controller integration
+and the PLAN phase-4 editor gap. Research and accept an ADR before implementation;
+capture authorization must never be replayed through history.
