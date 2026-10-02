@@ -34,9 +34,10 @@
 //! subscription updates, event gating by bitmask, **domain event → obs event
 //! translation** ([`translate`]: scenes/program/preview, scene items, input
 //! CRUD + mute/volume, output state incl. the stream/record primaries, studio
-//! mode), the RequestBatch scaffolding (serial execution,
-//! `haltOnFailure`, bounded `Sleep`, whole-batch 206 for
-//! `SerialFrame`/`Parallel`), and **request translation**
+//! mode), RequestBatch execution (serial realtime/frame with
+//! `haltOnFailure`, bounded `Sleep` incl. frame-timed `sleepFrames` under
+//! `SerialFrame`, and bounded-concurrency `Parallel` with request-ordered
+//! results), and **request translation**
 //! (`requests`: the advertised MVP request set pivots through native
 //! `RequestKind` → [`map::command_from_wire`](crate::map::command_from_wire)
 //! → Core Commands; queries read snapshots; `names`: stateless name→ID

@@ -133,7 +133,6 @@ are answered with a typed **204** (`UnknownRequestType`), never silently dropped
 |---|---|
 | success | 100 |
 | unknown/unsupported `requestType` | 204 |
-| whole batch refused (`executionType` 1/2) | 206 |
 | core actor shut down | 207 |
 | missing `requestData` field | 300 |
 | invalid field value (bad enum string, generic `InvalidInput`) | 400 |
@@ -149,12 +148,27 @@ are answered with a typed **204** (`UnknownRequestType`), never silently dropped
 
 ### Batches
 
-`RequestBatch` (op 8) → `RequestBatchResponse` (op 9). Only `SerialRealtime` (executionType 0,
-the default) is implemented: requests run serially, in order, as fast as possible; `haltOnFailure`
-ends the batch at the first failure with a shortened `results`; `Sleep` delays are honored up to
-the 50 s cap. `SerialFrame` (1) and `Parallel` (2) are **not implemented** and get a whole-batch
-**206** per member; an out-of-range `executionType` closes the session with 4005, like upstream.
-Batches cannot nest through this adapter (there is no `RequestBatch` request type).
+`RequestBatch` (op 8) → `RequestBatchResponse` (op 9). All three execution types are implemented
+(ADR-0021 §d):
+
+- **`SerialRealtime`** (executionType 0, the default): requests run serially, in order, as fast as
+  possible; `haltOnFailure` ends the batch at the first failure with a shortened `results`; `Sleep`
+  delays are honored up to the 50 s cap (`sleepMillis`; `sleepFrames` is a typed 400 here — there
+  is no frame clock outside `SerialFrame`).
+- **`SerialFrame`** (executionType 1): the same serial loop (in order, `haltOnFailure` honored),
+  except `Sleep.sleepFrames` resolves against the active profile's frame rate
+  (`frames × fps_den / fps_num` seconds; 60 fps when no profile is active or the profile's rate is
+  degenerate), with the same 50 s total-sleep cap. There is no graphics thread to couple to, so
+  frame timing is a wall-clock approximation of upstream's graphics-thread sync (§10).
+- **`Parallel`** (executionType 2): every member runs in its own task with at most **8** in flight
+  per batch (spawning member *n* awaits a finished one), so a `Sleep` member never serializes the
+  batch. Upstream defines no ordering between members; the core actor serializes the underlying
+  commands itself. Results are returned in **request order**, one per member; `haltOnFailure` is
+  **ignored** (upstream semantics). Minted `sceneItemId` numbers under Parallel are opaque — no
+  assignment order is guaranteed between members.
+
+An out-of-range `executionType` closes the session with 4005, like upstream. Batches cannot nest
+through this adapter (there is no `RequestBatch` request type).
 
 ## 4. Events and subscriptions
 
@@ -274,7 +288,7 @@ tungstenite clients (handshake matrix, auth, subprotocols, batches, status codes
 
 ## 9. Not implemented (OBSWS-002+)
 
-`SerialFrame`/`Parallel` batch execution, meter and other
+Meter and other
 high-volume event producers (`InputVolumeMeters`, `InputActiveStateChanged`,
 `InputShowStateChanged`, `SceneItemTransformChanged`), filters, screenshots, stats
 (`GetStats`/`GetOutputStats`; output runtime metrics read as zero), vendor and persistent data,
@@ -303,7 +317,14 @@ Unsupported request types get the typed 204, never a silent no-op.
 - **`SetInputVolume` with `inputVolumeMul: 0` maps to −100 dB**, not −∞: the core requires finite
   gains.
 - **`Sleep` is accepted standalone** (upstream registers it for batches only), keeping
-  `availableRequests` truthful.
+  `availableRequests` truthful; `sleepFrames` resolves only inside a `SerialFrame` batch (typed
+  400 elsewhere, since no other context has a frame clock).
+- **`SerialFrame` is not graphics-thread coupled** (there is none): the serial batch loop is
+  identical to `SerialRealtime`, and frame timing is a wall-clock approximation driven by the
+  active profile's frame rate (§3).
+- **`Parallel` concurrency is bounded at 8 in-flight members per batch** (upstream's thread pool
+  is unbounded by contract); results still return in request order and `haltOnFailure` is ignored,
+  like upstream.
 - **Adapter-specific `inputKind`/`outputKind` strings** (`color_source`, `v4l2_input`,
   `pipewire_display_capture`, `rtmp_output`, `recording_output`, …; `prismcast_*` for kinds with no
   OBS counterpart in events): there is no OBS plugin registry behind them; `unversionedInputKind`
