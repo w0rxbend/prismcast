@@ -27,7 +27,10 @@
 //!   frame per protocol message; close codes map to WebSocket close frames in
 //!   the 4000+ range. **Disabled by default**; a credential (token or
 //!   password challenge-response, protocol doc §4) is mandatory on this
-//!   network transport ([`WsServerConfig`]).
+//!   network transport ([`WsServerConfig`]). [`WsClient`] speaks both
+//!   schemes: [`WsClient::connect_url`] accepts `ws://` and `wss://` URLs,
+//!   with the TLS trust model (native roots, an extra private CA bundle, or
+//!   the warn-logged danger switch) configured through [`ClientTlsConfig`].
 //! - **obs-websocket adapter** (OBSWS-001, ADR-0010/ADR-0020): [`obs_ws`]
 //!   serves the obs-websocket 5.x wire protocol on its own port (4455) for
 //!   OBS-ecosystem clients, translating onto the same Core Command/Event
@@ -60,5 +63,6 @@ pub use client::{ClientAuth, ClientError, IpcClient, IpcClientConfig};
 pub use codec::{ClosingNotice, DEFAULT_MAX_FRAME_SIZE};
 pub use paths::{default_socket_dir, default_socket_path, SOCKET_FILE_NAME};
 pub use server::{IpcError, IpcServer, IpcServerConfig};
+pub use tls::{ClientTlsConfig, TlsError, WsTlsConfig};
 pub use ws::{WsError, WsServer, WsServerConfig};
 pub use ws_client::{WsClient, WsClientConfig, WsClientError};

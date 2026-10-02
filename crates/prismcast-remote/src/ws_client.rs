@@ -1,7 +1,8 @@
-//! A minimal WebSocket client for the native protocol (WS-001).
+//! A minimal WebSocket client for the native protocol (WS-001/WS-003).
 //!
-//! [`WsClient`] mirrors [`crate::client::IpcClient`] over the `ws://`
-//! transport: it performs the `Hello`/`Identify`/`Identified` handshake
+//! [`WsClient`] mirrors [`crate::client::IpcClient`] over the `ws://` and
+//! `wss://` transports: it performs the `Hello`/`Identify`/`Identified`
+//! handshake
 //! (token or challenge-response per [`ClientAuth`]), then a background
 //! reader task routes `request_response`s to their callers by `request_id`
 //! and delivers `event`s to a bounded channel ([`WsClient::next_event`]). A
@@ -41,6 +42,7 @@ use prismcast_protocol::subscription::SubscriptionSet;
 use prismcast_protocol::version;
 
 use crate::client::ClientAuth;
+use crate::tls::ClientTlsConfig;
 use crate::ws::{DEFAULT_MAX_MESSAGE_SIZE, SUBPROTOCOL_JSON};
 
 /// Client tuning.
@@ -55,6 +57,11 @@ pub struct WsClientConfig {
     /// consulted only when `auth` is [`ClientAuth::None`]. Kept for source
     /// compatibility with pre-WS-002 callers.
     pub token: Option<String>,
+    /// TLS trust configuration for `wss://` URLs (WS-003, ADR-0022); `None`
+    /// verifies against the platform's native root store. Ignored on
+    /// plaintext `ws://` URLs (and by [`WsClient::connect`]). See
+    /// [`WsClient::connect_url`].
+    pub tls: Option<ClientTlsConfig>,
     /// Initial subscriptions; `None` = server default (all standard
     /// categories), `Some(empty)` = no events.
     pub subscriptions: Option<SubscriptionSet>,
@@ -77,6 +84,7 @@ impl Default for WsClientConfig {
             protocol_version: version::PROTOCOL_VERSION,
             auth: ClientAuth::None,
             token: None,
+            tls: None,
             subscriptions: None,
             client: None,
             request_timeout: Duration::from_secs(10),
@@ -96,6 +104,17 @@ pub enum WsClientError {
     /// The WebSocket layer failed (upgrade, framing).
     #[error("WebSocket error: {0}")]
     WebSocket(#[from] TungsteniteError),
+    /// The URL used a scheme other than `ws` or `wss` (rejected before any
+    /// network I/O).
+    #[error("unsupported WebSocket URL scheme {scheme:?}: expected ws:// or wss://")]
+    Url {
+        /// The scheme as found in the URL (empty when the URL carried none).
+        scheme: String,
+    },
+    /// Building the client TLS connector failed (e.g. an unreadable extra CA
+    /// bundle); names the offending path where one exists.
+    #[error("TLS error: {0}")]
+    Tls(#[from] crate::tls::TlsError),
     /// A frame could not be encoded or decoded.
     #[error("protocol codec error: {0}")]
     Decode(String),
@@ -149,23 +168,69 @@ enum PendingResponse {
 }
 
 impl WsClient {
-    /// Connects to `addr` with default settings and performs the handshake.
+    /// Connects to `addr` over plaintext `ws://` with default settings and
+    /// performs the handshake.
     pub async fn connect(addr: SocketAddr) -> Result<Self, WsClientError> {
         Self::connect_with(addr, WsClientConfig::default()).await
     }
 
-    /// Connects and performs the `Hello`/`Identify`/`Identified` handshake,
-    /// offering the `prismcast.json` subprotocol (protocol doc §1).
+    /// Connects to `addr` over plaintext `ws://` and performs the handshake.
+    /// Convenience wrapper around [`connect_url`](Self::connect_url);
+    /// [`WsClientConfig::tls`] is ignored.
     pub async fn connect_with(
         addr: SocketAddr,
         config: WsClientConfig,
     ) -> Result<Self, WsClientError> {
-        let mut request = format!("ws://{addr}/").into_client_request()?;
+        Self::connect_url(&format!("ws://{addr}/"), config).await
+    }
+
+    /// Connects to a `ws://` or `wss://` URL and performs the
+    /// `Hello`/`Identify`/`Identified` handshake, offering the
+    /// `prismcast.json` subprotocol (protocol doc §1).
+    ///
+    /// Scheme handling (WS-003, ADR-0022):
+    ///
+    /// - `ws://` connects in plaintext; [`WsClientConfig::tls`] is ignored.
+    /// - `wss://` terminates TLS with rustls: `tls: None` verifies the server
+    ///   against the platform's native root store, while `Some`
+    ///   ([`ClientTlsConfig`]) can add a private CA bundle or enable the
+    ///   warn-logged `danger_accept_invalid_certs` switch.
+    ///
+    /// Any other scheme fails with [`WsClientError::Url`] before any network
+    /// I/O. Authentication is identical on both schemes.
+    pub async fn connect_url(url: &str, config: WsClientConfig) -> Result<Self, WsClientError> {
+        let mut request = url.into_client_request()?;
         request.headers_mut().insert(
             SEC_WEBSOCKET_PROTOCOL,
             HeaderValue::from_static(SUBPROTOCOL_JSON),
         );
-        let (stream, _response) = tokio_tungstenite::connect_async(request).await?;
+        let (stream, _response) = match request.uri().scheme_str() {
+            Some("ws") => tokio_tungstenite::connect_async(request).await?,
+            Some("wss") => {
+                let tls_config = config.tls.clone().unwrap_or_default();
+                let connector = crate::tls::client_connector(&tls_config)?;
+                tokio_tungstenite::connect_async_tls_with_config(
+                    request,
+                    None,
+                    false,
+                    Some(tokio_tungstenite::Connector::Rustls(
+                        connector.config().clone(),
+                    )),
+                )
+                .await?
+            }
+            other => {
+                return Err(WsClientError::Url {
+                    scheme: other.unwrap_or_default().to_string(),
+                })
+            }
+        };
+        Self::establish(stream, config).await
+    }
+
+    /// Runs the handshake over an established stream and spawns the reader
+    /// task that routes frames in steady state.
+    async fn establish(stream: WsStream, config: WsClientConfig) -> Result<Self, WsClientError> {
         let (writer, mut reader) = stream.split();
 
         // --- handshake (before the reader task exists) ---
