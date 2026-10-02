@@ -1,7 +1,7 @@
 schema_version: 1
 project_phase: phase-3-linux-capture
-head_commit: 45ea0dd
-current_objective: Scope AUDIO-001 (mixer/meters foundation, unblocks obs meter/stats events) or CAPTURE-004 (PipeWire audio capture); CAPTURE-002 integrated window preview picker retry still awaits user coordination
+head_commit: c71c4c0
+current_objective: Implement AUDIO-001 mixer and real meter foundation directly on main with disjoint swarm ownership
 completed:
 - RESUME-001
 - SKILL-001
@@ -49,7 +49,8 @@ completed:
 - OBSWS-001
 - OBSWS-002
 - WS-003
-in_progress: []
+in_progress:
+- AUDIO-001
 blocked: []
 next_candidates:
 - AUDIO-001
@@ -77,6 +78,7 @@ decisions:
 - ADR-0020
 - ADR-0021
 - ADR-0022
+- ADR-0023
 verification:
   cargo_fmt: pass
   cargo_clippy: pass

@@ -1,0 +1,31 @@
+id: AUDIO-001
+title: Bounded command-driven audio mixer and real meter foundation
+goal: Mix explicit test-tone sources through named buses and expose real source levels to GTK and remote controllers, establishing the seam for later PipeWire capture.
+depends_on: [MEDIA-005]
+allowed_scope:
+- crates/prismcast-audio/
+- crates/prismcast-media-gst/
+- crates/prismcast-core/
+- crates/prismcast-app/
+- crates/prismcast-preview/
+- crates/prismcast-ui/
+- crates/prismcast-remote/
+- Cargo.lock
+- docs/adr/
+- docs/research/
+- docs/testing/
+acceptance:
+- Native audio graph construction and mutation run only on a dedicated owned media thread, with joined shutdown and no device capture or playback enabled implicitly
+- Explicit TestPattern audio_test boolean defaults false and is accepted by the established video settings parser; synthetic sine audio comes from audiotestsrc, never fabricated level values
+- Up to 32 enabled audio test sources route through named buses; per-source gain/mute and per-bus solo produce real measured changes; unconnected sources do not contribute to bus mix
+- Queues, ingress and retained observations have explicit finite capacities; all request pads and bus callbacks are released on rebuild/failure/shutdown
+- Source levels flow through owner-authenticated revision-checked app ingress and transient Core Meter Events without changing persisted state, snapshot revision or undo
+- Published peak/RMS arrays are bounded, equal length and finite (silence floor -120 dBFS), with category/source filtering and the existing native wire meter mapping
+- GTK mixer replaces placeholder with gain/mute/solo controls dispatching existing Core Commands, live peak/RMS presentation and an explicit add-test-tone action; programmatic refresh never dispatches
+- Deterministic native tests cover real gain/mute, routing/solo, 32 sources, removal/disable and shutdown; app tests cover stale/invalid owner reports and no telemetry snapshot/undo churn
+- Balance, monitoring playback, sync delay, filters, output track delivery and PipeWire audio capture remain explicitly documented follow-ups, not silently claimed implemented
+validation: [just ci, just deny, focused native audio and actor tests, separately recorded GTK display regression]
+status: in_progress
+notes:
+- User explicitly requested direct-main development; coordinator commits, agents own disjoint files
+- ADR-0023 must be accepted before implementation
