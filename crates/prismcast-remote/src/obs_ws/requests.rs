@@ -446,9 +446,13 @@ fn resolve_item<'a>(
 
 // --- GetVersion ---
 
+/// OBS Studio version advertised to clients: the minimum obws (>= 30.2)
+/// accepts. Compatibility constant, not the Prismcast version (ADR-0021).
+pub(crate) const OBS_VERSION_COMPAT: &str = "30.2.0";
+
 fn get_version() -> Handler {
     Ok(Some(json!({
-        "obsVersion": env!("CARGO_PKG_VERSION"),
+        "obsVersion": OBS_VERSION_COMPAT,
         "obsWebSocketVersion": proto::OBS_WEBSOCKET_VERSION,
         "rpcVersion": proto::RPC_VERSION,
         "availableRequests": AVAILABLE_REQUESTS,

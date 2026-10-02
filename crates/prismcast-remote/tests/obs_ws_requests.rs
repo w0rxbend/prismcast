@@ -261,7 +261,7 @@ async fn get_version_reports_obs_shape_and_drift_guarded_available_requests() {
     assert_eq!(data["obsWebSocketVersion"], "5.7.4");
     assert_eq!(data["rpcVersion"], 1);
     assert_eq!(data["platform"], "linux");
-    assert_eq!(data["obsVersion"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(data["obsVersion"], "30.2.0");
     assert!(data["supportedImageFormats"].is_array());
 
     // Drift guard (mirrors map.rs's available_requests_are_real_tags): every
