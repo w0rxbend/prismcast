@@ -24,4 +24,5 @@ tracing.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+obws = { version = "0.15", default-features = false }
 tracing-subscriber.workspace = true
