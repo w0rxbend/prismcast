@@ -1,8 +1,8 @@
 schema_version: 1
 project_phase: phase-4-scene-editor
-head_commit: 6150504
-current_objective: Implement CORE-006 canonical Undo/Redo Commands and GTK/native/CLI
-  integration directly on main with disjoint agent ownership
+head_commit: 2f327b5
+current_objective: Scope CORE-007 atomic conditional scene placement edits; preserve
+  direct-main swarm ownership preference
 completed:
 - RESUME-001
 - SKILL-001
@@ -53,11 +53,11 @@ completed:
 - INTEGRATE-001
 - AUDIO-001
 - CAPTURE-004
-in_progress:
 - CORE-006
+in_progress: []
 blocked: []
 next_candidates:
-- CORE-006
+- CORE-007
 decisions:
 - ADR-0001
 - ADR-0002
@@ -87,7 +87,7 @@ decisions:
 verification:
   cargo_fmt: pass
   cargo_clippy: pass
-  cargo_test: pass_679_tests_18_environment_tests_ignored
+  cargo_test: pass_692_tests_20_environment_tests_ignored
   cargo_deny: pass
   portal_capture: live_window_three_frame_probe_pass
   shared_capture_preview: picker_granted_wrong_window_thrice_then_no_selection; raw
@@ -110,10 +110,17 @@ verification:
   pipewire_audio_protocol: real_socket_permission_audio_runtime_generation_pending_meter_invalidation_pass
   pipewire_audio_gtk: wayland_cairo_fatal_criticals_picker_enable_start_atomic_removal_pass
   worktree_reconciliation: all_41_auxiliary_heads_ancestors_of_main
+  history_core: canonical_dispatch_mixed_scope_atomic_failure_empty_limit_group_capture_consent_pass
+  history_persistence: real_collection_profile_transaction_undo_redo_flush_read_pass
+  history_native_protocol: real_unix_and_websocket_scoped_replay_events_snapshots_and_denial_pass
+  history_cli: real_binary_unix_human_json_empty_permission_usage_pass
+  history_gtk: wayland_cairo_fatal_criticals_buttons_shortcut_signals_text_focus_group_metadata_rejection_join_pass
 last_agent:
   model: codex
   session: core-006-direct-main-swarm
 open_questions:
+- Wire history availability query and canonical/native begin/end grouping remain follow-ups;
+  local immutable metadata drives GTK availability
 - PipeWire audio physical microphone, desktop policies and sandbox/Flatpak permissions
   remain unverified; isolated fixtures open only synthetic nodes
 - PipeWire GStreamer startup can block about 30 seconds on late daemon death after
@@ -134,7 +141,6 @@ open_questions:
 - Wire-exposed camera device listing needs a protocol schema change (CAPTURE-003 follow-up)
 - Camera USB link flapped during validation (nodes vanished/re-enumerated); busy/unplug
   mapping implemented, live unplug UX untested
-- Canonical Undo/Redo Commands and protocol/UI integration remain follow-up work
 - Destructive Add/Remove undo and persisted history are not implemented
 - Z-order boundary overflow and missing neighbor update events need coordinated core
   fixes

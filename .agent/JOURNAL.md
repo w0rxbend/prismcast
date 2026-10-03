@@ -905,3 +905,46 @@ remain explicit limits. See docs/testing/pipewire-audio.md and research notes.
 Next ready task CORE-006 closes canonical Undo/Redo command/controller integration
 and the PLAN phase-4 editor gap. Research and accept an ADR before implementation;
 capture authorization must never be replayed through history.
+
+## 2026-10-03 — CORE-006 canonical history controllers
+
+Completed directly on main with three agents owning disjoint core/app, native
+protocol/CLI, and GTK files; coordinator alone committed and integrated.
+ADR-0025 was committed before implementation (d3a0bdf). Implementation commit:
+2f327b5 (feat(CORE-006): unify undo and redo across studio controllers).
+
+Undo/Redo now are parameterless Core Commands; handle helpers delegate to the
+same permission-aware dispatcher. Replay checks every actual inverse/forward
+operation, rejects open groups and preserves state/history on failure. Domain
+application and native mapping reject history inside atomic transactions.
+Immutable HistoryStatus drives GTK availability; group-only updates publish at
+the same state/runtime revision without clearing meters or capture. Source
+settings/enable replay invalidates capture; audio/video tests prove it never
+restores grants or authorization effects. Persistence receives the replay action
+and actual collection/profile files round-trip after a mixed transaction.
+
+Native protocol version 1 adds undo/redo without changing existing response or
+snapshot shapes: 52 mirrored Core Commands, 65 sorted request capabilities.
+Actual Unix and loopback WebSocket tests pass scoped replay Events/snapshots,
+wrong/read-only/mixed scopes, empty/open-group and atomic-membership rejections.
+CLI subprocesses pass human/JSON results and rejection/usage exits over real IPC.
+GTK adds header buttons/window actions and bubble Ctrl+Z/Ctrl+Shift+Z; text
+Editable/TextView focus retains local shortcuts. Same-revision group refresh,
+stale-action rejection toast and availability correction, and joined shutdown
+passed in the production RelmApp window. Display tests use controller signals,
+not physical compositor keyboard injection.
+
+Final just ci PASS: 65 suites, 692 passed, zero failed, 20 environment-dependent
+ignored; cargo fmt and workspace all-target Clippy -D warnings clean.
+Log: /tmp/prismcast-core-006-ci.log. just deny PASS separately:
+/tmp/prismcast-core-006-deny.log; existing audit warnings remain, no dependency
+or lockfile changes. Both new GTK tests passed separately with Wayland, Cairo,
+fatal GTK criticals and --ignored --nocapture --test-threads=1. Package checks
+and cross-agent adversarial review found no unresolved task issue. Verification:
+docs/testing/core-history.md and docs/research/core-006-history-controllers.md.
+
+Destructive undo, persisted history, wire history availability and canonical/
+native gesture grouping remain separate work. Capture platform limitations
+from CAPTURE-004 remain unchanged; no overall product completion is claimed.
+Next ready task CORE-007 closes the UI-002 snapshot-read to dispatch race with
+atomic conditional placement edits. STATE/HANDOFF/BACKLOG and task status updated.

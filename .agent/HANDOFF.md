@@ -1,116 +1,128 @@
 # Current state
 
-CAPTURE-004 is implemented and validated on main (6150504). Continue directly
-on main: the user explicitly requested merging all worktree histories first
-and direct-main swarm development. All 41 auxiliary worktree heads remain
-ancestors of main; existing worktrees/local edits remain preserved. Assign
-agents disjoint files; coordinator alone stages, commits and pushes.
+CORE-006 is implemented and validated on main (2f327b5): canonical Undo/Redo
+Commands and GTK/native/CLI controllers. The next task is CORE-007.
+Continue directly on main under the user's standing preference. All 41 auxiliary
+worktree histories were already reconciled; preserve their existing local edits.
+Assign disjoint files to parallel agents; only the coordinator commits and pushes.
 
-## PipeWire audio ownership (ADR-0024)
+## Canonical history contract (ADR-0025)
 
-- Strict core PipeWireAudioSettings: schema_version=1, bounded advisory
-  node.name target and input/output/application mode. PipeWireAudioInput
-  covers input and sink monitor; PipeWireAppAudio selects one playback stream.
-  Unknown fields/versions and kind/mode mismatches reject authorization.
-- AuthorizeSourceCapture freezes settings and routes audio effects into a
-  bounded AudioOwner request receiver. Video CaptureOwner remains isolated.
-  Existing ControlScenes permission applies; native meters require Read.
-- AudioRuntimeHandle.report_capture uses generation/status/diagnostic with
-  dimensions=None. report_capture_levels requires active generation and exact
-  reconciled revision. Tone report_levels cannot impersonate physical capture.
-  Runtime/status events remain transient and grants never enter persisted state.
-- Shared runtime table caps at eight entries; new admission may atomically
-  retire the oldest terminal observation. Never evict live entries. Failed
-  admission changes no state/effect. Owner/receiver loss fails only its family.
-- capture::audio resolves exact class/name to transient serial, daemon cookie
-  and absolute endpoint. Discovery uses fixed pw-dump --remote argv, two-second
-  deadline, 2 MiB output and 128 targets; reader/child cleanup is joined.
-- connect_authorized_audio_sources opens fresh owned sockets, verifies the
-  entire grant set after connecting against that same endpoint and gives FDs
-  to pipewiresrc. Retained originals pin the daemon epoch through native NULL.
-  Full Unix backlog waits are bounded at 250 ms. No fallback/reconnection or
-  same-name/serial rebinding occurs. Fresh sockets are used for every rebuild.
-- GstAudioMixer.reconcile_authorized retains the existing pure mixer planning,
-  stereo48k gain/mute/per-bus solo, bounded queues/latest observations and
-  32-total-source/eight-bus limits. Ordinary reconcile opens only explicit tones.
-  EOF preflight precedes Playing; deliberate teardown flushes callbacks and
-  shuts down protocol sockets before NULL to wake native waits.
-- AudioSession holds only explicit grants, stops invalidated graphs before
-  slow discovery, checks late resolver completion/cancellation, activates only
-  after measurements, and handles concurrent edits during failure cleanup.
-  Failure/stall revokes physical grants and clears meters; Retry is explicit.
-  Three-second source freshness watchdog rejects stale queued observations;
-  five-second service backstop handles missing first data. Real silence counts.
-- GTK has async microphone/system/application picker, separate Add/Start/Retry,
-  Enabled control, diagnostics and atomic all-route removal. Enable never
-  authorizes. Source creation validates first and compensates config failure
-  through another Core Command. No GTK media logic was introduced.
+- Command::Undo/Redo and matching native requests are parameterless. The actor
+  intercepts them in ordinary permission-aware dispatch; compatibility handle
+  helpers delegate to that path. Special Undo/Redo actor messages were removed.
+- Pure AppState owns no history and rejects these operations, including any
+  occurrence inside a nested atomic Transaction before authoritative mutation.
+- The initial gate requires any mutation scope or Admin, then every actual
+  inverse/forward operation is recursively authorized. required_permission
+  returns conservative Admin for history because one static scope cannot
+  describe an actor-owned entry. Use Permissions::check and actor dispatch.
+- History is one global chronological timeline, with unchanged entry/byte/node/
+  label/nesting budgets and controller group ownership (ADR-0015). An open
+  gesture group blocks Undo/Redo for everyone. Failed permissions, structure,
+  preflight or application preserve state, history, revision and observations.
+- Successful replay returns label undo/redo, emits ordinary Core Events, publishes
+  the resulting snapshot, clears stale meters and notifies persistence using
+  the actual replay action. Mixed collection/profile changes persist correctly.
+- AppSnapshot.history() exposes bounded optional undo/redo labels and group_open;
+  can_undo/can_redo are advisory presentation checks. Successful group begin/end
+  publishes a new immutable snapshot at the same state/runtime revision, without
+  clearing meters or invalidating capture. Watch consumers must not suppress
+  metadata refresh just because the revision is unchanged.
+- Capture authorization never enters history. Replayed source settings/enabled
+  changes invalidate transient capture through normal commit logic. Restoring
+  advisory settings or enabling a source cannot restore grants or reopen it;
+  explicit authorization is required. Authorization preserves existing redo.
+- Native protocol version 1 remains additive: 52 mirrored Core Commands and 65
+  advertised request kinds. Undo/Redo return existing ResponseData::Empty with
+  request_type echo, or structured errors (permission forbidden 800, empty/open
+  group invalid_field 400, forbidden transaction structure invalid_request 100).
+  No history labels/stacks/availability/grants enter wire snapshots. A wire
+  history query and native group APIs remain follow-ups.
+- CLI undo/redo uses existing IPC/WS selection/auth; human output identifies
+  the applied operation, JSON prints the empty mutation data. Success exits 0,
+  transport error exits 1, request/usage rejection exits 2. No payload argument.
+- GTK header buttons and win.undo/win.redo actions send Core Commands. Bubble
+  Ctrl+Z/Ctrl+Shift+Z guards Editable/TextView ancestors, including readonly or
+  empty editors and GtkText delegates. Tooltips show labels; empty history,
+  groups and shutdown disable actions. Rejection refreshes availability and
+  shows the existing command-error toast. GTK owns no separate history stack.
 
-## Verification and limits
+## Verification
 
-Final just ci passed: 679 tests passed, 18 environment-dependent ignored;
-format and all-target Clippy clean. just deny passed separately with existing
-warnings. socket2 became a direct capture dependency but was already locked;
-no new external package was added. See docs/testing/pipewire-audio.md and
-research/capture-004-pipewire-audio.md for official sources and exact commands.
+See docs/testing/core-history.md, docs/testing/undo-history.md and
+research/core-006-history-controllers.md. Final just ci passed 692 tests, zero failed and 20 environment-dependent ignored;
+formatting and workspace all-target Clippy are clean. just deny passed separately
+with existing warnings. No dependencies changed. STATE.yaml and JOURNAL.md record
+the evidence.
 
-Nine app and five supervision tests cover consent, generation/revision,
-family isolation, bounded admission, delayed resolver/revocation and concurrent
-fault cleanup. Native WebSocket test proves permission rejection, audio Active
-null dimensions, meter generation and pending failure invalidation.
+Five app history tests cover mixed scopes on both replays, wrapper/canonical
+behavior, open/foreign groups, capacity/no-ops, repeated failed atomic replay,
+snapshot identity, same-revision active capture/meters and both capture families'
+consent invalidation. Pure domain test rejects direct/nested history application.
+Real persistence regression flushes and reads collection/profile files after a
+mixed transaction, Undo and Redo; a new actor with identical final working state
+starts with empty history (no complete disk-to-AppState bootstrap is claimed).
 
-Real private native fixture passed input, sink monitor and application signal,
-unrelated louder-sentinel exclusion, gain/mute, target removal/replacement,
-daemon restart with reused serial, closed old socket and fresh authorization
-(~1.56s). Final real Core/AudioSession fixture passed actual capture, finite
-stereo meters, gain/mute, disable/enable without automatic reopening, new
-Retry generation and joined shutdown (~1.25s). Private subprocess environments,
-mode0700 runtime directories and process-group cleanup open no hardware.
+Three native integration tests each exercise actual Unix and loopback WebSocket
+transports: scoped success with consecutive normal Events and matching snapshots,
+read-only/wrong/mixed scopes on Undo and Redo, empty/open groups and forbidden
+atomic members. CLI subprocess tests exercise the real binary/socket, human/JSON
+results, rejection/usage exits and preserved history. Existing auth/TLS/OBS paths
+remain unchanged.
 
-Separate Wayland/Cairo/fatal-critical GTK tests passed picker/error/no-target
-states, enable/start command separation, atomic removal and actual tone/live
-meter/repeated-close application flow. Existing AUDIO-001 foundation and
-native meter source filtering/throttling remain intact (ADR-0023).
+Two GTK tests passed in separate real Wayland/Cairo/fatal-critical processes:
 
-An additional supplied-old-FD native probe passed: replacement capture cannot
-occur, but upstream pipewiresrc can block synchronous startup about 30 seconds
-(~31.6s fixture total). EOF preflight avoids known dead sockets; daemon death
-after that last check can still delay cancellation until native return. The
-state-settlement deadline does not bound every synchronous plugin call.
+```sh
+GDK_BACKEND=wayland GSK_RENDERER=cairo G_DEBUG=fatal-criticals cargo test -p prismcast-ui native_window_history_actions_share_controller_history_and_refresh_groups -- --ignored --nocapture --test-threads=1
+GDK_BACKEND=wayland GSK_RENDERER=cairo G_DEBUG=fatal-criticals cargo test -p prismcast-ui text_editors_keep_history_shortcuts_even_readonly_or_empty -- --ignored --nocapture --test-threads=1
+```
 
-Physical microphones, desktop/session-manager policies and Flatpak permissions
-remain unverified. Application capture selects one current playback stream.
-A pause which stops buffers can trigger the conservative freshness watchdog
-and require Retry; one failure currently revokes all physical audio grants.
-Monitoring/playback, balance, sync delay, filters and encoded tracks remain
-unsupported; bus outputs end in nonplaying fakesinks. OBS pre-fader input peak
-and output statistics remain separate follow-ups. Desktop remote-server
-bootstrap also remains absent; transport tests establish delivery separately.
-Do not claim the overall broadcasting application complete.
+These exercise production header clicks, key-controller signals with actual Core
+state assertions, second-controller edits, same-revision group refresh, visible
+rejection toast, corrected availability and joined shutdown. They do not inject
+physical compositor keyboard events. No new dependencies were added.
 
 ## Exact next task
 
-Read .agent/tasks/CORE-006.yaml: canonical Undo/Redo Core Commands with GTK,
-native socket and CLI integration. This closes the central command invariant
-and PLAN phase-4 scene-editor gap before larger audio/output work. Existing
-actor history methods and CORE-005 limits are the starting point. Research
-permission/group/replay semantics and accept an ADR before implementation.
-Capture authorization must never be replayed; history changes to source
-settings/enable revoke grants and require explicit new authorization.
+Read .agent/tasks/CORE-007.yaml: atomic conditional scene placement edits. This
+closes the UI-002 snapshot-read to dispatch race. Choose and document bounded
+preconditions in an ADR before implementation, comparing revisions with entity
+preimages. A delayed GTK or native edit must not overwrite a newer transform,
+crop, lock, removal or relevant scene/source/runtime context. Preserve normal
+Events, bounded undo and explicit capture consent; replay must not reintroduce
+stale admission conditions. Destructive undo, groups and persisted history remain
+separate tasks. Z-order overflow/missing neighbor events and scene nesting cycle
+checks also remain unresolved domain follow-ups.
 
-Read core command/state, app actor/dispatch/undo, native protocol request and
-coverage tests, remote mapping/session and GTK actions. Preserve history
-limits, transaction-controller ownership and permission checks for the actual
-inverse/forward action. Destructive undo and persisted history are separate.
+## Capture/audio context and remaining platform evidence
 
-## Other pending evidence
+CAPTURE-004 remains complete under ADR-0024; see docs/testing/pipewire-audio.md.
+PipeWire settings persist only versioned advisory name/mode. AudioOwner effects
+freeze source/generation/settings; AudioSession owns explicit grants. Native
+resolver checks exact class/name, cookie/serial and a pinned absolute endpoint;
+fresh owned sockets predate inventory verification and stay retained through NULL.
+Never fallback, reconnect or rebind a grant to a replacement daemon. Meters require
+active generation and the exact reconciled revision. Source settings/enable/remove
+invalidate runtime. Discovery and streams retain their established bounds.
 
-CAPTURE-002 integrated live window preview is still unverified: earlier picker
-grants selected the wrong windows. Run raw
-actual_window_capture_consumer_frames_show_fixture_pixels, then integrated
-actual_window_capture_preview_pixels_placement_and_shutdown in separate
-Wayland/Cairo/fatal-critical processes with --ignored --nocapture
---test-threads=1, coordinated with the user choosing the small flashing window
+Private synthetic input/sink-monitor/app sentinel and reused-serial daemon restart
+fixtures passed previously, along with real AudioSession and native meter socket
+checks. Physical microphones, desktop policies and Flatpak permissions remain
+unverified. Application capture selects one playback stream. Three-second no-data
+watchdog can require Retry after buffers stop; one fault revokes all physical grants.
+Upstream pipewiresrc synchronous startup may block about 30 seconds if the daemon
+dies after final EOF preflight; cancellation waits native return. No replacement
+capture occurs. State settlement limits do not bound every plugin call.
+
+Monitoring/playback, balance, sync delay, filters, encoded tracks, OBS pre-fader
+peaks/output statistics and desktop remote bootstrap remain follow-ups; buses end
+in nonplaying fakesinks. The overall broadcasting application is not complete.
+
+CAPTURE-002 integrated live window preview remains unverified: earlier grants
+selected the wrong windows. Run the raw actual_window_capture_consumer_frames_show_fixture_pixels
+and integrated actual_window_capture_preview_pixels_placement_and_shutdown display
+filters separately with a coordinated selection of the small flashing window
 "Prismcast capture test target – select this window". Monitor/KDE/X11 capture,
-USB unplug UX and live UI camera preview remain unverified. Camera paths can
-renumber; stable identity and wire-exposed discovery are follow-ups.
+camera unplug UX and live UI camera preview remain unverified. Camera paths can
+renumber; stable identity and wire-exposed discovery remain follow-ups.

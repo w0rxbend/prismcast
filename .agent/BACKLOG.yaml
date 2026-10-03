@@ -238,4 +238,10 @@ tasks:
     title: Canonical Undo and Redo commands across controllers
     priority: 65
     depends_on: [CORE-005, UI-002]
+    status: done
+
+  - id: CORE-007
+    title: Atomic conditional scene placement edits
+    priority: 66
+    depends_on: [CORE-006, UI-002]
     status: ready

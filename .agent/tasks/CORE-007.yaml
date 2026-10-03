@@ -1,0 +1,29 @@
+id: CORE-007
+title: Atomic conditional scene placement edits
+goal: Prevent a delayed GTK or native scene edit from overwriting another controller's newer placement or editing context.
+depends_on: [CORE-006, UI-002]
+allowed_scope:
+- crates/prismcast-core/
+- crates/prismcast-app/
+- crates/prismcast-protocol/
+- crates/prismcast-remote/
+- crates/prismcast-ui/
+- docs/adr/
+- docs/research/
+- docs/protocols/
+- docs/testing/
+acceptance:
+- An accepted ADR defines bounded typed edit preconditions and conflict behavior before implementation, including which state/runtime context changes invalidate an edit
+- Conditional scene placement edits check their expected context and apply atomically inside the application owner; a controller snapshot read followed by ordinary dispatch is not sufficient
+- GTK move/resize and numeric placement edits retain their originating context and submit canonical conditional Core Commands
+- A concurrent transform, crop, lock, removal or editing-context change rejects stale intent without changing state, history, events, meters or capture authorization
+- Successful conditional edits produce the ordinary Core Events and one bounded undo entry; Undo/Redo remain usable without replaying stale preconditions or capture authorization
+- Native protocol mirrors the conditional edit contract with typed mappings and structured conflicts; controllers can obtain the required context without exposing runtime grants
+- Deterministic race tests prove stale GTK and native edits cannot clobber newer changes; unrelated metadata publications and no-op behavior follow the documented contract
+- Existing ordinary Commands remain supported for deliberate unconditional control; destructive undo and grouping remain separate tasks
+validation: [just ci, just deny, deterministic owner race tests, real native socket conflict test, separate GTK placement regression]
+status: ready
+notes:
+- Continue direct-main swarm with disjoint ownership and coordinator-only commits and pushes
+- Closes the snapshot-read to dispatch race recorded in UI-002 and the current open questions
+- Choose the narrowest contract that protects actual edit context; document revision versus entity-preimage tradeoffs before adding protocol fields

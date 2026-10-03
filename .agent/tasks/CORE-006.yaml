@@ -39,7 +39,7 @@ validation:
 - just deny
 - focused history permission and socket tests
 - separately recorded GTK shortcut/action regression
-status: in_progress
+status: done
 notes:
 - Write an ADR before changing history command ownership or protocol contracts
 - Continue direct-main swarm work with disjoint ownership and coordinator-only commits/pushes
