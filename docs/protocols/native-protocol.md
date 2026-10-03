@@ -139,8 +139,8 @@ required scope; failures are `forbidden` errors (code 800), not disconnects.
   "message":"output is not running","field":"output_id","details":{"state":"stopped"}}}}}
 ```
 
-**Request kinds.** All 49 `prismcast_core::Command` variants are representable, with identical
-snake_case tags (`add_scene` … `transaction`) and identical field semantics with wire types
+**Request kinds.** All 52 `prismcast_core::Command` variants are representable, with identical
+snake_case tags (including `undo` and `redo`) and identical field semantics with wire types
 (UUIDs instead of typed-ID newtypes, `prismcast_protocol::data` structs instead of domain
 structs). The mirror is test-enforced (`tests/command_coverage.rs`); adding a core command
 requires adding the wire variant and extending that test in the same commit.
@@ -149,6 +149,26 @@ Command responses carry server-assigned IDs (`scene_created`, `source_created`, 
 Queries are read-only request kinds: `get_version`, `get_snapshot`, `list_scenes`, `get_scene`,
 `list_sources`, `get_source`, `list_outputs`, `get_output`, `get_audio_state`, `list_profiles`,
 `list_scene_collections`. Session requests: `update_subscriptions`, `get_subscriptions`.
+
+`undo` and `redo` are parameterless mutation requests against the application's
+global, session-transient history. They require at least one mutation scope
+(or `admin`) and permission for every actual operation in the replayed entry.
+For example, `control_audio` cannot undo a scene rename; a mixed scene/audio
+transaction requires both scopes. Permission failures return `forbidden` 800
+and preserve state and both history stacks. An empty stack or an open gesture
+group returns the existing `invalid_field` 400 error without changing history.
+Success returns `data: {"data":"empty"}` with `request_type: "undo"` or
+`"redo"`; clients observe normal replay events and the resulting snapshot.
+There is no wire history query, label payload, persisted history or capture
+grant. Capture authorization is never replayed; undoing source settings or
+enabled changes still revokes transient capture and requires explicit new
+authorization. Destructive Add/Remove undo remains unsupported.
+
+The CLI exposes `prismcast-cli undo` and `prismcast-cli redo` over either native
+transport. Human output is `undo applied` / `redo applied`; `--json` prints the
+existing `{"data":"empty"}` result. Rejection prints the existing structured
+error summary to stderr and exits 2, transport failure exits 1, and success
+exits 0. Neither subcommand accepts a target argument.
 
 `authorize_source_capture` requires `control_scenes` (or `admin`) for every
 capture kind, including audio. CAPTURE-004 keeps the existing request/event
@@ -159,7 +179,9 @@ observations contain negotiated pixel dimensions. Target serials and native
 grants are never exposed or persisted. See [PipeWire audio verification](../testing/pipewire-audio.md).
 
 `transaction` members must be command kinds (queries are rejected); nesting `transaction` inside
-`transaction` is rejected. It maps to `Command::Transaction` — atomic, all-or-nothing
+`transaction` is rejected. `undo` and `redo` are also forbidden transaction
+members; structural rejection occurs before any member executes, including a
+nested transaction containing history commands. It maps to `Command::Transaction` — atomic, all-or-nothing
 (PLAN §59).
 
 ### Structured errors

@@ -1,5 +1,10 @@
 # Controller-safe bounded undo history
 
+This page records CORE-005 validation. CORE-006 subsequently exposed canonical
+Undo/Redo Commands and GTK/native/CLI controls; see [current history verification](core-history.md)
+and [ADR-0025](../adr/0025-canonical-history-commands.md). The budgets and controller
+ownership below still apply.
+
 CORE-005 preserves existing AppHandle meta APIs without changing domain,
 persistent or wire schemas. Clones share AppControllerId; new_controller creates
 an independent controller. Every IPC/WebSocket Session forks its application

@@ -35,7 +35,7 @@
 //!   [`Recovery`] on the load outcome, never silent.
 //! - **Actor ownership** ([`PersistenceHandle`]): the persistence actor is
 //!   the only component that opens files under the root. The core actor
-//!   notifies it of applied commands ([`dirty_class`] classifies all 49
+//!   notifies it of applied commands ([`dirty_class`] classifies all 52
 //!   variants); writes are debounced; [`PersistenceHandle::save_now`] /
 //!   [`PersistenceHandle::shutdown`] flush synchronously.
 //!

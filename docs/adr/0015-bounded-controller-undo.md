@@ -1,6 +1,8 @@
 # ADR-0015: Bounded undo history and controller ownership
 
-Status: accepted for CORE-005.
+Status: accepted for CORE-005. The temporary meta-API exception and deferred
+canonical/controller integration below are superseded by
+[ADR-0025](0025-canonical-history-commands.md); the ownership and budgets remain.
 
 The application actor owns chronological undo/redo history. Handle clones share a
 local typed controller identity; `new_controller` explicitly forks that identity.

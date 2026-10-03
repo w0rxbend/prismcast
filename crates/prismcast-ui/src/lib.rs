@@ -29,4 +29,5 @@ pub mod presentation;
 mod audio_sources;
 mod camera_devices;
 mod capture_parent;
+mod history;
 pub mod preview_editor;

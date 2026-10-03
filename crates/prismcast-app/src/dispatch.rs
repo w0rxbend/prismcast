@@ -22,6 +22,7 @@
 //! - Mixer parameters, audio routes, audio buses → `ControlAudio`.
 //! - Output lifecycle and reconnect policy → `ControlOutputs`.
 //! - Profiles and scene collections → `ModifyConfiguration`.
+//! - Undo/Redo require any mutation scope initially, then every replay scope.
 //! - `Transaction` requires the union of its members' permissions (empty =
 //!   `Read`, a harmless no-op).
 //!
@@ -127,8 +128,7 @@ impl Permissions {
     }
 
     /// Whether the set can mutate anything (anything beyond read-only).
-    /// Used to gate undo/redo until per-domain undo authz lands (see
-    /// [`crate::undo`]).
+    /// History additionally authorizes every replayed operation in the actor.
     pub fn can_control(&self) -> bool {
         Permission::ALL
             .iter()
@@ -142,6 +142,16 @@ impl Permissions {
     /// scope the group touches (a folded union scope would let a caller with
     /// only one of the scopes execute the whole group).
     pub fn check(&self, command: &Command) -> Result<()> {
+        if matches!(command, Command::Undo | Command::Redo) {
+            return if self.can_control() {
+                Ok(())
+            } else {
+                Err(Error::Unauthorized(format!(
+                    "{} requires at least one control permission",
+                    command.label()
+                )))
+            };
+        }
         if let Command::Transaction { commands } = command {
             for member in commands {
                 self.check(member)?;
@@ -212,13 +222,18 @@ impl<'de> Deserialize<'de> for Permissions {
 }
 
 /// The permission a command requires (PLAN.md §24; see module docs for the
-/// mapping rationale).
+/// mapping rationale). History returns the conservative Admin sentinel because
+/// its actual scopes depend on actor-owned history; use Permissions::check
+/// for the initial gate and actor dispatch for replay authorization.
 pub fn required_permission(command: &Command) -> Permission {
     // AuthorizeSourceCapture preserves its existing ControlScenes policy for
     // both source families; controller authorization is independent of the
     // local video/audio owner capability (ADR-0024).
     use Command as C;
     match command {
+        // A single static scope cannot describe history. Permissions::check
+        // handles its initial gate; the actor checks the actual replay scopes.
+        C::Undo | C::Redo => Permission::Admin,
         C::AddScene { .. }
         | C::RemoveScene { .. }
         | C::RenameScene { .. }
@@ -281,7 +296,7 @@ pub fn required_permission(command: &Command) -> Permission {
 
 /// The least scope granting both `a` and `b` (used to aggregate transaction
 /// members). Ordering is the declaration order of [`Permission`]; `Admin`
-/// only appears if a member requires it (no member currently does).
+/// also conservatively classifies dynamic history operations.
 fn permission_union(a: Permission, b: Permission) -> Permission {
     fn rank(p: Permission) -> u8 {
         match p {
@@ -396,6 +411,8 @@ mod tests {
         let bus = AudioBusId::new();
         let output = OutputId::new();
         vec![
+            (Command::Undo, Permission::Admin),
+            (Command::Redo, Permission::Admin),
             (
                 Command::AddScene { name: "s".into() },
                 Permission::ControlScenes,

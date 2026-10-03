@@ -24,6 +24,10 @@ use crate::transition::Transition;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "command", rename_all = "snake_case")]
 pub enum Command {
+    /// Replays the latest undoable entry through the application history owner.
+    Undo,
+    /// Replays the latest undone entry through the application history owner.
+    Redo,
     // --- Scenes ---
     /// Creates an empty scene.
     AddScene {
@@ -368,6 +372,8 @@ impl Command {
     /// labels, logs, and remote UIs).
     pub fn label(&self) -> &'static str {
         match self {
+            Self::Undo => "undo",
+            Self::Redo => "redo",
             Self::AddScene { .. } => "add scene",
             Self::RemoveScene { .. } => "remove scene",
             Self::RenameScene { .. } => "rename scene",
@@ -437,6 +443,8 @@ mod tests {
         let bus = AudioBusId::new();
         let output = OutputId::new();
         vec![
+            Command::Undo,
+            Command::Redo,
             Command::AddScene {
                 name: "Main".into(),
             },

@@ -66,6 +66,7 @@ pub const AVAILABLE_REQUESTS: &[&str] = &[
     "list_sources",
     "lower_scene_item",
     "raise_scene_item",
+    "redo",
     "remove_audio_bus",
     "remove_audio_route",
     "remove_output",
@@ -105,6 +106,7 @@ pub const AVAILABLE_REQUESTS: &[&str] = &[
     "swap_preview_program",
     "transaction",
     "transition_to_program",
+    "undo",
     "update_subscriptions",
 ];
 
@@ -233,6 +235,8 @@ pub fn command_from_wire(kind: RequestKind) -> Result<Command, WireError> {
         )
     };
     match kind {
+        R::Undo => Ok(Command::Undo),
+        R::Redo => Ok(Command::Redo),
         R::AddScene { name } => Ok(Command::AddScene { name }),
         R::RemoveScene { scene_id } => Ok(Command::RemoveScene {
             scene_id: SceneId::from(scene_id),
@@ -457,10 +461,10 @@ pub fn command_from_wire(kind: RequestKind) -> Result<Command, WireError> {
         R::Transaction { commands } => {
             let mut mapped = Vec::with_capacity(commands.len());
             for member in commands {
-                if matches!(member, R::Transaction { .. }) {
+                if matches!(member, R::Transaction { .. } | R::Undo | R::Redo) {
                     return Err(WireError::new(
                         ErrorKind::InvalidRequest,
-                        "transaction cannot nest inside transaction",
+                        "transaction cannot contain nested transactions or history commands",
                     ));
                 }
                 if classify(&member) != RequestClass::Command {
@@ -1466,7 +1470,7 @@ mod tests {
         sorted.sort_unstable();
         sorted.dedup();
         assert_eq!(sorted, AVAILABLE_REQUESTS, "list must be sorted, unique");
-        assert_eq!(sorted.len(), 63, "protocol v1 has 63 request kinds");
+        assert_eq!(sorted.len(), 65, "protocol v1 has 65 request kinds");
     }
 
     #[test]

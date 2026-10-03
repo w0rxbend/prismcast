@@ -67,5 +67,5 @@ pub use dispatch::{required_permission, Permission, Permissions, Query, QueryRes
 pub use persistence::{
     dirty_class, DirtyClass, PersistenceConfig, PersistenceEvent, PersistenceHandle,
 };
-pub use snapshot::AppSnapshot;
+pub use snapshot::{AppSnapshot, HistoryStatus};
 pub use undo::{UndoEntry, UndoLimits, UndoService, DEFAULT_UNDO_CAPACITY};

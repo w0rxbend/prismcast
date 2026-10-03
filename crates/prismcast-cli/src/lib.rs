@@ -20,6 +20,7 @@
 //!
 //! - `ping` — handshake + `get_version`.
 //! - `status` — snapshot summary (scenes, sources, outputs, current scene).
+//! - `undo` / `redo` — replay the latest authorized global history entry.
 //! - `scene list` — all scenes with IDs.
 //! - `scene switch <uuid-or-name>` — make a scene current; the argument is a
 //!   UUID or an exact scene name.
@@ -125,6 +126,10 @@ pub enum Commands {
     Ping,
     /// Print a summary of the studio state.
     Status,
+    /// Undo the latest global history entry (requires its mutation permissions).
+    Undo,
+    /// Redo the latest undone global history entry (requires its mutation permissions).
+    Redo,
     /// Scene operations.
     Scene {
         #[command(subcommand)]
@@ -353,6 +358,21 @@ pub async fn run(cli: Cli) -> Result<(), CliError> {
     let mut client = connect(&plan, auth).await?;
 
     match &cli.command {
+        Commands::Undo | Commands::Redo => {
+            let request = if matches!(cli.command, Commands::Undo) {
+                RequestKind::Undo
+            } else {
+                RequestKind::Redo
+            };
+            let label = request.tag();
+            let data = client.request_data(request).await?;
+            if data != ResponseData::Empty {
+                return Err(CliError::Transport(format!(
+                    "unexpected {label} response data"
+                )));
+            }
+            print_data(&data, cli.json, |_| println!("{label} applied"));
+        }
         Commands::Ping => {
             let data = client.request_data(RequestKind::GetVersion).await?;
             print_data(&data, cli.json, |value| {

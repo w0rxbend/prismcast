@@ -31,35 +31,66 @@ use prismcast_core::scene::Scene;
 use prismcast_core::source::Source;
 use prismcast_core::state::AppState;
 
+/// Immutable presentation metadata for global, session-transient history.
+/// Availability is advisory; dispatch still checks permissions and replay validity.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HistoryStatus {
+    /// Bounded label of the next undo entry, advisory even when unavailable.
+    pub undo_label: Option<String>,
+    /// Bounded label of the next redo entry, advisory even when unavailable.
+    pub redo_label: Option<String>,
+    /// An open gesture group blocks undo and redo for every controller.
+    pub group_open: bool,
+}
+impl HistoryStatus {
+    /// Whether an undo entry exists and no group blocks replay.
+    pub fn can_undo(&self) -> bool {
+        !self.group_open && self.undo_label.is_some()
+    }
+    /// Whether a redo entry exists and no group blocks replay.
+    pub fn can_redo(&self) -> bool {
+        !self.group_open && self.redo_label.is_some()
+    }
+}
+
 /// An immutable, point-in-time view of the application state.
 ///
 /// Published by the core actor after every applied command; `revision` is
-/// strictly increasing and lets controllers detect missed updates (pair with
-/// the event stream's sequence numbers for gap detection).
+/// increases for state/runtime commits. History-only publications retain it;
+/// pair with event sequence numbers to detect missed state updates.
 #[derive(Debug, Clone)]
 pub struct AppSnapshot {
     revision: u64,
     state: AppState,
     runtime: HashMap<SourceId, SourceRuntime>,
+    history: HistoryStatus,
 }
 
 impl AppSnapshot {
     /// Wraps a state clone at the given revision. Called by the core actor.
     pub(crate) fn new(revision: u64, state: AppState) -> Arc<Self> {
-        Self::with_runtime(revision, state, HashMap::new())
+        Self::with_runtime(revision, state, HashMap::new(), HistoryStatus::default())
     }
 
     pub(crate) fn with_runtime(
         revision: u64,
         state: AppState,
         runtime: HashMap<SourceId, SourceRuntime>,
+        history: HistoryStatus,
     ) -> Arc<Self> {
         Arc::new(Self {
             revision,
             state,
             runtime,
+            history,
         })
     }
+    /// Global history availability at publication time. Group-only updates
+    /// retain the same state/media revision.
+    pub fn history(&self) -> &HistoryStatus {
+        &self.history
+    }
+
     /// Transient capture observation, absent until explicit authorization.
     pub fn source_runtime(&self, source_id: SourceId) -> Option<&SourceRuntime> {
         self.runtime.get(&source_id)
@@ -69,7 +100,8 @@ impl AppSnapshot {
         self.runtime.iter().map(|(id, value)| (*id, value))
     }
 
-    /// Monotonically increasing publish counter (0 = initial state).
+    /// State/runtime commit revision (0 = initial state). History-only updates
+    /// keep the previous revision.
     pub fn revision(&self) -> u64 {
         self.revision
     }

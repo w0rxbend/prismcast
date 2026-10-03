@@ -35,7 +35,7 @@ pub struct Request {
 
 /// The operation of a [`Request`].
 ///
-/// Command variants (`add_scene` … `transaction`) map 1:1 onto
+/// Command variants (including `undo`/`redo`) map 1:1 onto
 /// `prismcast_core::Command`; query variants (`get_*`, `list_*`) are
 /// read-only; `update_subscriptions` manages the session.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -373,11 +373,18 @@ pub enum RequestKind {
     /// Applies several commands atomically, in order: either all succeed or
     /// none are applied (maps to `prismcast_core::Command::Transaction`,
     /// PLAN.md §59). Members must be command variants, not queries;
-    /// nesting `Transaction` inside `Transaction` is rejected.
+    /// nesting `Transaction` or history commands inside `Transaction` is rejected.
     Transaction {
         /// Commands to apply as one unit.
         commands: Vec<RequestKind>,
     },
+
+    /// Replays the latest inverse from the application's global history.
+    /// Requires authorization for every operation replayed; not a transaction member.
+    Undo,
+    /// Replays the latest forward entry from the application's global history.
+    /// Requires authorization for every operation replayed; not a transaction member.
+    Redo,
 
     // --- Queries (read-only; no core Command counterpart) ---
     /// Server versions and the list of request types available at the
@@ -485,6 +492,8 @@ impl RequestKind {
             Self::RemoveSceneCollection { .. } => "remove_scene_collection",
             Self::SelectSceneCollection { .. } => "select_scene_collection",
             Self::Transaction { .. } => "transaction",
+            Self::Undo => "undo",
+            Self::Redo => "redo",
             Self::GetVersion => "get_version",
             Self::GetSnapshot => "get_snapshot",
             Self::ListScenes => "list_scenes",
@@ -513,6 +522,8 @@ mod tests {
         let bus = Uuid::new_v4();
         let output = Uuid::new_v4();
         vec![
+            RequestKind::Undo,
+            RequestKind::Redo,
             RequestKind::AddScene {
                 name: "Main".into(),
             },

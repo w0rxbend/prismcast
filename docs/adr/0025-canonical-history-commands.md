@@ -44,7 +44,8 @@ and are presented through the established command-error path.
 Add native `undo`/`redo` requests, command mappings, advertised capabilities and
 CLI subcommands. These are additive protocol version 1 requests, so no version
 bump or persisted-file schema change is needed. They return the existing
-CommandApplied response or structured error. Native clients observe the same
+successful mutation response (`ResponseData::Empty`, with request_type echo)
+or structured error. Native clients observe the same
 normal replay Events and snapshots; no history payload or grant crosses the
 wire. A wire history query is deferred.
 

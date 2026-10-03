@@ -366,6 +366,8 @@ impl AppState {
             }
             // Authorization is an external effect, never an undo/replay operation.
             Command::AuthorizeSourceCapture { .. } => None,
+            // History belongs to the application actor and has no domain inverse.
+            Command::Undo | Command::Redo => None,
             // Irreversible: creations, destructions, duplicates.
             Command::AddScene { .. }
             | Command::RemoveScene { .. }
@@ -423,6 +425,11 @@ pub fn apply(state: &mut AppState, command: &Command) -> Result<Vec<Event>> {
             )])
         }
         Command::Transaction { commands } => {
+            if contains_history(command) {
+                return Err(Error::InvalidInput(
+                    "history commands cannot be inside a transaction".into(),
+                ));
+            }
             if contains_capture_authorization(command) {
                 return Err(Error::InvalidInput(
                     "capture authorization cannot be inside a transaction".into(),
@@ -450,8 +457,19 @@ pub fn contains_capture_authorization(command: &Command) -> bool {
     }
 }
 
+fn contains_history(command: &Command) -> bool {
+    match command {
+        Command::Undo | Command::Redo => true,
+        Command::Transaction { commands } => commands.iter().any(contains_history),
+        _ => false,
+    }
+}
+
 fn apply_one(state: &mut AppState, command: &Command) -> Result<Vec<Event>> {
     match command {
+        Command::Undo | Command::Redo => Err(Error::InvalidInput(
+            "history commands require application dispatch".into(),
+        )),
         Command::AuthorizeSourceCapture { .. } => Err(Error::InvalidInput(
             "capture authorization requires application dispatch".into(),
         )),
@@ -2008,6 +2026,33 @@ mod tests {
         assert!(state
             .apply(&Command::RemoveAudioBus { bus_id: master })
             .is_err());
+    }
+
+    #[test]
+    fn history_commands_reject_pure_application_and_nested_transactions_atomically() {
+        let mut state = AppState::new();
+        for history in [Command::Undo, Command::Redo] {
+            assert!(state.inverse(&history).is_none());
+            let before = state.clone();
+            assert!(matches!(state.apply(&history), Err(Error::InvalidInput(_))));
+            assert_eq!(state, before);
+            let transaction = Command::Transaction {
+                commands: vec![
+                    Command::AddScene {
+                        name: "must not appear".into(),
+                    },
+                    Command::Transaction {
+                        commands: vec![history],
+                    },
+                ],
+            };
+            assert!(state.inverse(&transaction).is_none());
+            assert!(matches!(
+                state.apply(&transaction),
+                Err(Error::InvalidInput(_))
+            ));
+            assert_eq!(state, before);
+        }
     }
 
     // --- undo inverses ---

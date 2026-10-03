@@ -91,7 +91,7 @@ impl DirtyClass {
 }
 
 /// Classifies a command into the file families it dirties. Exhaustive over
-/// all 50 [`Command`] variants — a new variant fails to compile until it is
+/// all 52 [`Command`] variants — a new variant fails to compile until it is
 /// classified.
 ///
 /// Rules (persistence-model §8):
@@ -108,6 +108,9 @@ impl DirtyClass {
 /// are kept as orphans rather than deleted under the user's feet).
 pub fn dirty_class(command: &Command) -> DirtyClass {
     match command {
+        // The actor notifies persistence with the replayed action, never these
+        // session-only history operations.
+        Command::Undo | Command::Redo => DirtyClass::VOLATILE,
         Command::AuthorizeSourceCapture { .. } => DirtyClass::VOLATILE,
         // --- Scenes ---
         Command::AddScene { .. }
@@ -646,7 +649,7 @@ mod tests {
     use prismcast_core::source::SourceKind;
     use prismcast_core::transition::Transition;
 
-    /// Exercises every one of the 50 Command variants: the match in
+    /// Exercises every one of the 52 Command variants: the match in
     /// `dirty_class` is exhaustive, so this test failing to compile is the
     /// signal that a new variant was added without classification.
     #[test]
@@ -657,6 +660,8 @@ mod tests {
         let bus = AudioBusId::new();
         let output = OutputId::new();
         let commands = vec![
+            Command::Undo,
+            Command::Redo,
             Command::AddScene { name: "s".into() },
             Command::RemoveScene { scene_id: scene },
             Command::RenameScene {
@@ -819,7 +824,7 @@ mod tests {
                 commands: vec![Command::TransitionToProgram],
             },
         ];
-        assert_eq!(commands.len(), 50);
+        assert_eq!(commands.len(), 52);
         for command in &commands {
             let _ = dirty_class(command);
         }

@@ -22,10 +22,9 @@
 //!
 //! ## Undo/redo
 //!
-//! [`AppHandle::undo`] / [`AppHandle::redo`] are actor messages (not
-//! [`Command`]s — they are meta-operations over the undo service, see
-//! [`crate::undo`]), but the inverse commands they apply go through the same
-//! apply → events → snapshot pipeline as any other command.
+//! [`Command::Undo`] / [`Command::Redo`] enter the same authorized dispatch
+//! path as all other commands. Compatibility handle helpers delegate to it;
+//! the actor checks every replay operation before applying normal events.
 
 use std::sync::Arc;
 
@@ -48,7 +47,7 @@ use crate::capture::{
 };
 use crate::dispatch::{Permissions, Query, QueryResponse};
 use crate::persistence::PersistenceHandle;
-use crate::snapshot::AppSnapshot;
+use crate::snapshot::{AppSnapshot, HistoryStatus};
 use crate::undo::{
     bounded_size, validate_json, validate_structure, UndoEntry, UndoLimits, UndoService,
     DEFAULT_UNDO_CAPACITY,
@@ -167,14 +166,6 @@ pub(crate) enum ActorMessage {
         reply: oneshot::Sender<Result<(), Error>>,
     },
     Command(Box<CommandEnvelope>),
-    Undo {
-        permissions: Permissions,
-        reply: oneshot::Sender<Result<CommandResponse, Error>>,
-    },
-    Redo {
-        permissions: Permissions,
-        reply: oneshot::Sender<Result<CommandResponse, Error>>,
-    },
     BeginTransaction {
         controller_id: AppControllerId,
         label: String,
@@ -380,19 +371,8 @@ impl AppHandle {
         &self,
         permissions: Permissions,
     ) -> Result<CommandResponse, HandleError> {
-        check_can_control(permissions, "undo")?;
-        let (reply_tx, reply_rx) = oneshot::channel();
-        self.tx
-            .send(ActorMessage::Undo {
-                permissions,
-                reply: reply_tx,
-            })
+        self.dispatch_with_permissions(Command::Undo, permissions)
             .await
-            .map_err(|_| HandleError::Shutdown)?;
-        reply_rx
-            .await
-            .map_err(|_| HandleError::Shutdown)?
-            .map_err(HandleError::Core)
     }
 
     /// Redoes the last undone step (trusted local controller).
@@ -405,19 +385,8 @@ impl AppHandle {
         &self,
         permissions: Permissions,
     ) -> Result<CommandResponse, HandleError> {
-        check_can_control(permissions, "redo")?;
-        let (reply_tx, reply_rx) = oneshot::channel();
-        self.tx
-            .send(ActorMessage::Redo {
-                permissions,
-                reply: reply_tx,
-            })
+        self.dispatch_with_permissions(Command::Redo, permissions)
             .await
-            .map_err(|_| HandleError::Shutdown)?;
-        reply_rx
-            .await
-            .map_err(|_| HandleError::Shutdown)?
-            .map_err(HandleError::Core)
     }
 
     /// Opens an undo transaction group (trusted local controller). Commands
@@ -754,12 +723,6 @@ impl CoreActor {
                     ));
                 }
                 ActorMessage::Command(envelope) => self.handle_command(envelope),
-                ActorMessage::Undo { permissions, reply } => {
-                    let _ = reply.send(self.handle_undo(permissions));
-                }
-                ActorMessage::Redo { permissions, reply } => {
-                    let _ = reply.send(self.handle_redo(permissions));
-                }
                 ActorMessage::BeginTransaction {
                     controller_id,
                     label,
@@ -768,6 +731,7 @@ impl CoreActor {
                     let result = self.undo.begin_transaction(label);
                     if result.is_ok() {
                         self.group_controller = Some(controller_id);
+                        self.publish_snapshot();
                     }
                     let _ = reply.send(result);
                 }
@@ -783,6 +747,7 @@ impl CoreActor {
                         let result = self.undo.end_transaction();
                         if result.is_ok() {
                             self.group_controller = None;
+                            self.publish_snapshot();
                         }
                         result
                     };
@@ -1189,6 +1154,11 @@ impl CoreActor {
         // Authorization checkpoint: reject before touching state (ADR-0005).
         validate_structure(command, self.undo_limits)?;
         permissions.check(command)?;
+        match command {
+            Command::Undo => return self.handle_undo(*permissions),
+            Command::Redo => return self.handle_redo(*permissions),
+            _ => {}
+        }
         if let Command::AuthorizeSourceCapture { source_id } = command {
             return self.authorize_capture(*source_id, capture_parent_window);
         }
@@ -1244,11 +1214,11 @@ impl CoreActor {
             .undo
             .pop_undo()
             .ok_or_else(|| Error::InvalidInput("nothing to undo".into()))?;
-        // The redo step is the inverse of the inverse, computed against the
-        // post-undo state; if it is not representable the step is simply not
+        // The redo step inverts the replayed inverse against the pre-undo
+        // state; if it is not representable the step is simply not
         // redoable (see crate::undo limitations).
 
-        let label = entry.inverse.label();
+        let label = "undo";
         match apply(&mut self.state, &entry.inverse) {
             Ok(events) => {
                 if let Some(inverse) = redo_inverse {
@@ -1289,7 +1259,7 @@ impl CoreActor {
             .pop_redo()
             .ok_or_else(|| Error::InvalidInput("nothing to redo".into()))?;
 
-        let label = entry.inverse.label();
+        let label = "redo";
         match apply(&mut self.state, &entry.inverse) {
             Ok(events) => {
                 if let Some(inverse) = undo_inverse {
@@ -1331,19 +1301,24 @@ impl CoreActor {
             self.next_seq += 1;
         }
         self.revision += 1;
-        // Receivers that lag see only the latest snapshot — by design.
-        if self
-            .snapshot_tx
-            .send(AppSnapshot::with_runtime(
-                self.revision,
-                self.state.clone(),
-                self.capture_runtime.clone(),
-            ))
-            .is_err()
-        {
-            debug!("no snapshot receivers");
-        }
+        self.publish_snapshot();
         events
+    }
+
+    /// Refreshes history presentation without invalidating transient media.
+    fn publish_snapshot(&self) {
+        let history = HistoryStatus {
+            undo_label: self.undo.next_undo().map(|entry| entry.label.clone()),
+            redo_label: self.undo.next_redo().map(|entry| entry.label.clone()),
+            group_open: self.undo.in_transaction(),
+        };
+        // Latest-only immutable watch; also used for same-revision group changes.
+        self.snapshot_tx.send_replace(AppSnapshot::with_runtime(
+            self.revision,
+            self.state.clone(),
+            self.capture_runtime.clone(),
+            history,
+        ));
     }
 }
 
@@ -1593,6 +1568,10 @@ mod tests {
             .await
             .unwrap();
         handle.end_transaction().await.unwrap();
+        assert_eq!(
+            handle.snapshot().history().undo_label.as_deref(),
+            Some("mixed group")
+        );
         assert!(handle.undo_with_permissions(scenes).await.is_err());
         handle.undo_with_permissions(both).await.unwrap();
         assert_eq!(handle.snapshot().scene(scene_id).unwrap().name, "changed");

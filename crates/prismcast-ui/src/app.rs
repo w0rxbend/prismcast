@@ -48,6 +48,7 @@ pub enum AppMsg {
     SelectScene(SceneId),
     /// Scene edit forwarded to the shared command dispatcher.
     SceneCommand(Command),
+    HistoryCommand(Command),
     SourceCommand(Box<Command>),
     AuthorizeCapture(prismcast_core::SourceId),
     CaptureParentReady(Result<(), String>),
@@ -114,6 +115,7 @@ pub struct AppModel {
     capture_dispatch_pending: bool,
     shutting_down: Rc<Cell<bool>>,
     bridge: CoreBridge,
+    history: crate::history::HistoryControls,
     preview_session: Option<PreviewSession>,
     audio_session: Option<AudioSession>,
     audio_status_pump: Option<gtk::glib::JoinHandle<()>>,
@@ -157,6 +159,8 @@ impl AppModel {
     /// and transition selector.
     fn publish_snapshot(&self) {
         let snapshot = self.bridge.handle().snapshot();
+        self.history
+            .refresh(snapshot.history(), self.shutting_down.get());
         self.scene_refresh.notify(|wake| {
             self.scenes.emit(ScenesInput::Refresh(wake));
             true
@@ -504,6 +508,10 @@ impl AsyncComponent for AppModel {
         let header = adw::HeaderBar::new();
         header.set_title_widget(Some(&title_box));
         header.pack_end(&status_label);
+        let history = crate::history::HistoryControls::new(&root, &header, {
+            let input = sender.input_sender().clone();
+            move |command| input.emit(AppMsg::HistoryCommand(command))
+        });
 
         let toolbar_view = adw::ToolbarView::new();
         toolbar_view.add_top_bar(&header);
@@ -724,6 +732,7 @@ impl AsyncComponent for AppModel {
             capture_dispatch_pending: false,
             shutting_down,
             bridge,
+            history,
             preview_session,
             audio_session,
             audio_status_pump,
@@ -769,6 +778,11 @@ impl AsyncComponent for AppModel {
                 self.publish_snapshot();
             }
             AppMsg::SceneCommand(command) => self.dispatch(&sender, command),
+            AppMsg::HistoryCommand(command) => {
+                if !self.shutting_down.get() {
+                    self.dispatch(&sender, command);
+                }
+            }
             AppMsg::AudioCommand(command) => self.dispatch(&sender, *command),
             AppMsg::AddAudioCapture => {
                 let input = sender.input_sender().clone();
@@ -937,6 +951,8 @@ impl AsyncComponent for AppModel {
             }
             AppMsg::BeginShutdown => {
                 self.shutting_down.set(true);
+                self.history
+                    .refresh(self.bridge.handle().snapshot().history(), true);
                 let preview = self.preview_session.take();
                 let audio = self.audio_session.take();
                 let parent = self.capture_parent.borrow_mut().take();
@@ -1012,6 +1028,12 @@ impl AsyncComponent for AppModel {
             }
             AppCmd::Dispatched(Err(error)) => {
                 warn!(%error, "command rejected");
+                // A rejection need not publish state; correct any advisory
+                // history presentation that raced another controller.
+                self.history.refresh(
+                    self.bridge.handle().snapshot().history(),
+                    self.shutting_down.get(),
+                );
                 self.toast_overlay
                     .add_toast(adw::Toast::new(&format!("Command failed: {error}")));
             }
@@ -1448,6 +1470,234 @@ mod shell_display_tests {
         None
     }
 
+    fn has_label(widget: &gtk::Widget, text: &str) -> bool {
+        if widget
+            .clone()
+            .downcast::<gtk::Label>()
+            .is_ok_and(|label| label.text().contains(text))
+        {
+            return true;
+        }
+        let mut child = widget.first_child();
+        while let Some(widget) = child {
+            if has_label(&widget, text) {
+                return true;
+            }
+            child = widget.next_sibling();
+        }
+        false
+    }
+
+    fn action_button(widget: &gtk::Widget, action: &str) -> Option<gtk::Button> {
+        if let Ok(button) = widget.clone().downcast::<gtk::Button>() {
+            if button.action_name().as_deref() == Some(action) {
+                return Some(button);
+            }
+        }
+        let mut child = widget.first_child();
+        while let Some(widget) = child {
+            if let Some(button) = action_button(&widget, action) {
+                return Some(button);
+            }
+            child = widget.next_sibling();
+        }
+        None
+    }
+
+    async fn wait_for(test: impl Fn() -> bool, message: &str) -> Result<(), String> {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !test() {
+            if Instant::now() > deadline {
+                return Err(message.into());
+            }
+            gtk::glib::timeout_future(Duration::from_millis(10)).await;
+        }
+        Ok(())
+    }
+
+    async fn exercise_history(
+        app: &adw::Application,
+        handle: &prismcast_app::AppHandle,
+    ) -> Result<(), String> {
+        wait_for(|| app.active_window().is_some(), "shell window missing").await?;
+        let window = app
+            .active_window()
+            .ok_or("window missing")?
+            .downcast::<adw::ApplicationWindow>()
+            .map_err(|_| "wrong window type")?;
+        let undo = window.lookup_action("undo").ok_or("Undo action missing")?;
+        let redo = window.lookup_action("redo").ok_or("Redo action missing")?;
+        if undo.is_enabled() || redo.is_enabled() {
+            return Err("empty history enabled actions".into());
+        }
+        let dispatch = |command| async {
+            handle
+                .dispatch(command)
+                .await
+                .map_err(|error| error.to_string())
+        };
+        dispatch(Command::AddScene {
+            name: "History scene".into(),
+        })
+        .await?;
+        let scene_id = handle.snapshot().current_scene().ok_or("scene missing")?;
+        let response = dispatch(Command::AddSource {
+            kind: SourceKind::Color,
+            name: "History source".into(),
+        })
+        .await?;
+        let source_id = created_source_id(&response.events).ok_or("source missing")?;
+        dispatch(Command::AddSceneItem {
+            scene_id,
+            source_id,
+        })
+        .await?;
+        let item_id = handle.snapshot().state().scenes[&scene_id].items[0].id;
+        let old_transform = handle.snapshot().state().scenes[&scene_id].items[0].transform;
+        let transform = prismcast_core::scene::Transform {
+            rotation: 15.0,
+            ..old_transform
+        };
+        // A second local controller writes to the same actor; window actions
+        // must replay its edits rather than an independent UI history stack.
+        let controller = handle.new_controller();
+        controller
+            .dispatch(Command::RenameSource {
+                source_id,
+                name: "Renamed remotely".into(),
+            })
+            .await
+            .map_err(|e| e.to_string())?;
+        controller
+            .dispatch(Command::SetSceneItemTransform {
+                scene_id,
+                item_id,
+                transform,
+            })
+            .await
+            .map_err(|e| e.to_string())?;
+        wait_for(|| undo.is_enabled(), "Undo never enabled").await?;
+        let undo_button =
+            action_button(window.upcast_ref(), "win.undo").ok_or("Undo button missing")?;
+        let redo_button =
+            action_button(window.upcast_ref(), "win.redo").ok_or("Redo button missing")?;
+        let keys = window
+            .observe_controllers()
+            .iter::<gtk::glib::Object>()
+            .filter_map(Result::ok)
+            .find_map(|controller| controller.downcast::<gtk::EventControllerKey>().ok())
+            .ok_or("history key controller missing")?;
+        let key =
+            |key, modifiers| keys.emit_by_name::<bool>("key-pressed", &[&key, &0_u32, &modifiers]);
+        undo_button.emit_clicked();
+        wait_for(
+            || handle.snapshot().state().scenes[&scene_id].items[0].transform == old_transform,
+            "window Undo did not restore transform",
+        )
+        .await?;
+        wait_for(|| redo.is_enabled(), "Redo never enabled").await?;
+        gtk::prelude::GtkWindowExt::set_focus(&window, Some(&undo_button));
+        if !key(gtk::gdk::Key::z, gtk::gdk::ModifierType::CONTROL_MASK) {
+            return Err("Ctrl+Z was not handled with nontext focus".into());
+        }
+        wait_for(
+            || {
+                handle
+                    .snapshot()
+                    .source(source_id)
+                    .is_some_and(|s| s.name == "History source")
+            },
+            "window Undo did not restore rename",
+        )
+        .await?;
+        redo_button.emit_clicked();
+        wait_for(
+            || {
+                handle
+                    .snapshot()
+                    .source(source_id)
+                    .is_some_and(|s| s.name == "Renamed remotely")
+            },
+            "window Redo did not restore rename",
+        )
+        .await?;
+        gtk::prelude::GtkWindowExt::set_focus(&window, Some(&undo_button));
+        if !key(
+            gtk::gdk::Key::Z,
+            gtk::gdk::ModifierType::CONTROL_MASK | gtk::gdk::ModifierType::SHIFT_MASK,
+        ) {
+            return Err("Ctrl+Shift+Z was not handled with nontext focus".into());
+        }
+        wait_for(
+            || handle.snapshot().state().scenes[&scene_id].items[0].transform == transform,
+            "Ctrl+Shift+Z did not restore transform",
+        )
+        .await?;
+        undo_button.emit_clicked();
+        wait_for(
+            || handle.snapshot().state().scenes[&scene_id].items[0].transform == old_transform,
+            "button Undo did not restore transform after shortcut Redo",
+        )
+        .await?;
+        // Group metadata wakes the production coalesced pump at identical revision.
+        let revision = handle.snapshot().revision();
+        handle
+            .begin_transaction("Grouped adjustment")
+            .await
+            .map_err(|e| e.to_string())?;
+        wait_for(
+            || !undo.is_enabled() && !redo.is_enabled(),
+            "same-revision group start did not disable actions",
+        )
+        .await?;
+        if handle.snapshot().revision() != revision {
+            return Err("group start changed state revision".into());
+        }
+        handle.end_transaction().await.map_err(|e| e.to_string())?;
+        wait_for(
+            || undo.is_enabled() && redo.is_enabled(),
+            "same-revision group end did not restore actions",
+        )
+        .await?;
+        if handle.snapshot().revision() != revision {
+            return Err("empty group end changed state revision".into());
+        }
+        // Deterministically emulate stale presentation: Core must reject, then
+        // the normal Relm command completion displays the actual error toast.
+        handle
+            .begin_transaction("Concurrent controller")
+            .await
+            .map_err(|e| e.to_string())?;
+        wait_for(|| !undo.is_enabled(), "group action did not disable").await?;
+        undo.clone()
+            .downcast::<gtk::gio::SimpleAction>()
+            .map_err(|_| "unexpected Undo type")?
+            .set_enabled(true);
+        gtk::prelude::WidgetExt::activate_action(&window, "win.undo", None)
+            .map_err(|e| e.to_string())?;
+        wait_for(
+            || has_label(window.upcast_ref(), "Command failed:"),
+            "history rejection did not show a toast",
+        )
+        .await?;
+        if undo.is_enabled() || redo.is_enabled() {
+            return Err("history rejection left stale actions enabled".into());
+        }
+        if handle.snapshot().revision() != revision {
+            return Err("rejected history changed revision".into());
+        }
+        handle.end_transaction().await.map_err(|e| e.to_string())?;
+        window.close();
+        window.close();
+        gtk::glib::future_with_timeout(Duration::from_secs(5), handle.closed())
+            .await
+            .map_err(|e| e.to_string())?;
+        if undo.is_enabled() || redo.is_enabled() {
+            return Err("shutdown left history enabled".into());
+        }
+        Ok(())
+    }
+
     async fn exercise(
         app: &adw::Application,
         handle: &prismcast_app::AppHandle,
@@ -1608,6 +1858,39 @@ mod shell_display_tests {
                 let handle = handle.clone();
                 relm4::spawn_local(async move {
                     let outcome = exercise(&app, &handle).await;
+                    let failed = outcome.is_err();
+                    *result.borrow_mut() = Some(outcome);
+                    if failed {
+                        handle.shutdown().await;
+                        app.quit();
+                    }
+                });
+            }
+        });
+        relm_app.run_async::<AppModel>(bridge);
+        core_thread.join().unwrap();
+        assert_eq!(result.borrow_mut().take(), Some(Ok(())));
+    }
+
+    #[test]
+    #[ignore = "requires real GTK display; run separately with --ignored --test-threads=1"]
+    fn native_window_history_actions_share_controller_history_and_refresh_groups() {
+        let (bridge, core_thread) = CoreBridge::spawn_background().unwrap();
+        let handle = bridge.handle().clone();
+        let relm_app = relm4::RelmApp::new("io.github.worxbend.prismcast.historytest")
+            .with_args(vec!["prismcast-historytest".into()]);
+        relm_app.allow_multiple_instances(true);
+        let app = relm4::main_adw_application();
+        let result = Rc::new(RefCell::new(None));
+        app.connect_activate({
+            let result = result.clone();
+            let handle = handle.clone();
+            move |app| {
+                let app = app.clone();
+                let result = result.clone();
+                let handle = handle.clone();
+                relm4::spawn_local(async move {
+                    let outcome = exercise_history(&app, &handle).await;
                     let failed = outcome.is_err();
                     *result.borrow_mut() = Some(outcome);
                     if failed {

@@ -91,6 +91,132 @@ fn stderr(output: &std::process::Output) -> String {
 }
 
 #[tokio::test]
+async fn undo_redo_human_json_and_empty_history_use_real_socket() {
+    let bed = TestBed::spawn().await;
+    let empty = bed.cli(&["undo"]).await;
+    assert_eq!(empty.status.code(), Some(2));
+    assert!(stdout(&empty).is_empty());
+    assert!(stderr(&empty).contains("InvalidField"));
+    let mut client = IpcClient::connect(&bed.socket).await.unwrap();
+    let scene = match client
+        .request_data(RequestKind::AddScene {
+            name: "Original".into(),
+        })
+        .await
+        .unwrap()
+    {
+        ResponseData::SceneCreated { scene_id } => scene_id,
+        other => panic!("{other:?}"),
+    };
+    client
+        .request_data(RequestKind::RenameScene {
+            scene_id: scene,
+            name: "Edited".into(),
+        })
+        .await
+        .unwrap();
+    let undo = bed.cli(&["undo"]).await;
+    assert!(undo.status.success(), "{}", stderr(&undo));
+    assert_eq!(stdout(&undo), "undo applied\n");
+    assert!(stderr(&undo).is_empty());
+    assert_eq!(
+        bed.app
+            .snapshot()
+            .scenes()
+            .find(|s| *s.id.as_uuid() == scene)
+            .unwrap()
+            .name,
+        "Original"
+    );
+    let redo = bed.cli(&["--json", "redo"]).await;
+    assert!(redo.status.success(), "{}", stderr(&redo));
+    assert!(stderr(&redo).is_empty());
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&stdout(&redo)).unwrap(),
+        serde_json::json!({"data":"empty"})
+    );
+    assert_eq!(
+        bed.app
+            .snapshot()
+            .scenes()
+            .find(|s| *s.id.as_uuid() == scene)
+            .unwrap()
+            .name,
+        "Edited"
+    );
+    let empty = bed.cli(&["--json", "redo"]).await;
+    assert_eq!(empty.status.code(), Some(2));
+    assert!(stdout(&empty).is_empty());
+    assert!(stderr(&empty).contains("InvalidField"));
+    client.close().await;
+    bed.shutdown().await;
+}
+
+#[tokio::test]
+async fn history_cli_replay_permissions_and_usage_errors_preserve_state() {
+    for (permissions, mixed) in [
+        (vec![Permission::Read], false),
+        (vec![Permission::Read, Permission::ControlAudio], false),
+        (vec![Permission::Read, Permission::ControlScenes], true),
+    ] {
+        let bed = TestBed::spawn_with(AuthConfig::token("history-cli", permissions)).await;
+        let local = |request| prismcast_remote::map::command_from_wire(request).unwrap();
+        bed.app
+            .dispatch(local(RequestKind::AddScene {
+                name: "Original".into(),
+            }))
+            .await
+            .unwrap();
+        let scene = *bed.app.snapshot().scenes().next().unwrap().id.as_uuid();
+        let rename = RequestKind::RenameScene {
+            scene_id: scene,
+            name: "Edited".into(),
+        };
+        let edit = if mixed {
+            bed.app
+                .dispatch(local(RequestKind::AddSource {
+                    kind: prismcast_protocol::data::SourceKind::TestPattern,
+                    name: "tone".into(),
+                }))
+                .await
+                .unwrap();
+            let source = *bed.app.snapshot().sources().next().unwrap().id.as_uuid();
+            RequestKind::Transaction {
+                commands: vec![
+                    rename,
+                    RequestKind::SetSourceMuted {
+                        source_id: source,
+                        muted: true,
+                    },
+                ],
+            }
+        } else {
+            rename
+        };
+        bed.app.dispatch(local(edit)).await.unwrap();
+        for command in ["undo", "redo"] {
+            if command == "redo" {
+                bed.app.undo().await.unwrap();
+            }
+            let before = bed.app.snapshot();
+            let output = bed.cli(&["--token", "history-cli", command]).await;
+            assert_eq!(output.status.code(), Some(2));
+            assert!(stdout(&output).is_empty());
+            assert!(stderr(&output).contains("Forbidden"));
+            assert!(!stderr(&output).contains("history-cli"));
+            assert_eq!(bed.app.snapshot().revision(), before.revision());
+            assert_eq!(bed.app.snapshot().state(), before.state());
+            assert_eq!(bed.app.snapshot().history(), before.history());
+        }
+        // Undo/redo accept no target or history payload at the CLI boundary.
+        let usage = bed.cli(&["undo", "target-id"]).await;
+        assert_eq!(usage.status.code(), Some(2));
+        assert!(stderr(&usage).contains("unexpected argument"));
+        bed.shutdown().await;
+    }
+}
+
+#[tokio::test]
 async fn ping_reports_server_version() {
     let bed = TestBed::spawn().await;
     let output = bed.cli(&["ping"]).await;
