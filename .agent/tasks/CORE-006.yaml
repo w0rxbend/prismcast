@@ -1,7 +1,11 @@
 id: CORE-006
 title: Canonical Undo and Redo commands across controllers
-goal: Expose existing application history through the shared Core Command API and GTK/native controllers while preserving permission, transaction and capture-authorization boundaries.
-depends_on: [CORE-005, UI-002]
+goal: Expose existing application history through the shared Core Command API and
+  GTK/native controllers while preserving permission, transaction and capture-authorization
+  boundaries.
+depends_on:
+- CORE-005
+- UI-002
 allowed_scope:
 - crates/prismcast-core/
 - crates/prismcast-app/
@@ -14,16 +18,30 @@ allowed_scope:
 - docs/protocols/
 - docs/testing/
 acceptance:
-- Undo and Redo are canonical Core Commands handled by the application actor; existing local history methods delegate to the same dispatch path
-- Native protocol coverage, permission checks and response/error behavior include both commands without reusing protocol types in the domain
-- Undo/redo respects history limits, transaction ownership and authorization for the actual action being replayed; rejected actions leave state and history unchanged
-- Capture authorization is never replayed or restored through history; undoing source settings or enable changes invalidates transient capture and requires new explicit authorization
-- GTK actions and keyboard shortcuts dispatch the same commands, with correct unavailable/history-empty/error presentation
-- Existing scene edits undo/redo through GTK and native sockets with matching Core Events and snapshots; deterministic tests cover permission denial, open groups, atomic failures and empty history
-- Destructive undo and persisted history remain separate follow-ups unless a new ADR and explicit scope expansion establish their implementation
-validation: [just ci, just deny, focused history permission and socket tests, separately recorded GTK shortcut/action regression]
-status: ready
+- Undo and Redo are canonical Core Commands handled by the application actor; existing
+  local history methods delegate to the same dispatch path
+- Native protocol coverage, permission checks and response/error behavior include
+  both commands without reusing protocol types in the domain
+- Undo/redo respects history limits, transaction ownership and authorization for the
+  actual action being replayed; rejected actions leave state and history unchanged
+- Capture authorization is never replayed or restored through history; undoing source
+  settings or enable changes invalidates transient capture and requires new explicit
+  authorization
+- GTK actions and keyboard shortcuts dispatch the same commands, with correct unavailable/history-empty/error
+  presentation
+- Existing scene edits undo/redo through GTK and native sockets with matching Core
+  Events and snapshots; deterministic tests cover permission denial, open groups,
+  atomic failures and empty history
+- Destructive undo and persisted history remain separate follow-ups unless a new ADR
+  and explicit scope expansion establish their implementation
+validation:
+- just ci
+- just deny
+- focused history permission and socket tests
+- separately recorded GTK shortcut/action regression
+status: in_progress
 notes:
 - Write an ADR before changing history command ownership or protocol contracts
 - Continue direct-main swarm work with disjoint ownership and coordinator-only commits/pushes
-- Selected after CAPTURE-004 to close the central command invariant and PLAN phase-4 scene-editor gap before larger audio/output work
+- Selected after CAPTURE-004 to close the central command invariant and PLAN phase-4
+  scene-editor gap before larger audio/output work

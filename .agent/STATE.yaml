@@ -1,7 +1,8 @@
 schema_version: 1
 project_phase: phase-4-scene-editor
 head_commit: 6150504
-current_objective: Scope CORE-006 canonical Undo/Redo commands and controller integration; preserve direct-main swarm ownership preference
+current_objective: Implement CORE-006 canonical Undo/Redo Commands and GTK/native/CLI
+  integration directly on main with disjoint agent ownership
 completed:
 - RESUME-001
 - SKILL-001
@@ -52,7 +53,8 @@ completed:
 - INTEGRATE-001
 - AUDIO-001
 - CAPTURE-004
-in_progress: []
+in_progress:
+- CORE-006
 blocked: []
 next_candidates:
 - CORE-006
@@ -81,13 +83,15 @@ decisions:
 - ADR-0022
 - ADR-0023
 - ADR-0024
+- ADR-0025
 verification:
   cargo_fmt: pass
   cargo_clippy: pass
   cargo_test: pass_679_tests_18_environment_tests_ignored
   cargo_deny: pass
   portal_capture: live_window_three_frame_probe_pass
-  shared_capture_preview: picker_granted_wrong_window_thrice_then_no_selection; raw consumer diagnostic armed
+  shared_capture_preview: picker_granted_wrong_window_thrice_then_no_selection; raw
+    consumer diagnostic armed
   native_display_regressions: pass
   v4l2_camera: live_probe_pass_anker_powerconf_c200_640x480
   v4l2_discovery: live_enumeration_pass_show_all_devices_required
@@ -108,26 +112,39 @@ verification:
   worktree_reconciliation: all_41_auxiliary_heads_ancestors_of_main
 last_agent:
   model: codex
-  session: capture-004-direct-main-swarm
+  session: core-006-direct-main-swarm
 open_questions:
-- PipeWire audio physical microphone, desktop policies and sandbox/Flatpak permissions remain unverified; isolated fixtures open only synthetic nodes
-- PipeWire GStreamer startup can block about 30 seconds on late daemon death after final EOF preflight; cancellation waits native return, no replacement-daemon capture occurs
-- PipeWire audio three-second data watchdog conservatively requires Retry after paused/stalled streams cease buffer delivery; one fault currently revokes all physical audio grants
-- Application capture selects one current playback stream; multi-stream grouping by application identity remains a follow-up
-- Integrated live window preview: picker grants landed but selected windows were not the fixture (white/dark/black composites, constant 6144x3456); raw consumer diagnostic test armed, awaiting a coordinated selection retry
+- PipeWire audio physical microphone, desktop policies and sandbox/Flatpak permissions
+  remain unverified; isolated fixtures open only synthetic nodes
+- PipeWire GStreamer startup can block about 30 seconds on late daemon death after
+  final EOF preflight; cancellation waits native return, no replacement-daemon capture
+  occurs
+- PipeWire audio three-second data watchdog conservatively requires Retry after paused/stalled
+  streams cease buffer delivery; one fault currently revokes all physical audio grants
+- Application capture selects one current playback stream; multi-stream grouping by
+  application identity remains a follow-up
+- Integrated live window preview: picker grants landed but selected windows were not
+    the fixture (white/dark/black composites, constant 6144x3456); raw consumer diagnostic
+    test armed, awaiting a coordinated selection retry
 - KDE/X11 capture and monitor validation remain unverified
-- Camera device paths renumber across replug; sysfs/serial-stable identity is a follow-up (persisted path is advisory, missing device is recoverable)
-- GstDeviceMonitor v4l2 provider is hidden by PipeWire on target desktops; show-all-devices workaround in place, PipeWire camera sources deferred
+- Camera device paths renumber across replug; sysfs/serial-stable identity is a follow-up
+  (persisted path is advisory, missing device is recoverable)
+- GstDeviceMonitor v4l2 provider is hidden by PipeWire on target desktops; show-all-devices
+  workaround in place, PipeWire camera sources deferred
 - Wire-exposed camera device listing needs a protocol schema change (CAPTURE-003 follow-up)
-- Camera USB link flapped during validation (nodes vanished/re-enumerated); busy/unplug mapping implemented, live unplug UX untested
+- Camera USB link flapped during validation (nodes vanished/re-enumerated); busy/unplug
+  mapping implemented, live unplug UX untested
 - Canonical Undo/Redo Commands and protocol/UI integration remain follow-up work
 - Destructive Add/Remove undo and persisted history are not implemented
-- Z-order boundary overflow and missing neighbor update events need coordinated core fixes
-- Atomic expected-version editing command needed to close snapshot-read to dispatch race (UI-002)
-- Negotiated dimensions now support portal capture; other source kinds need their own runtime contracts
+- Z-order boundary overflow and missing neighbor update events need coordinated core
+  fixes
+- Atomic expected-version editing command needed to close snapshot-read to dispatch
+  race (UI-002)
+- Negotiated dimensions now support portal capture; other source kinds need their
+  own runtime contracts
 - gst-plugins-rs vendoring: isobmff/wpe2/gopbuffer not distro-packaged (RES-003)
-- Browser source audio gap in wpe2 (RES-006) — revisit at Phase 11
-- Group domain type missing for PLAN §8 Group/Ungroup (ARCH-003 follow-up)
+- "Browser source audio gap in wpe2 (RES-006) \u2014 revisit at Phase 11"
+- "Group domain type missing for PLAN \xA78 Group/Ungroup (ARCH-003 follow-up)"
 - Scene-nesting cycle check for SourceKind::Scene in apply() (ARCH-003 follow-up)
 - Wire StateSnapshot lacks revision field (IPC-001 follow-up, protocol schema change)
 - Broadcaster unsubscribe API missing (IPC-001 workaround: server-wide fanout)
@@ -135,10 +152,15 @@ open_questions:
 - SaveProject command missing from core Command enum (CORE-004 follow-up)
 - Encoder/service registries have no domain home; profiles save empty lists (CORE-004)
 - Broadcaster unsubscribe API missing; server-wide fanout workaround remains (IPC-001/WS-002)
-- PipeWire audio input/sink-monitor/single-application producers and post-fader source meters are implemented; pre-fader OBS input peak, output statistics and encoded audio tracks remain follow-ups
-- OBSWS-002 MessagePack, SerialFrame/Parallel batches and custom events are implemented; OBS meters, filters, screenshots, stats, vendor/persistent data, media control, virtualcam/replay remain deferred
+- PipeWire audio input/sink-monitor/single-application producers and post-fader source
+  meters are implemented; pre-fader OBS input peak, output statistics and encoded
+  audio tracks remain follow-ups
+- OBSWS-002 MessagePack, SerialFrame/Parallel batches and custom events are implemented;
+  OBS meters, filters, screenshots, stats, vendor/persistent data, media control,
+  virtualcam/replay remain deferred
 implementation_access:
   ultracode: dynamic agent orchestration (user clarified); available
 workflow_overrides:
-- User explicitly requested merging all existing worktrees before implementation and working directly on main (2026-10-02)
+- User explicitly requested merging all existing worktrees before implementation and
+  working directly on main (2026-10-02)
 - Parallel agents must own disjoint files; coordinator alone stages, commits and pushes
