@@ -123,6 +123,37 @@ pub struct Transform {
     pub anchor: Anchor,
 }
 
+/// The placement-edit basis of a conditional scene placement edit
+/// (ADR-0026): the exact context values the edit was computed from, sent
+/// with `set_scene_item_transform_if`. The server applies the edit only if
+/// every value still matches authoritative state; any mismatch is a
+/// `state_conflict` 500 error naming the diverging member in `field`
+/// (e.g. `expect.transform`) and changes nothing.
+///
+/// Every value is obtainable from the wire [`StateSnapshot`]: item
+/// transform/crop/bounds/locked, `current_scene`, the active profile's ID
+/// and video configuration, and the item source's `source_runtime`
+/// dimensions (`None` expects no active dimensions).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct PlacementExpectation {
+    /// Scene the controller was previewing when the edit was computed.
+    pub current_scene: Uuid,
+    /// Active profile of the editing context.
+    pub active_profile: Uuid,
+    /// Canvas video configuration of the editing context.
+    pub video: VideoConfig,
+    /// Item transform preimage the geometry was derived from.
+    pub transform: Transform,
+    /// Item crop preimage (rendered-size basis).
+    pub crop: Crop,
+    /// Item bounds preimage (placement interpretation basis).
+    pub bounds: Bounds,
+    /// Item lock preimage (editability basis).
+    pub locked: bool,
+    /// Negotiated native source pixels; `None` expects no active dimensions.
+    pub source_dimensions: Option<SourceDimensions>,
+}
+
 /// A placed source within a scene.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SceneItem {

@@ -7,7 +7,9 @@
 //! `docs/protocols/native-protocol.md`.
 
 use prismcast_protocol::batch::{BatchRequest, RequestBatch};
-use prismcast_protocol::data::{Anchor, Transform, Vec2};
+use prismcast_protocol::data::{
+    Anchor, Bounds, Crop, PlacementExpectation, SourceDimensions, Transform, Vec2, VideoConfig,
+};
 use prismcast_protocol::error::{ErrorKind, WireError};
 use prismcast_protocol::event::{EventMessage, MeterEvent, SceneEvent, WireEvent};
 use prismcast_protocol::handshake::{
@@ -21,6 +23,7 @@ use uuid::Uuid;
 
 const ID_A: &str = "11111111-1111-4111-8111-111111111111";
 const ID_B: &str = "22222222-2222-4222-8222-222222222222";
+const ID_C: &str = "33333333-3333-4333-8333-333333333333";
 
 fn uuid_a() -> Uuid {
     Uuid::parse_str(ID_A).unwrap()
@@ -28,6 +31,10 @@ fn uuid_a() -> Uuid {
 
 fn uuid_b() -> Uuid {
     Uuid::parse_str(ID_B).unwrap()
+}
+
+fn uuid_c() -> Uuid {
+    Uuid::parse_str(ID_C).unwrap()
 }
 
 /// Asserts both directions: `message` serializes to exactly `expected`, and
@@ -147,6 +154,48 @@ fn golden_request_set_scene_item_transform() {
         &message,
         &format!(
             r#"{{"type":"request","data":{{"request_id":"req-2","request":"set_scene_item_transform","scene_id":"{ID_A}","item_id":"{ID_B}","transform":{{"position":{{"x":10.0,"y":20.0}},"scale":{{"x":1.5,"y":1.5}},"rotation":90.0,"anchor":"center"}}}}}}"#
+        ),
+    );
+}
+
+#[test]
+fn golden_request_set_scene_item_transform_if() {
+    let transform = Transform {
+        position: Vec2 { x: 10.0, y: 20.0 },
+        scale: Vec2 { x: 1.5, y: 1.5 },
+        rotation: 90.0,
+        anchor: Anchor::Center,
+    };
+    let message = ClientMessage::Request(Request {
+        request_id: "req-4".into(),
+        kind: RequestKind::SetSceneItemTransformIf {
+            scene_id: uuid_a(),
+            item_id: uuid_b(),
+            transform,
+            expect: PlacementExpectation {
+                current_scene: uuid_a(),
+                active_profile: uuid_c(),
+                video: VideoConfig {
+                    width: 1920,
+                    height: 1080,
+                    fps_num: 60,
+                    fps_den: 1,
+                },
+                transform,
+                crop: Crop::default(),
+                bounds: Bounds::default(),
+                locked: false,
+                source_dimensions: Some(SourceDimensions {
+                    width: 1920,
+                    height: 1080,
+                }),
+            },
+        },
+    });
+    assert_golden(
+        &message,
+        &format!(
+            r#"{{"type":"request","data":{{"request_id":"req-4","request":"set_scene_item_transform_if","scene_id":"{ID_A}","item_id":"{ID_B}","transform":{{"position":{{"x":10.0,"y":20.0}},"scale":{{"x":1.5,"y":1.5}},"rotation":90.0,"anchor":"center"}},"expect":{{"current_scene":"{ID_A}","active_profile":"{ID_C}","video":{{"width":1920,"height":1080,"fps_num":60,"fps_den":1}},"transform":{{"position":{{"x":10.0,"y":20.0}},"scale":{{"x":1.5,"y":1.5}},"rotation":90.0,"anchor":"center"}},"crop":{{"left":0,"top":0,"right":0,"bottom":0}},"bounds":{{"kind":"none","size":{{"x":0.0,"y":0.0}},"alignment":"top_left"}},"locked":false,"source_dimensions":{{"width":1920,"height":1080}}}}}}}}"#
         ),
     );
 }

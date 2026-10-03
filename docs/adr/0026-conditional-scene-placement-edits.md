@@ -109,9 +109,10 @@ Protocol (additive version 1, no bump): one new advertised request kind
 plus the existing wire `Transform`/`Crop`/`Bounds`/`VideoConfig`/
 `SourceDimensions`), mapped to the canonical command. `Error::Conflict` maps
 to the existing `state_conflict` 500 code with a `field` naming the mismatched
-expectation member; transaction membership is rejected with
-`invalid_request` 100. The obs-websocket adapter is unchanged and keeps
-issuing unconditional edits.
+expectation member; transaction membership is rejected with `invalid_request`
+(the same mapping as history-command members). The obs-websocket adapter keeps
+issuing unconditional edits; a core `Conflict` surfacing there maps to the
+existing invalid-resource-state status.
 
 GTK: gesture `finish()` and the numeric/action controls keep capturing their
 originating context as they do today, but submit `SetSceneItemTransformIf`

@@ -1162,6 +1162,34 @@ impl CoreActor {
         if let Command::AuthorizeSourceCapture { source_id } = command {
             return self.authorize_capture(*source_id, capture_parent_window);
         }
+        // Runtime half of ADR-0026: negotiated native dimensions are actor-owned.
+        // Runs before inverse preparation and any commit, so a rejected
+        // conditional edit changes nothing (state, events, revision, history,
+        // meters, capture, persistence all untouched). The state preimage is
+        // enforced by the domain apply below in the same serialized turn.
+        if let Command::SetSceneItemTransformIf {
+            scene_id,
+            item_id,
+            expect,
+            ..
+        } = command
+        {
+            if let Some(item) = self
+                .state
+                .scene(*scene_id)
+                .and_then(|scene| scene.item(*item_id))
+            {
+                let actual = self
+                    .capture_runtime
+                    .get(&item.source_id)
+                    .and_then(|runtime| runtime.dimensions);
+                if actual != expect.source_dimensions {
+                    return Err(Error::Conflict(
+                        "stale placement edit: expect.source_dimensions mismatch".into(),
+                    ));
+                }
+            }
+        }
         let label = command.label();
         // Inverse must be computed against the pre-application state (PLAN §59).
         let inverse = prepare_inverse(&self.state, command, self.undo_limits)?;
@@ -1865,6 +1893,514 @@ mod tests {
             }
             other => panic!("unexpected {other:?}"),
         }
+        handle.shutdown().await;
+    }
+
+    // --- conditional placement edits (ADR-0026) ---
+
+    use prismcast_core::capture::SourceDimensions;
+    use prismcast_core::id::SceneItemId;
+    use prismcast_core::scene::{Crop, PlacementExpectation, Transform, Vec2};
+
+    fn moved_transform() -> Transform {
+        Transform {
+            position: Vec2::new(10.0, 20.0),
+            ..Transform::default()
+        }
+    }
+
+    /// The placement-edit basis a controller would capture from the snapshot.
+    fn matching_expectation(
+        snapshot: &AppSnapshot,
+        scene_id: prismcast_core::SceneId,
+        item_id: SceneItemId,
+    ) -> PlacementExpectation {
+        let state = snapshot.state();
+        let item = state
+            .scene(scene_id)
+            .and_then(|scene| scene.item(item_id))
+            .expect("fixture item");
+        let profile_id = state.active_profile.expect("default profile");
+        PlacementExpectation {
+            current_scene: state.current_scene.expect("current scene"),
+            active_profile: profile_id,
+            video: state
+                .profiles
+                .get(&profile_id)
+                .expect("active profile")
+                .video,
+            transform: item.transform,
+            crop: item.crop,
+            bounds: item.bounds,
+            locked: item.locked,
+            source_dimensions: snapshot
+                .source_runtime(item.source_id)
+                .and_then(|runtime| runtime.dimensions),
+        }
+    }
+
+    fn conditional_move(
+        scene_id: prismcast_core::SceneId,
+        item_id: SceneItemId,
+        expect: PlacementExpectation,
+    ) -> Command {
+        Command::SetSceneItemTransformIf {
+            scene_id,
+            item_id,
+            transform: moved_transform(),
+            expect,
+        }
+    }
+
+    async fn placement_fixture() -> (
+        AppHandle,
+        prismcast_core::SceneId,
+        prismcast_core::SourceId,
+        SceneItemId,
+    ) {
+        placement_fixture_with(prismcast_core::source::SourceKind::Color).await
+    }
+
+    async fn placement_fixture_with(
+        kind: prismcast_core::source::SourceKind,
+    ) -> (
+        AppHandle,
+        prismcast_core::SceneId,
+        prismcast_core::SourceId,
+        SceneItemId,
+    ) {
+        let handle = AppHandle::spawn(CoreConfig::default());
+        handle
+            .dispatch(Command::AddScene {
+                name: "scene".into(),
+            })
+            .await
+            .unwrap();
+        handle
+            .dispatch(Command::AddSource {
+                kind,
+                name: "source".into(),
+            })
+            .await
+            .unwrap();
+        let snapshot = handle.snapshot();
+        let scene_id = snapshot.scenes().next().unwrap().id;
+        let source_id = snapshot.sources().next().unwrap().id;
+        let response = handle
+            .dispatch(Command::AddSceneItem {
+                scene_id,
+                source_id,
+            })
+            .await
+            .unwrap();
+        let item_id = match &response.events[0] {
+            Event::Scene(SceneEvent::ItemAdded { item, .. }) => item.id,
+            other => panic!("expected ItemAdded, got {other:?}"),
+        };
+        (handle, scene_id, source_id, item_id)
+    }
+
+    fn item_transform(
+        handle: &AppHandle,
+        scene_id: prismcast_core::SceneId,
+        item_id: SceneItemId,
+    ) -> Transform {
+        handle
+            .snapshot()
+            .state()
+            .scene(scene_id)
+            .and_then(|scene| scene.item(item_id))
+            .expect("fixture item")
+            .transform
+    }
+
+    /// A rejected conditional edit must change nothing: no state, no events,
+    /// no revision bump, no history entry (ADR-0026).
+    async fn assert_stale_conflict(
+        handle: &AppHandle,
+        scene_id: prismcast_core::SceneId,
+        item_id: SceneItemId,
+        expect: PlacementExpectation,
+        field: &str,
+    ) {
+        let revision = handle.snapshot().revision();
+        let history = handle.snapshot().history().clone();
+        let mut stream = handle.subscribe(EventFilter::all());
+        let error = handle
+            .dispatch(conditional_move(scene_id, item_id, expect))
+            .await
+            .expect_err("stale basis must conflict");
+        match error {
+            HandleError::Core(Error::Conflict(message)) => {
+                assert!(message.contains(field), "{message}")
+            }
+            other => panic!("expected conflict on {field}, got {other:?}"),
+        }
+        assert_eq!(handle.snapshot().revision(), revision);
+        assert_eq!(handle.snapshot().history(), &history);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(10), stream.recv())
+                .await
+                .is_err(),
+            "rejected conditional edit published events"
+        );
+    }
+
+    #[tokio::test]
+    async fn conditional_edit_rejects_stale_transform_without_side_effects() {
+        let (handle, scene_id, _source_id, item_id) = placement_fixture().await;
+        let expect = matching_expectation(&handle.snapshot(), scene_id, item_id);
+        // A concurrent controller commits a newer transform first.
+        let newer = Transform {
+            position: Vec2::new(5.0, 6.0),
+            ..Transform::default()
+        };
+        handle
+            .dispatch(Command::SetSceneItemTransform {
+                scene_id,
+                item_id,
+                transform: newer,
+            })
+            .await
+            .unwrap();
+        assert_stale_conflict(&handle, scene_id, item_id, expect, "expect.transform").await;
+        // The newer value survives the rejected late edit.
+        assert_eq!(item_transform(&handle, scene_id, item_id), newer);
+        // History depth is unchanged: undo/redo still replay only the
+        // committed unconditional edit.
+        handle.undo().await.unwrap();
+        assert_eq!(item_transform(&handle, scene_id, item_id), expect.transform);
+        handle.redo().await.unwrap();
+        assert_eq!(item_transform(&handle, scene_id, item_id), newer);
+        handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn conditional_edit_rejects_stale_basis_changes() {
+        // Concurrent crop change.
+        let (handle, scene_id, _source_id, item_id) = placement_fixture().await;
+        let expect = matching_expectation(&handle.snapshot(), scene_id, item_id);
+        handle
+            .dispatch(Command::SetSceneItemCrop {
+                scene_id,
+                item_id,
+                crop: Crop {
+                    left: 4,
+                    ..Crop::default()
+                },
+            })
+            .await
+            .unwrap();
+        assert_stale_conflict(&handle, scene_id, item_id, expect, "expect.crop").await;
+        handle.shutdown().await;
+
+        // Concurrent lock.
+        let (handle, scene_id, _source_id, item_id) = placement_fixture().await;
+        let expect = matching_expectation(&handle.snapshot(), scene_id, item_id);
+        handle
+            .dispatch(Command::SetSceneItemLocked {
+                scene_id,
+                item_id,
+                locked: true,
+            })
+            .await
+            .unwrap();
+        assert_stale_conflict(&handle, scene_id, item_id, expect, "expect.locked").await;
+        assert!(
+            handle
+                .snapshot()
+                .state()
+                .scene(scene_id)
+                .and_then(|scene| scene.item(item_id))
+                .unwrap()
+                .locked
+        );
+        handle.shutdown().await;
+
+        // Concurrent item removal keeps ordinary NotFound semantics.
+        let (handle, scene_id, _source_id, item_id) = placement_fixture().await;
+        let expect = matching_expectation(&handle.snapshot(), scene_id, item_id);
+        handle
+            .dispatch(Command::RemoveSceneItem { scene_id, item_id })
+            .await
+            .unwrap();
+        let revision = handle.snapshot().revision();
+        let history = handle.snapshot().history().clone();
+        let error = handle
+            .dispatch(conditional_move(scene_id, item_id, expect))
+            .await
+            .expect_err("removed item is not found");
+        assert!(matches!(error, HandleError::Core(Error::NotFound(_))));
+        assert_eq!(handle.snapshot().revision(), revision);
+        assert_eq!(handle.snapshot().history(), &history);
+        handle.shutdown().await;
+
+        // Concurrent current-scene change.
+        let (handle, scene_id, _source_id, item_id) = placement_fixture().await;
+        let expect = matching_expectation(&handle.snapshot(), scene_id, item_id);
+        handle
+            .dispatch(Command::AddScene {
+                name: "other".into(),
+            })
+            .await
+            .unwrap();
+        let other_scene = handle
+            .snapshot()
+            .scenes()
+            .find(|scene| scene.id != scene_id)
+            .unwrap()
+            .id;
+        handle
+            .dispatch(Command::SetCurrentScene {
+                scene_id: other_scene,
+            })
+            .await
+            .unwrap();
+        assert_stale_conflict(&handle, scene_id, item_id, expect, "expect.current_scene").await;
+        assert_eq!(handle.snapshot().state().current_scene, Some(other_scene));
+        handle.shutdown().await;
+
+        // Concurrent profile video change. No command edits a profile's video,
+        // so the canvas change is applied to the state the actor starts from.
+        let (handle, scene_id, _source_id, item_id) = placement_fixture().await;
+        let expect = matching_expectation(&handle.snapshot(), scene_id, item_id);
+        let mut state = handle.snapshot().state().clone();
+        let profile_id = state.active_profile.unwrap();
+        state.profiles.get_mut(&profile_id).unwrap().video.width = 1280;
+        handle.shutdown().await;
+        let handle = AppHandle::spawn_with_state(state, CoreConfig::default());
+        assert_stale_conflict(&handle, scene_id, item_id, expect, "expect.video").await;
+        assert_eq!(item_transform(&handle, scene_id, item_id), expect.transform);
+        handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn unrelated_commits_do_not_invalidate_conditional_edit() {
+        let (handle, scene_id, source_id, item_id) = placement_fixture().await;
+        let expect = matching_expectation(&handle.snapshot(), scene_id, item_id);
+        // Unrelated commits: rename the scene, transform a different item.
+        handle
+            .dispatch(Command::RenameScene {
+                scene_id,
+                name: "renamed".into(),
+            })
+            .await
+            .unwrap();
+        let response = handle
+            .dispatch(Command::AddSceneItem {
+                scene_id,
+                source_id,
+            })
+            .await
+            .unwrap();
+        let other_item = match &response.events[0] {
+            Event::Scene(SceneEvent::ItemAdded { item, .. }) => item.id,
+            other => panic!("expected ItemAdded, got {other:?}"),
+        };
+        handle
+            .dispatch(Command::SetSceneItemTransform {
+                scene_id,
+                item_id: other_item,
+                transform: moved_transform(),
+            })
+            .await
+            .unwrap();
+        let response = handle
+            .dispatch(conditional_move(scene_id, item_id, expect))
+            .await
+            .expect("unrelated commits must not invalidate the edit");
+        assert_eq!(response.label, "transform scene item");
+        assert!(
+            matches!(
+                response.events.as_slice(),
+                [Event::Scene(SceneEvent::ItemUpdated { scene_id: id, item })]
+                    if *id == scene_id && item.id == item_id && item.transform == moved_transform()
+            ),
+            "expected one ItemUpdated, got {:?}",
+            response.events
+        );
+        assert_eq!(
+            handle.snapshot().history().undo_label.as_deref(),
+            Some("transform scene item")
+        );
+        handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn conditional_edit_source_dimensions_guard() {
+        let (handle, scene_id, source_id, item_id) =
+            placement_fixture_with(prismcast_core::source::SourceKind::PipeWireWindow).await;
+        // `None` expects no active dimensions and matches an absent runtime.
+        let expect = matching_expectation(&handle.snapshot(), scene_id, item_id);
+        assert_eq!(expect.source_dimensions, None);
+        handle
+            .dispatch(conditional_move(scene_id, item_id, expect))
+            .await
+            .expect("None matches absent runtime");
+
+        // Negotiated dimensions arrive through the actor-owned capture runtime.
+        let mut owner = handle.attach_capture_owner().await.unwrap();
+        handle
+            .authorize_source_capture(source_id, None)
+            .await
+            .unwrap();
+        let request = owner.requests.recv().await.unwrap();
+        let negotiated = SourceDimensions {
+            width: 1920,
+            height: 1080,
+        };
+        owner
+            .runtime
+            .report(
+                source_id,
+                request.generation,
+                CaptureStatus::Active,
+                Some(negotiated),
+                None,
+            )
+            .await
+            .unwrap();
+        // A matching expectation commits.
+        let expect = matching_expectation(&handle.snapshot(), scene_id, item_id);
+        assert_eq!(expect.source_dimensions, Some(negotiated));
+        handle
+            .dispatch(conditional_move(scene_id, item_id, expect))
+            .await
+            .expect("matching source dimensions succeed");
+
+        // Renegotiation to different pixels stales the captured expectation.
+        let renegotiated = SourceDimensions {
+            width: 1280,
+            height: 720,
+        };
+        owner
+            .runtime
+            .report(
+                source_id,
+                request.generation,
+                CaptureStatus::Active,
+                Some(renegotiated),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_stale_conflict(
+            &handle,
+            scene_id,
+            item_id,
+            expect,
+            "expect.source_dimensions",
+        )
+        .await;
+        handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn undo_redo_after_conditional_edit_replays_without_preconditions() {
+        let (handle, scene_id, source_id, item_id) =
+            placement_fixture_with(prismcast_core::source::SourceKind::PipeWireWindow).await;
+        let mut owner = handle.attach_capture_owner().await.unwrap();
+        handle
+            .authorize_source_capture(source_id, None)
+            .await
+            .unwrap();
+        let request = owner.requests.recv().await.unwrap();
+        let negotiated = SourceDimensions {
+            width: 1920,
+            height: 1080,
+        };
+        owner
+            .runtime
+            .report(
+                source_id,
+                request.generation,
+                CaptureStatus::Active,
+                Some(negotiated),
+                None,
+            )
+            .await
+            .unwrap();
+        let expect = matching_expectation(&handle.snapshot(), scene_id, item_id);
+        assert_eq!(expect.source_dimensions, Some(negotiated));
+        handle
+            .dispatch(conditional_move(scene_id, item_id, expect))
+            .await
+            .unwrap();
+        assert_eq!(
+            handle.snapshot().history().undo_label.as_deref(),
+            Some("transform scene item")
+        );
+        handle.undo().await.unwrap();
+        assert_eq!(item_transform(&handle, scene_id, item_id), expect.transform);
+        // Runtime renegotiation does not clear the redo stack.
+        owner
+            .runtime
+            .report(
+                source_id,
+                request.generation,
+                CaptureStatus::Active,
+                Some(SourceDimensions {
+                    width: 1280,
+                    height: 720,
+                }),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            handle.snapshot().history().redo_label.as_deref(),
+            Some("transform scene item")
+        );
+        // Redo replays the recorded unconditional forward op; it cannot
+        // re-check the now-stale expectation (ADR-0026).
+        handle
+            .redo()
+            .await
+            .expect("redo replays the unconditional forward op");
+        assert_eq!(
+            item_transform(&handle, scene_id, item_id),
+            moved_transform()
+        );
+        assert_eq!(
+            handle.snapshot().history().undo_label.as_deref(),
+            Some("transform scene item")
+        );
+        handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn conditional_edit_requires_control_scenes_permission() {
+        let (handle, scene_id, _source_id, item_id) = placement_fixture().await;
+        let expect = matching_expectation(&handle.snapshot(), scene_id, item_id);
+        let revision = handle.snapshot().revision();
+        let error = handle
+            .dispatch_with_permissions(
+                conditional_move(scene_id, item_id, expect),
+                Permissions::read_only(),
+            )
+            .await
+            .expect_err("read-only must be rejected");
+        assert!(matches!(error, HandleError::Core(Error::Unauthorized(_))));
+        assert_eq!(handle.snapshot().revision(), revision);
+        handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn conditional_edit_noop_records_no_history() {
+        let (handle, scene_id, _source_id, item_id) = placement_fixture().await;
+        let expect = matching_expectation(&handle.snapshot(), scene_id, item_id);
+        let history = handle.snapshot().history().clone();
+        let response = handle
+            .dispatch(Command::SetSceneItemTransformIf {
+                scene_id,
+                item_id,
+                transform: expect.transform,
+                expect,
+            })
+            .await
+            .expect("expectation-matching no-op succeeds");
+        assert!(response.events.is_empty());
+        assert_eq!(handle.snapshot().history(), &history);
         handle.shutdown().await;
     }
 }

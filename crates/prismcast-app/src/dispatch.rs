@@ -243,6 +243,9 @@ pub fn required_permission(command: &Command) -> Permission {
         | C::RemoveSceneItem { .. }
         | C::DuplicateSceneItem { .. }
         | C::SetSceneItemTransform { .. }
+        // The conditional placement edit (ADR-0026) shares the unconditional
+        // command's scope; the actor additionally checks the expectation.
+        | C::SetSceneItemTransformIf { .. }
         | C::SetSceneItemCrop { .. }
         | C::SetSceneItemVisible { .. }
         | C::SetSceneItemLocked { .. }
@@ -399,7 +402,7 @@ mod tests {
     use prismcast_core::id::{AudioBusId, ProfileId, SceneCollectionId, SceneItemId};
     use prismcast_core::output::{Output, OutputKind, ReconnectPolicy};
     use prismcast_core::project::{Profile, SceneCollection, VideoConfig};
-    use prismcast_core::scene::{Bounds, Crop, Transform};
+    use prismcast_core::scene::{Bounds, Crop, PlacementExpectation, Transform};
     use prismcast_core::source::SourceKind;
     use prismcast_core::transition::Transition;
     use prismcast_core::EncoderId;
@@ -465,6 +468,24 @@ mod tests {
                     scene_id: scene,
                     item_id: item,
                     transform: Transform::default(),
+                },
+                Permission::ControlScenes,
+            ),
+            (
+                Command::SetSceneItemTransformIf {
+                    scene_id: scene,
+                    item_id: item,
+                    transform: Transform::default(),
+                    expect: PlacementExpectation {
+                        current_scene: scene,
+                        active_profile: ProfileId::new(),
+                        video: VideoConfig::default(),
+                        transform: Transform::default(),
+                        crop: Crop::default(),
+                        bounds: Bounds::default(),
+                        locked: false,
+                        source_dimensions: None,
+                    },
                 },
                 Permission::ControlScenes,
             ),

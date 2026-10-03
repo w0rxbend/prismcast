@@ -144,6 +144,7 @@ are answered with a typed **204** (`UnknownRequestType`), never silently dropped
 | studio mode not active (preview/transition requests) | 506 |
 | name/number/uuid resolution failure, unknown transition | 600 |
 | duplicate target name | 601 |
+| stale conditional edit basis (`Error::Conflict`) | 604 |
 | permission denied | 703 |
 | media/IO/persistence failures | 701 |
 

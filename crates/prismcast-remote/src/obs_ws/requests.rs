@@ -23,6 +23,7 @@
 //! | studio mode not active (preview/transition requests) | 506 |
 //! | name/number/uuid resolution failure, unknown transition | 600 |
 //! | duplicate target name (`CreateScene`, `SetSceneName`, `SetInputName`) | 601 |
+//! | stale conditional edit basis (`Error::Conflict`) | 604 |
 //! | permission denied (`Unauthorized`) | 703 |
 //! | core actor shut down | 207 |
 //! | everything else (media/IO/persistence) | 701 |
@@ -400,6 +401,9 @@ fn status_for_core_error(error: &Error) -> RequestStatus {
         }
         Error::Protocol(message) => {
             RequestStatus::error(proto::status::INVALID_REQUEST_FIELD, message.clone())
+        }
+        Error::Conflict(message) => {
+            RequestStatus::error(proto::status::INVALID_RESOURCE_STATE, message.clone())
         }
         Error::Media(message) | Error::Io(message) | Error::Persistence(message) => {
             RequestStatus::error(proto::status::RESOURCE_ACTION_FAILED, message.clone())

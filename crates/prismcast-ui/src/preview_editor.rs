@@ -3,7 +3,8 @@ use gtk::prelude::*;
 use prismcast_app::AppSnapshot;
 use prismcast_compositor::{anchor_fractions, layout_item, ItemLayout, SourceSize};
 use prismcast_core::{
-    BoundsKind, Command, SceneId, SceneItem, SceneItemId, Source, Transform, VideoConfig,
+    BoundsKind, Command, PlacementExpectation, SceneId, SceneItem, SceneItemId, Source, Transform,
+    VideoConfig,
 };
 use std::{
     cell::{Cell, RefCell},
@@ -69,6 +70,26 @@ fn video(snapshot: &AppSnapshot) -> VideoConfig {
 }
 fn rotate90(rotation: f32) -> f32 {
     ((rotation.rem_euclid(360.0) / 90.0).round() * 90.0 + 90.0).rem_euclid(360.0)
+}
+/// The conditional basis (ADR-0026) an edit was computed from: canvas context
+/// from the snapshot, item preimage from the captured item clone, negotiated
+/// pixels from the captured runtime. `None` when the context has no active
+/// profile and no valid expectation exists.
+fn placement_expectation(
+    snapshot: &AppSnapshot,
+    item: &SceneItem,
+    runtime: Option<&prismcast_core::SourceRuntime>,
+) -> Option<PlacementExpectation> {
+    Some(PlacementExpectation {
+        current_scene: snapshot.current_scene()?,
+        active_profile: snapshot.state().active_profile?,
+        video: video(snapshot),
+        transform: item.transform,
+        crop: item.crop,
+        bounds: item.bounds,
+        locked: item.locked,
+        source_dimensions: runtime.and_then(|runtime| runtime.dimensions),
+    })
 }
 fn source_size(snapshot: Option<&AppSnapshot>, source: &Source) -> Option<SourceSize> {
     let negotiated = snapshot
@@ -254,11 +275,14 @@ impl State {
         let mut candidate = draft.item.clone();
         candidate.transform = draft.transform;
         geometry(&candidate, &draft.source, self.snapshot.as_deref())?;
+        let expect =
+            placement_expectation(self.snapshot.as_ref()?, &draft.item, draft.runtime.as_ref())?;
         self.pending = true;
-        Some(Command::SetSceneItemTransform {
+        Some(Command::SetSceneItemTransformIf {
             scene_id: draft.scene_id,
             item_id: draft.item.id,
             transform: draft.transform,
+            expect,
         })
     }
 }
@@ -582,6 +606,11 @@ impl Inner {
         let expected_runtime = expected.as_ref().and_then(|(_, _, source, _)| {
             state.snapshot.as_ref()?.source_runtime(source.id).cloned()
         });
+        // The expectation pins the originally captured basis (ADR-0026); the
+        // courtesy re-read below is UX, the actor's atomic check is authority.
+        let expectation = expected.as_ref().and_then(|(_, item, _, _)| {
+            placement_expectation(state.snapshot.as_ref()?, item, expected_runtime.as_ref())
+        });
         let previous_video = state.snapshot.as_ref().map(|snapshot| video(snapshot));
         let latest = (self.latest)();
         let changed = previous_video != Some(video(&latest));
@@ -645,12 +674,16 @@ impl Inner {
                 .set_label(&format!("Cannot apply this transform: {error}"));
             return;
         }
+        let Some(expect) = expectation else {
+            return;
+        };
         state.pending = true;
         drop(state);
-        (self.send)(Command::SetSceneItemTransform {
+        (self.send)(Command::SetSceneItemTransformIf {
             scene_id,
             item_id: item.id,
             transform,
+            expect,
         });
         self.sync();
     }
@@ -1019,6 +1052,105 @@ mod tests {
         assert_eq!(state.selected, None);
         runtime.block_on(handle.shutdown());
     }
+    #[test]
+    fn concurrent_transform_conflicts_and_newer_value_survives() {
+        let (runtime, handle, scene) = fixture();
+        let mut state = State {
+            available: true,
+            ..State::default()
+        };
+        state.refresh(handle.snapshot());
+        state.begin(20.0, 20.0, 1920.0, 1080.0);
+        let item_id = state.selected.unwrap();
+        // A concurrent controller commits while the editor's GTK wakeup is
+        // still queued: the local draft never sees it, so finish still
+        // returns an intent computed from the stale basis.
+        runtime
+            .block_on(handle.dispatch(Command::SetSceneItemTransform {
+                scene_id: scene,
+                item_id,
+                transform: Transform {
+                    position: prismcast_core::Vec2::new(400.0, 300.0),
+                    ..Transform::default()
+                },
+            }))
+            .unwrap();
+        let command = state.finish(30.0, 20.0).unwrap();
+        assert!(
+            matches!(command, Command::SetSceneItemTransformIf { .. }),
+            "placement edits must carry their captured basis"
+        );
+        let error = runtime.block_on(handle.dispatch(command)).unwrap_err();
+        match error {
+            prismcast_app::HandleError::Core(prismcast_core::Error::Conflict(message)) => {
+                assert!(message.contains("expect.transform"), "{message}");
+            }
+            other => panic!("expected conflict, got {other:?}"),
+        }
+        assert_eq!(
+            handle
+                .snapshot()
+                .scene(scene)
+                .unwrap()
+                .item(item_id)
+                .unwrap()
+                .transform
+                .position,
+            prismcast_core::Vec2::new(400.0, 300.0),
+            "the rejected edit must not clobber the newer value"
+        );
+        runtime.block_on(handle.shutdown());
+    }
+    #[test]
+    fn unrelated_commits_do_not_stale_the_captured_basis() {
+        let (runtime, handle, scene) = fixture();
+        let mut state = State {
+            available: true,
+            ..State::default()
+        };
+        state.refresh(handle.snapshot());
+        state.begin(20.0, 20.0, 1920.0, 1080.0);
+        let item_id = state.selected.unwrap();
+        let other_id = handle
+            .snapshot()
+            .scene(scene)
+            .unwrap()
+            .items
+            .iter()
+            .find(|item| item.id != item_id)
+            .unwrap()
+            .id;
+        runtime
+            .block_on(handle.dispatch(Command::RenameScene {
+                scene_id: scene,
+                name: "Renamed elsewhere".into(),
+            }))
+            .unwrap();
+        runtime
+            .block_on(handle.dispatch(Command::SetSceneItemTransform {
+                scene_id: scene,
+                item_id: other_id,
+                transform: Transform {
+                    position: prismcast_core::Vec2::new(500.0, 400.0),
+                    ..Transform::default()
+                },
+            }))
+            .unwrap();
+        let command = state.finish(30.0, 20.0).unwrap();
+        runtime.block_on(handle.dispatch(command)).unwrap();
+        assert_eq!(
+            handle
+                .snapshot()
+                .scene(scene)
+                .unwrap()
+                .item(item_id)
+                .unwrap()
+                .transform
+                .position,
+            prismcast_core::Vec2::new(30.0, 20.0)
+        );
+        runtime.block_on(handle.shutdown());
+    }
 
     #[test]
     #[ignore = "requires real GTK display; run this filter with --ignored --test-threads=1"]
@@ -1111,6 +1243,10 @@ mod tests {
                 .emit_by_name::<()>("drag-end", &[&(30.0 * map.scale), &(20.0 * map.scale)]);
             assert_eq!(commands.borrow().len(), 1);
             let command = commands.borrow_mut().pop().unwrap();
+            assert!(
+                matches!(command, Command::SetSceneItemTransformIf { .. }),
+                "production signals must commit conditional placement edits"
+            );
             handle.dispatch(command).await.unwrap();
             editor.completed(handle.snapshot());
             assert_eq!(handle.snapshot().revision(), revision + 1);
@@ -1172,6 +1308,10 @@ mod tests {
                 .gesture
                 .emit_by_name::<()>("drag-end", &[&(20.0 * map.scale), &(10.0 * map.scale)]);
             let command = commands.borrow_mut().pop().unwrap();
+            assert!(
+                matches!(command, Command::SetSceneItemTransformIf { .. }),
+                "production signals must commit conditional placement edits"
+            );
             handle.dispatch(command).await.unwrap();
             editor.completed(handle.snapshot());
             assert_eq!(
@@ -1213,6 +1353,10 @@ mod tests {
             editor.0.fields[3].set_value(1.0);
             click("Apply");
             let command = commands.borrow_mut().pop().unwrap();
+            assert!(
+                matches!(command, Command::SetSceneItemTransformIf { .. }),
+                "production signals must commit conditional placement edits"
+            );
             handle.dispatch(command).await.unwrap();
             editor.completed(handle.snapshot());
             assert_eq!(
@@ -1223,6 +1367,10 @@ mod tests {
             );
             click("Rotate 90°");
             let command = commands.borrow_mut().pop().unwrap();
+            assert!(
+                matches!(command, Command::SetSceneItemTransformIf { .. }),
+                "production signals must commit conditional placement edits"
+            );
             handle.dispatch(command).await.unwrap();
             editor.completed(handle.snapshot());
             assert_eq!(
@@ -1233,6 +1381,10 @@ mod tests {
             );
             click("Flip X");
             let command = commands.borrow_mut().pop().unwrap();
+            assert!(
+                matches!(command, Command::SetSceneItemTransformIf { .. }),
+                "production signals must commit conditional placement edits"
+            );
             handle.dispatch(command).await.unwrap();
             editor.completed(handle.snapshot());
             assert_eq!(

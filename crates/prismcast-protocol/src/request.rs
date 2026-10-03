@@ -14,8 +14,8 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::data::{
-    Bounds, Crop, MonitorMode, Output, Profile, ReconnectPolicy, SceneCollection, SourceKind,
-    TrackMask, Transform, Transition,
+    Bounds, Crop, MonitorMode, Output, PlacementExpectation, Profile, ReconnectPolicy,
+    SceneCollection, SourceKind, TrackMask, Transform, Transition,
 };
 use crate::subscription::SubscriptionSet;
 
@@ -102,6 +102,21 @@ pub enum RequestKind {
         item_id: Uuid,
         /// New transform.
         transform: Transform,
+    },
+    /// Atomically replaces an item's transform when the placement context
+    /// still matches `expect` (ADR-0026). Top-level only: rejected with
+    /// `invalid_request` as a `transaction` member. A stale expectation is
+    /// rejected with `state_conflict` 500 and `field` naming the mismatched
+    /// expectation member (e.g. `expect.transform`); nothing is changed.
+    SetSceneItemTransformIf {
+        /// Scene containing the item.
+        scene_id: Uuid,
+        /// Item to transform.
+        item_id: Uuid,
+        /// New transform.
+        transform: Transform,
+        /// Placement context the edit was computed from.
+        expect: PlacementExpectation,
     },
     /// Replaces an item's crop.
     SetSceneItemCrop {
@@ -451,6 +466,7 @@ impl RequestKind {
             Self::RemoveSceneItem { .. } => "remove_scene_item",
             Self::DuplicateSceneItem { .. } => "duplicate_scene_item",
             Self::SetSceneItemTransform { .. } => "set_scene_item_transform",
+            Self::SetSceneItemTransformIf { .. } => "set_scene_item_transform_if",
             Self::SetSceneItemCrop { .. } => "set_scene_item_crop",
             Self::SetSceneItemVisible { .. } => "set_scene_item_visible",
             Self::SetSceneItemLocked { .. } => "set_scene_item_locked",
@@ -553,6 +569,29 @@ mod tests {
                 scene_id: scene,
                 item_id: item,
                 transform: Transform::default(),
+            },
+            RequestKind::SetSceneItemTransformIf {
+                scene_id: scene,
+                item_id: item,
+                transform: Transform::default(),
+                expect: PlacementExpectation {
+                    current_scene: scene,
+                    active_profile: Uuid::new_v4(),
+                    video: crate::data::VideoConfig {
+                        width: 1920,
+                        height: 1080,
+                        fps_num: 60,
+                        fps_den: 1,
+                    },
+                    transform: Transform::default(),
+                    crop: Crop::default(),
+                    bounds: Bounds::default(),
+                    locked: false,
+                    source_dimensions: Some(crate::data::SourceDimensions {
+                        width: 1920,
+                        height: 1080,
+                    }),
+                },
             },
             RequestKind::SetSceneItemCrop {
                 scene_id: scene,

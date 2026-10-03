@@ -16,7 +16,7 @@ use crate::id::{
     AudioBusId, OutputId, ProfileId, SceneCollectionId, SceneId, SceneItemId, SourceId,
 };
 use crate::output::ReconnectPolicy;
-use crate::scene::{Bounds, Crop, Transform};
+use crate::scene::{Bounds, Crop, PlacementExpectation, Transform};
 use crate::source::SourceKind;
 use crate::transition::Transition;
 
@@ -89,6 +89,19 @@ pub enum Command {
         item_id: SceneItemId,
         /// New transform.
         transform: Transform,
+    },
+    /// Atomically replaces an item's transform when the placement context
+    /// still matches `expect` (ADR-0026). Top-level only; rejected inside
+    /// `Transaction`. History records the unconditional inverse.
+    SetSceneItemTransformIf {
+        /// Scene containing the item.
+        scene_id: SceneId,
+        /// Item to transform.
+        item_id: SceneItemId,
+        /// New transform.
+        transform: Transform,
+        /// Placement context the edit was computed from.
+        expect: PlacementExpectation,
     },
     /// Replaces an item's crop.
     SetSceneItemCrop {
@@ -360,7 +373,9 @@ pub enum Command {
 
     /// Applies several commands atomically, in order: either all succeed or
     /// none are applied (PLAN.md §59 transaction groups). Inverse is the
-    /// reversed group of per-command inverses.
+    /// reversed group of per-command inverses. Actor-only commands (history,
+    /// capture authorization, conditional placement edits) are rejected as
+    /// members before any state change.
     Transaction {
         /// Commands to apply as one unit.
         commands: Vec<Command>,
@@ -382,7 +397,9 @@ impl Command {
             Self::AddSceneItem { .. } => "add scene item",
             Self::RemoveSceneItem { .. } => "remove scene item",
             Self::DuplicateSceneItem { .. } => "duplicate scene item",
-            Self::SetSceneItemTransform { .. } => "transform scene item",
+            Self::SetSceneItemTransform { .. } | Self::SetSceneItemTransformIf { .. } => {
+                "transform scene item"
+            }
             Self::SetSceneItemCrop { .. } => "crop scene item",
             Self::SetSceneItemVisible { .. } => "set scene item visibility",
             Self::SetSceneItemLocked { .. } => "lock scene item",
@@ -478,6 +495,29 @@ mod tests {
                     scale: Vec2::new(1.5, 1.5),
                     rotation: 90.0,
                     anchor: crate::scene::Anchor::Center,
+                },
+            },
+            Command::SetSceneItemTransformIf {
+                scene_id: scene,
+                item_id: item,
+                transform: Transform {
+                    position: Vec2::new(3.0, 4.0),
+                    scale: Vec2::new(1.0, 1.0),
+                    rotation: 0.0,
+                    anchor: crate::scene::Anchor::TopLeft,
+                },
+                expect: PlacementExpectation {
+                    current_scene: scene,
+                    active_profile: ProfileId::new(),
+                    video: VideoConfig::default(),
+                    transform: Transform::default(),
+                    crop: Crop::default(),
+                    bounds: crate::scene::Bounds::default(),
+                    locked: false,
+                    source_dimensions: Some(crate::capture::SourceDimensions {
+                        width: 1920,
+                        height: 1080,
+                    }),
                 },
             },
             Command::SetSceneItemCrop {
@@ -646,6 +686,34 @@ mod tests {
         for command in sample_commands() {
             assert!(!command.label().is_empty());
         }
+    }
+
+    #[test]
+    fn conditional_transform_shares_unconditional_label() {
+        let scene = SceneId::new();
+        let item = SceneItemId::new();
+        let unconditional = Command::SetSceneItemTransform {
+            scene_id: scene,
+            item_id: item,
+            transform: Transform::default(),
+        };
+        let conditional = Command::SetSceneItemTransformIf {
+            scene_id: scene,
+            item_id: item,
+            transform: Transform::default(),
+            expect: PlacementExpectation {
+                current_scene: scene,
+                active_profile: ProfileId::new(),
+                video: VideoConfig::default(),
+                transform: Transform::default(),
+                crop: Crop::default(),
+                bounds: crate::scene::Bounds::default(),
+                locked: false,
+                source_dimensions: None,
+            },
+        };
+        assert_eq!(unconditional.label(), conditional.label());
+        assert_eq!(conditional.label(), "transform scene item");
     }
 
     #[test]

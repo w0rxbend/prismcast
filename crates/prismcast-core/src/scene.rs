@@ -7,7 +7,9 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::id::{CanvasId, SceneId, SceneItemId, SourceId};
+use crate::capture::SourceDimensions;
+use crate::id::{CanvasId, ProfileId, SceneId, SceneItemId, SourceId};
+use crate::project::VideoConfig;
 
 /// A scene: an ordered set of placed sources.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -283,6 +285,30 @@ pub enum BoundsKind {
     FitOuter,
 }
 
+/// Bounded typed basis a conditional scene placement edit was computed from
+/// (ADR-0026). Compared field-by-field against authoritative state; any
+/// mismatch rejects the edit as `Error::Conflict` without changing state.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct PlacementExpectation {
+    /// Scene the controller was previewing when the edit was computed.
+    pub current_scene: SceneId,
+    /// Active profile of the editing context.
+    pub active_profile: ProfileId,
+    /// Canvas video configuration of the editing context.
+    pub video: VideoConfig,
+    /// Item transform preimage the geometry was derived from.
+    pub transform: Transform,
+    /// Item crop preimage (rendered-size basis).
+    pub crop: Crop,
+    /// Item bounds preimage (placement interpretation basis).
+    pub bounds: Bounds,
+    /// Item lock preimage (editability basis).
+    pub locked: bool,
+    /// Negotiated native source pixels; `None` expects no active dimensions.
+    /// Runtime-only: checked by the application actor, not by `AppState`.
+    pub source_dimensions: Option<SourceDimensions>,
+}
+
 /// A canvas: a render target with its own resolution.
 ///
 /// Stub reserved per the RES-002 open question so per-canvas resolution can be
@@ -399,6 +425,46 @@ mod tests {
         assert_eq!(displaced, b.id);
         assert_eq!(scene.items[1].id, a.id);
         assert_eq!(scene.items[0].z_index, 0);
+    }
+
+    #[test]
+    fn placement_expectation_serde_roundtrip() {
+        let expectation = PlacementExpectation {
+            current_scene: SceneId::new(),
+            active_profile: ProfileId::new(),
+            video: VideoConfig::default(),
+            transform: Transform {
+                position: Vec2::new(10.5, -3.0),
+                scale: Vec2::new(2.0, 0.5),
+                rotation: 45.0,
+                anchor: Anchor::Center,
+            },
+            crop: Crop {
+                left: 1,
+                top: 2,
+                right: 3,
+                bottom: 4,
+            },
+            bounds: Bounds {
+                kind: BoundsKind::FitInner,
+                size: Vec2::new(1920.0, 1080.0),
+                alignment: Anchor::TopLeft,
+            },
+            locked: false,
+            source_dimensions: Some(SourceDimensions {
+                width: 1920,
+                height: 1080,
+            }),
+        };
+        let json = serde_json::to_string(&expectation).unwrap();
+        assert_eq!(expectation, serde_json::from_str(&json).unwrap());
+
+        let without_dimensions = PlacementExpectation {
+            source_dimensions: None,
+            ..expectation
+        };
+        let json = serde_json::to_string(&without_dimensions).unwrap();
+        assert_eq!(without_dimensions, serde_json::from_str(&json).unwrap());
     }
 
     #[test]

@@ -41,8 +41,9 @@ pub use output::{
 };
 pub use project::{Profile, SceneCollection, StudioMode, VideoConfig};
 pub use scene::{
-    Anchor, BlendMode, Bounds, BoundsKind, Canvas, Crop, Scene, SceneItem, Transform, Vec2,
+    Anchor, BlendMode, Bounds, BoundsKind, Canvas, Crop, PlacementExpectation, Scene, SceneItem,
+    Transform, Vec2,
 };
 pub use source::{Source, SourceKind};
-pub use state::{apply, AppState};
+pub use state::{apply, check_placement_expectation, AppState};
 pub use transition::{Transition, TransitionKind};

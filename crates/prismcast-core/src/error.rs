@@ -17,6 +17,11 @@ pub enum Error {
     #[error("invalid input: {0}")]
     InvalidInput(String),
 
+    /// A conditional edit's expectation no longer matches authoritative
+    /// state (ADR-0026); nothing was changed.
+    #[error("conflict: {0}")]
+    Conflict(String),
+
     /// The media engine (GStreamer graph, capture, encoding) failed.
     #[error("media error: {0}")]
     Media(String),

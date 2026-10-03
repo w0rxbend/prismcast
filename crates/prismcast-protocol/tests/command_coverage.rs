@@ -28,21 +28,22 @@ use prismcast_core::project::{
     Profile as CoreProfile, SceneCollection as CoreCollection, VideoConfig,
 };
 use prismcast_core::scene::{
-    Anchor as CoreAnchor, Bounds as CoreBounds, Crop as CoreCrop, Transform as CoreTransform,
-    Vec2 as CoreVec2,
+    Anchor as CoreAnchor, Bounds as CoreBounds, Crop as CoreCrop,
+    PlacementExpectation as CorePlacementExpectation, Transform as CoreTransform, Vec2 as CoreVec2,
 };
 use prismcast_core::source::SourceKind as CoreSourceKind;
 use prismcast_core::transition::{
     Transition as CoreTransition, TransitionKind as CoreTransitionKind,
 };
 use prismcast_protocol::data::{
-    AudioMixerConfig, Bounds, Crop, MonitorMode, Output, OutputKind, OutputState, ReconnectPolicy,
-    SceneCollection, SourceKind, TrackMask, Transform, Transition, TransitionKind, Vec2,
+    AudioMixerConfig, Bounds, Crop, MonitorMode, Output, OutputKind, OutputState,
+    PlacementExpectation, ReconnectPolicy, SceneCollection, SourceDimensions, SourceKind,
+    TrackMask, Transform, Transition, TransitionKind, Vec2,
 };
 use prismcast_protocol::request::RequestKind;
 use uuid::Uuid;
 
-/// All 52 core command variants paired with their wire representation.
+/// All 53 core command variants paired with their wire representation.
 /// Field values are identical on both sides so representability — not just
 /// name alignment — is exercised.
 fn command_pairs() -> Vec<(Command, RequestKind)> {
@@ -169,6 +170,49 @@ fn command_pairs() -> Vec<(Command, RequestKind)> {
                 scene_id: scene,
                 item_id: item,
                 transform: wire_transform,
+            },
+        ),
+        (
+            Command::SetSceneItemTransformIf {
+                scene_id,
+                item_id,
+                transform: core_transform,
+                expect: CorePlacementExpectation {
+                    current_scene: scene_id,
+                    active_profile: ProfileId::from(profile),
+                    video: VideoConfig::default(),
+                    transform: core_transform,
+                    crop: core_crop,
+                    bounds: CoreBounds::default(),
+                    locked: false,
+                    source_dimensions: Some(prismcast_core::SourceDimensions {
+                        width: 1920,
+                        height: 1080,
+                    }),
+                },
+            },
+            RequestKind::SetSceneItemTransformIf {
+                scene_id: scene,
+                item_id: item,
+                transform: wire_transform,
+                expect: PlacementExpectation {
+                    current_scene: scene,
+                    active_profile: profile,
+                    video: prismcast_protocol::data::VideoConfig {
+                        width: 1920,
+                        height: 1080,
+                        fps_num: 60,
+                        fps_den: 1,
+                    },
+                    transform: wire_transform,
+                    crop: wire_crop,
+                    bounds: Bounds::default(),
+                    locked: false,
+                    source_dimensions: Some(SourceDimensions {
+                        width: 1920,
+                        height: 1080,
+                    }),
+                },
             },
         ),
         (
@@ -559,9 +603,9 @@ fn command_pairs() -> Vec<(Command, RequestKind)> {
 fn every_core_command_is_representable_as_a_request() {
     let pairs = command_pairs();
 
-    // Pin the current command surface: 52 variants today. When core adds a
+    // Pin the current command surface: 53 variants today. When core adds a
     // command, extend `command_pairs` and bump this count in the same commit.
-    assert_eq!(pairs.len(), 52, "core command surface changed");
+    assert_eq!(pairs.len(), 53, "core command surface changed");
 
     let mut core_tags = BTreeSet::new();
     let mut wire_tags = BTreeSet::new();

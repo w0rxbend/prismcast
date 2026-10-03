@@ -12,6 +12,13 @@
 //! `Add*` commands) and deterministic given the same state and command, so all
 //! domain logic is headless-testable.
 //!
+//! Conditional placement edits (`Command::SetSceneItemTransformIf`, ADR-0026)
+//! additionally validate a typed [`PlacementExpectation`] preimage before any
+//! mutation via [`check_placement_expectation`]; a stale basis is rejected as
+//! [`Error::Conflict`] without changing state. Conditional commands are
+//! top-level only: like history commands and capture authorization, they are
+//! rejected as `Transaction` members before any state change.
+//!
 //! ## Delete policy (documented choice)
 //!
 //! - **Reject** deletions that would silently destroy intentional user
@@ -43,7 +50,7 @@ use crate::event::{AudioEvent, Event, OutputEvent, SceneEvent, SourceEvent, Syst
 use crate::id::{OutputId, ProfileId, SceneCollectionId, SceneId, SceneItemId, SourceId};
 use crate::output::{Output, OutputState};
 use crate::project::{Profile, SceneCollection, StudioMode, VideoConfig};
-use crate::scene::{Scene, SceneItem};
+use crate::scene::{PlacementExpectation, Scene, SceneItem, Transform};
 use crate::source::{Source, SourceKind};
 use crate::transition::Transition;
 
@@ -151,6 +158,18 @@ impl AppState {
                 scene_id: self.current_scene?,
             }),
             Command::SetSceneItemTransform {
+                scene_id, item_id, ..
+            } => {
+                let item = self.scene(*scene_id)?.item(*item_id)?;
+                Some(Command::SetSceneItemTransform {
+                    scene_id: *scene_id,
+                    item_id: *item_id,
+                    transform: item.transform,
+                })
+            }
+            // History records the unconditional inverse (ADR-0026): replay
+            // must not re-check a stale expectation.
+            Command::SetSceneItemTransformIf {
                 scene_id, item_id, ..
             } => {
                 let item = self.scene(*scene_id)?.item(*item_id)?;
@@ -425,9 +444,9 @@ pub fn apply(state: &mut AppState, command: &Command) -> Result<Vec<Event>> {
             )])
         }
         Command::Transaction { commands } => {
-            if contains_history(command) {
+            if contains_actor_only_command(command) {
                 return Err(Error::InvalidInput(
-                    "history commands cannot be inside a transaction".into(),
+                    "history and conditional commands are top-level only; they cannot be inside a transaction".into(),
                 ));
             }
             if contains_capture_authorization(command) {
@@ -457,12 +476,60 @@ pub fn contains_capture_authorization(command: &Command) -> bool {
     }
 }
 
-fn contains_history(command: &Command) -> bool {
+/// History and conditional commands are admitted by the application actor
+/// per top-level dispatch; atomic transactions cannot honor their per-command
+/// admission contract, so they are rejected as members (ADR-0025, ADR-0026).
+fn contains_actor_only_command(command: &Command) -> bool {
     match command {
-        Command::Undo | Command::Redo => true,
-        Command::Transaction { commands } => commands.iter().any(contains_history),
+        Command::Undo | Command::Redo | Command::SetSceneItemTransformIf { .. } => true,
+        Command::Transaction { commands } => commands.iter().any(contains_actor_only_command),
         _ => false,
     }
+}
+
+/// Checks the state preimage of a conditional placement edit (ADR-0026).
+/// `source_dimensions` is runtime-owned and intentionally not checked here.
+pub fn check_placement_expectation(
+    state: &AppState,
+    scene_id: SceneId,
+    item_id: SceneItemId,
+    expect: &PlacementExpectation,
+) -> Result<()> {
+    let scene = state
+        .scenes
+        .get(&scene_id)
+        .ok_or_else(|| not_found("scene", scene_id))?;
+    let item = scene
+        .item(item_id)
+        .ok_or_else(|| not_found("scene item", item_id))?;
+    if state.current_scene != Some(expect.current_scene) {
+        return Err(stale_expectation("expect.current_scene"));
+    }
+    if state.active_profile != Some(expect.active_profile) {
+        return Err(stale_expectation("expect.active_profile"));
+    }
+    match state.profiles.get(&expect.active_profile) {
+        Some(profile) if profile.video == expect.video => {}
+        Some(_) => return Err(stale_expectation("expect.video")),
+        None => return Err(stale_expectation("expect.active_profile")),
+    }
+    if item.transform != expect.transform {
+        return Err(stale_expectation("expect.transform"));
+    }
+    if item.crop != expect.crop {
+        return Err(stale_expectation("expect.crop"));
+    }
+    if item.bounds != expect.bounds {
+        return Err(stale_expectation("expect.bounds"));
+    }
+    if item.locked != expect.locked {
+        return Err(stale_expectation("expect.locked"));
+    }
+    Ok(())
+}
+
+fn stale_expectation(field: &str) -> Error {
+    Error::Conflict(format!("stale placement edit: {field} mismatch"))
 }
 
 fn apply_one(state: &mut AppState, command: &Command) -> Result<Vec<Event>> {
@@ -656,27 +723,15 @@ fn apply_one(state: &mut AppState, command: &Command) -> Result<Vec<Event>> {
             scene_id,
             item_id,
             transform,
+        } => set_scene_item_transform(state, *scene_id, *item_id, *transform),
+        Command::SetSceneItemTransformIf {
+            scene_id,
+            item_id,
+            transform,
+            expect,
         } => {
-            require_finite(
-                &[
-                    transform.position.x,
-                    transform.position.y,
-                    transform.scale.x,
-                    transform.scale.y,
-                    transform.rotation,
-                ],
-                "transform",
-            )?;
-            let scene = state
-                .scenes
-                .get_mut(scene_id)
-                .ok_or_else(|| not_found("scene", *scene_id))?;
-            let item = editable_item(scene, *item_id)?;
-            if item.transform == *transform {
-                return Ok(Vec::new());
-            }
-            item.transform = *transform;
-            Ok(vec![item_updated(*scene_id, item)])
+            check_placement_expectation(state, *scene_id, *item_id, expect)?;
+            set_scene_item_transform(state, *scene_id, *item_id, *transform)
         }
         Command::SetSceneItemCrop {
             scene_id,
@@ -1390,6 +1445,34 @@ fn editable_item(scene: &mut Scene, item_id: SceneItemId) -> Result<&mut SceneIt
     Ok(item)
 }
 
+fn set_scene_item_transform(
+    state: &mut AppState,
+    scene_id: SceneId,
+    item_id: SceneItemId,
+    transform: Transform,
+) -> Result<Vec<Event>> {
+    require_finite(
+        &[
+            transform.position.x,
+            transform.position.y,
+            transform.scale.x,
+            transform.scale.y,
+            transform.rotation,
+        ],
+        "transform",
+    )?;
+    let scene = state
+        .scenes
+        .get_mut(&scene_id)
+        .ok_or_else(|| not_found("scene", scene_id))?;
+    let item = editable_item(scene, item_id)?;
+    if item.transform == transform {
+        return Ok(Vec::new());
+    }
+    item.transform = transform;
+    Ok(vec![item_updated(scene_id, item)])
+}
+
 fn item_updated(scene_id: SceneId, item: &SceneItem) -> Event {
     Event::Scene(SceneEvent::ItemUpdated {
         scene_id,
@@ -1466,10 +1549,11 @@ fn update_mixer(
 mod tests {
     use super::*;
     use crate::audio::{MonitorMode, TrackMask};
+    use crate::capture::SourceDimensions;
     use crate::command::Command;
     use crate::id::AudioBusId;
     use crate::output::{EncoderSettings, OutputKind, ReconnectPolicy};
-    use crate::scene::{Crop, Transform, Vec2};
+    use crate::scene::{Bounds, Crop, PlacementExpectation, Transform, Vec2};
     use crate::transition::TransitionKind;
 
     // --- helpers ---
@@ -2053,6 +2137,326 @@ mod tests {
             ));
             assert_eq!(state, before);
         }
+    }
+
+    // --- conditional placement edits (ADR-0026) ---
+
+    fn placement_fixture() -> (AppState, SceneId, SceneItemId, PlacementExpectation) {
+        let mut state = AppState::new();
+        let src = add_source(&mut state, SourceKind::Color, "c");
+        let scene = add_scene(&mut state, "s");
+        let item = add_item(&mut state, scene, src);
+        let expect = matching_expectation(&state, scene, item);
+        (state, scene, item, expect)
+    }
+
+    fn matching_expectation(
+        state: &AppState,
+        scene_id: SceneId,
+        item_id: SceneItemId,
+    ) -> PlacementExpectation {
+        let item = state.scene(scene_id).unwrap().item(item_id).unwrap();
+        let profile_id = state.active_profile.unwrap();
+        PlacementExpectation {
+            current_scene: state.current_scene.unwrap(),
+            active_profile: profile_id,
+            video: state.profiles.get(&profile_id).unwrap().video,
+            transform: item.transform,
+            crop: item.crop,
+            bounds: item.bounds,
+            locked: item.locked,
+            source_dimensions: Some(SourceDimensions {
+                width: 1920,
+                height: 1080,
+            }),
+        }
+    }
+
+    fn conditional_transform(
+        scene_id: SceneId,
+        item_id: SceneItemId,
+        expect: PlacementExpectation,
+    ) -> Command {
+        Command::SetSceneItemTransformIf {
+            scene_id,
+            item_id,
+            transform: Transform {
+                position: Vec2::new(10.0, 20.0),
+                ..Transform::default()
+            },
+            expect,
+        }
+    }
+
+    fn assert_conflict_unchanged(state: &mut AppState, cmd: Command, field: &str) {
+        let before = state.clone();
+        match state.apply(&cmd).unwrap_err() {
+            Error::Conflict(message) => assert!(message.contains(field), "{message}"),
+            other => panic!("expected conflict on {field}, got {other:?}"),
+        }
+        assert_eq!(*state, before);
+    }
+
+    #[test]
+    fn conditional_edit_matches_unconditional_application() {
+        let (mut conditional_state, scene, item, expect) = placement_fixture();
+        let mut unconditional_state = conditional_state.clone();
+        check_placement_expectation(&conditional_state, scene, item, &expect).unwrap();
+
+        let cmd = conditional_transform(scene, item, expect);
+        let transform = match &cmd {
+            Command::SetSceneItemTransformIf { transform, .. } => *transform,
+            other => panic!("unexpected {other:?}"),
+        };
+        let conditional_events = conditional_state.apply(&cmd).unwrap();
+        let unconditional_events = unconditional_state
+            .apply(&Command::SetSceneItemTransform {
+                scene_id: scene,
+                item_id: item,
+                transform,
+            })
+            .unwrap();
+        assert!(matches!(
+            conditional_events.as_slice(),
+            [Event::Scene(SceneEvent::ItemUpdated { .. })]
+        ));
+        assert_eq!(conditional_events, unconditional_events);
+        assert_eq!(conditional_state, unconditional_state);
+    }
+
+    #[test]
+    fn stale_expectations_reject_with_conflict_and_leave_state_unchanged() {
+        // Item transform changed since the edit was computed.
+        let (mut state, scene, item, expect) = placement_fixture();
+        state
+            .apply(&Command::SetSceneItemTransform {
+                scene_id: scene,
+                item_id: item,
+                transform: Transform {
+                    position: Vec2::new(1.0, 1.0),
+                    ..Transform::default()
+                },
+            })
+            .unwrap();
+        assert_conflict_unchanged(
+            &mut state,
+            conditional_transform(scene, item, expect),
+            "expect.transform",
+        );
+
+        // Item crop changed.
+        let (mut state, scene, item, expect) = placement_fixture();
+        state
+            .apply(&Command::SetSceneItemCrop {
+                scene_id: scene,
+                item_id: item,
+                crop: Crop {
+                    left: 1,
+                    ..Crop::default()
+                },
+            })
+            .unwrap();
+        assert_conflict_unchanged(
+            &mut state,
+            conditional_transform(scene, item, expect),
+            "expect.crop",
+        );
+
+        // Item bounds changed.
+        let (mut state, scene, item, expect) = placement_fixture();
+        state
+            .apply(&Command::SetSceneItemBounds {
+                scene_id: scene,
+                item_id: item,
+                bounds: Bounds {
+                    kind: crate::scene::BoundsKind::Stretch,
+                    ..Bounds::default()
+                },
+            })
+            .unwrap();
+        assert_conflict_unchanged(
+            &mut state,
+            conditional_transform(scene, item, expect),
+            "expect.bounds",
+        );
+
+        // Item became locked.
+        let (mut state, scene, item, expect) = placement_fixture();
+        state
+            .apply(&Command::SetSceneItemLocked {
+                scene_id: scene,
+                item_id: item,
+                locked: true,
+            })
+            .unwrap();
+        assert_conflict_unchanged(
+            &mut state,
+            conditional_transform(scene, item, expect),
+            "expect.locked",
+        );
+
+        // Current scene changed.
+        let (mut state, scene, item, expect) = placement_fixture();
+        let other = add_scene(&mut state, "other");
+        state
+            .apply(&Command::SetCurrentScene { scene_id: other })
+            .unwrap();
+        assert_conflict_unchanged(
+            &mut state,
+            conditional_transform(scene, item, expect),
+            "expect.current_scene",
+        );
+
+        // Active profile changed (same video config: isolates the id check).
+        let (mut state, scene, item, expect) = placement_fixture();
+        let profile = crate::project::Profile::new("p2", VideoConfig::default());
+        let profile_id = profile.id;
+        state.apply(&Command::AddProfile { profile }).unwrap();
+        state.apply(&Command::SelectProfile { profile_id }).unwrap();
+        assert_conflict_unchanged(
+            &mut state,
+            conditional_transform(scene, item, expect),
+            "expect.active_profile",
+        );
+
+        // Active profile's video configuration changed.
+        let (mut state, scene, item, expect) = placement_fixture();
+        let profile_id = state.active_profile.unwrap();
+        state.profiles.get_mut(&profile_id).unwrap().video.width = 1280;
+        assert_conflict_unchanged(
+            &mut state,
+            conditional_transform(scene, item, expect),
+            "expect.video",
+        );
+    }
+
+    #[test]
+    fn conditional_edit_missing_scene_or_item_is_not_found() {
+        let (mut state, scene, item, expect) = placement_fixture();
+        let missing_scene = Command::SetSceneItemTransformIf {
+            scene_id: SceneId::new(),
+            item_id: item,
+            transform: Transform::default(),
+            expect,
+        };
+        assert!(matches!(
+            state.apply(&missing_scene),
+            Err(Error::NotFound(_))
+        ));
+        let missing_item = Command::SetSceneItemTransformIf {
+            scene_id: scene,
+            item_id: SceneItemId::new(),
+            transform: Transform::default(),
+            expect,
+        };
+        assert!(matches!(
+            state.apply(&missing_item),
+            Err(Error::NotFound(_))
+        ));
+    }
+
+    #[test]
+    fn conditional_edit_inside_transaction_is_rejected_before_mutation() {
+        let (mut state, scene, item, expect) = placement_fixture();
+        let src = state.scene(scene).unwrap().item(item).unwrap().source_id;
+        let before = state.clone();
+        let cmd = conditional_transform(scene, item, expect);
+
+        // Top-level member.
+        let transaction = Command::Transaction {
+            commands: vec![
+                Command::SetSourceMuted {
+                    source_id: src,
+                    muted: true,
+                },
+                cmd.clone(),
+            ],
+        };
+        assert!(matches!(
+            state.apply(&transaction),
+            Err(Error::InvalidInput(_))
+        ));
+        assert_eq!(state, before);
+
+        // Nested in a sub-transaction.
+        let nested = Command::Transaction {
+            commands: vec![
+                Command::SetSourceMuted {
+                    source_id: src,
+                    muted: true,
+                },
+                Command::Transaction {
+                    commands: vec![cmd],
+                },
+            ],
+        };
+        assert!(matches!(state.apply(&nested), Err(Error::InvalidInput(_))));
+        assert_eq!(state, before);
+    }
+
+    #[test]
+    fn conditional_edit_inverse_is_unconditional_preimage() {
+        let (mut state, scene, item, expect) = placement_fixture();
+        let before = state.clone();
+        let preimage = state.scene(scene).unwrap().item(item).unwrap().transform;
+        let cmd = conditional_transform(scene, item, expect);
+        let inverse = state.inverse(&cmd).unwrap();
+        assert_eq!(
+            inverse,
+            Command::SetSceneItemTransform {
+                scene_id: scene,
+                item_id: item,
+                transform: preimage,
+            }
+        );
+        state.apply(&cmd).unwrap();
+        state.apply(&inverse).unwrap();
+        assert_eq!(state, before);
+
+        // Missing item: no inverse, like the unconditional command.
+        let missing = Command::SetSceneItemTransformIf {
+            scene_id: scene,
+            item_id: SceneItemId::new(),
+            transform: Transform::default(),
+            expect,
+        };
+        assert!(state.inverse(&missing).is_none());
+    }
+
+    #[test]
+    fn conditional_no_op_edit_emits_no_events() {
+        let (mut state, scene, item, expect) = placement_fixture();
+        let current = state.scene(scene).unwrap().item(item).unwrap().transform;
+        let events = state
+            .apply(&Command::SetSceneItemTransformIf {
+                scene_id: scene,
+                item_id: item,
+                transform: current,
+                expect,
+            })
+            .unwrap();
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn conditional_edit_recomputes_expectation_after_commit() {
+        // An unrelated commit (rename, other item) does not invalidate the
+        // preimage; a fresh expectation computed after it still applies.
+        let (mut state, scene, item, _) = placement_fixture();
+        state
+            .apply(&Command::RenameScene {
+                scene_id: scene,
+                name: "renamed".into(),
+            })
+            .unwrap();
+        let expect = matching_expectation(&state, scene, item);
+        let events = state
+            .apply(&conditional_transform(scene, item, expect))
+            .unwrap();
+        assert!(matches!(
+            events.as_slice(),
+            [Event::Scene(SceneEvent::ItemUpdated { .. })]
+        ));
     }
 
     // --- undo inverses ---

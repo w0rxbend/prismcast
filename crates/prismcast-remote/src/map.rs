@@ -7,7 +7,8 @@
 //!
 //! Error mapping follows the table in `docs/protocols/native-protocol.md`
 //! §Structured errors: `NotFound` → 600, `InvalidInput` → 400,
-//! `Unauthorized` → 800, `Protocol` → 200, `Media`/`Io`/`Persistence` → 700.
+//! `Unauthorized` → 800, `Protocol` → 200, `Conflict` → 500 (with `field`
+//! naming the diverging expectation member), `Media`/`Io`/`Persistence` → 700.
 
 use prismcast_app::dispatch::{Permission as AppPermission, Permissions as AppPermissions};
 use prismcast_app::snapshot::AppSnapshot;
@@ -23,7 +24,8 @@ use prismcast_core::id::{
 use prismcast_core::output::{Output, OutputKind, OutputState, ReconnectPolicy};
 use prismcast_core::project::{Profile, SceneCollection, StudioMode, VideoConfig};
 use prismcast_core::scene::{
-    Anchor, BlendMode, Bounds, BoundsKind, Crop, Scene, SceneItem, Transform, Vec2,
+    Anchor, BlendMode, Bounds, BoundsKind, Crop, PlacementExpectation, Scene, SceneItem, Transform,
+    Vec2,
 };
 use prismcast_core::source::{Source, SourceKind};
 use prismcast_core::state::AppState;
@@ -89,6 +91,7 @@ pub const AVAILABLE_REQUESTS: &[&str] = &[
     "set_scene_item_locked",
     "set_scene_item_opacity",
     "set_scene_item_transform",
+    "set_scene_item_transform_if",
     "set_scene_item_visible",
     "set_scene_item_z_index",
     "set_source_balance",
@@ -167,6 +170,20 @@ pub fn wire_error(error: &Error) -> WireError {
         Error::InvalidInput(message) => WireError::new(ErrorKind::InvalidField, message.clone()),
         Error::Unauthorized(message) => WireError::new(ErrorKind::Forbidden, message.clone()),
         Error::Protocol(message) => WireError::new(ErrorKind::InvalidRequest, message.clone()),
+        Error::Conflict(message) => {
+            // Placement-check messages name the diverging expectation member:
+            // "stale placement edit: expect.<field> mismatch" (ADR-0026).
+            // Surface that member structurally; leave `field` unset when the
+            // message has another shape.
+            let wire = WireError::new(ErrorKind::StateConflict, message.clone());
+            match message
+                .strip_prefix("stale placement edit: ")
+                .and_then(|rest| rest.strip_suffix(" mismatch"))
+            {
+                Some(field) => wire.with_field(field),
+                None => wire,
+            }
+        }
         Error::Media(message) | Error::Io(message) | Error::Persistence(message) => {
             WireError::new(ErrorKind::ProcessingFailed, message.clone())
         }
@@ -278,6 +295,17 @@ pub fn command_from_wire(kind: RequestKind) -> Result<Command, WireError> {
             scene_id: SceneId::from(scene_id),
             item_id: SceneItemId::from(item_id),
             transform: transform_from_wire(&transform),
+        }),
+        R::SetSceneItemTransformIf {
+            scene_id,
+            item_id,
+            transform,
+            expect,
+        } => Ok(Command::SetSceneItemTransformIf {
+            scene_id: SceneId::from(scene_id),
+            item_id: SceneItemId::from(item_id),
+            transform: transform_from_wire(&transform),
+            expect: placement_expectation_from_wire(&expect),
         }),
         R::SetSceneItemCrop {
             scene_id,
@@ -465,6 +493,15 @@ pub fn command_from_wire(kind: RequestKind) -> Result<Command, WireError> {
                     return Err(WireError::new(
                         ErrorKind::InvalidRequest,
                         "transaction cannot contain nested transactions or history commands",
+                    ));
+                }
+                // Conditional placement edits are top-level only (ADR-0026):
+                // per-member runtime admission cannot be honored by the
+                // transaction replay contract.
+                if matches!(member, R::SetSceneItemTransformIf { .. }) {
+                    return Err(WireError::new(
+                        ErrorKind::InvalidRequest,
+                        "transaction cannot contain conditional placement edits",
                     ));
                 }
                 if classify(&member) != RequestClass::Command {
@@ -946,6 +983,26 @@ fn transform_from_wire(transform: &data::Transform) -> Transform {
         scale: vec2_from_wire(transform.scale),
         rotation: transform.rotation,
         anchor: anchor_from_wire(transform.anchor),
+    }
+}
+
+/// Maps the wire placement-edit basis onto the domain expectation
+/// (ADR-0026); the domain and the actor perform the actual comparisons.
+fn placement_expectation_from_wire(expect: &data::PlacementExpectation) -> PlacementExpectation {
+    PlacementExpectation {
+        current_scene: SceneId::from(expect.current_scene),
+        active_profile: ProfileId::from(expect.active_profile),
+        video: video_config_from_wire(expect.video),
+        transform: transform_from_wire(&expect.transform),
+        crop: crop_from_wire(expect.crop),
+        bounds: bounds_from_wire(&expect.bounds),
+        locked: expect.locked,
+        source_dimensions: expect
+            .source_dimensions
+            .map(|d| prismcast_core::SourceDimensions {
+                width: d.width,
+                height: d.height,
+            }),
     }
 }
 
@@ -1470,7 +1527,7 @@ mod tests {
         sorted.sort_unstable();
         sorted.dedup();
         assert_eq!(sorted, AVAILABLE_REQUESTS, "list must be sorted, unique");
-        assert_eq!(sorted.len(), 65, "protocol v1 has 65 request kinds");
+        assert_eq!(sorted.len(), 66, "protocol v1 has 66 request kinds");
     }
 
     #[test]
@@ -1511,11 +1568,25 @@ mod tests {
                 ErrorKind::ProcessingFailed,
                 700,
             ),
+            (Error::Conflict("x".into()), ErrorKind::StateConflict, 500),
         ];
         for (error, kind, code) in cases {
             let wire = wire_error(&error);
             assert_eq!((wire.kind, wire.code), (kind, code));
         }
+    }
+
+    #[test]
+    fn conflict_error_names_the_mismatched_expectation_member() {
+        let wire = wire_error(&Error::Conflict(
+            "stale placement edit: expect.transform mismatch".into(),
+        ));
+        assert_eq!(wire.kind, ErrorKind::StateConflict);
+        assert_eq!(wire.field.as_deref(), Some("expect.transform"));
+
+        // Messages outside the placement-check shape carry no field.
+        let wire = wire_error(&Error::Conflict("something else".into()));
+        assert_eq!(wire.field, None);
     }
 
     #[test]
@@ -1563,6 +1634,32 @@ mod tests {
             commands: vec![RequestKind::Transaction { commands: vec![] }],
         };
         assert!(command_from_wire(nested).is_err());
+
+        // Conditional placement edits are top-level only (ADR-0026).
+        let conditional = RequestKind::Transaction {
+            commands: vec![RequestKind::SetSceneItemTransformIf {
+                scene_id: Uuid::new_v4(),
+                item_id: Uuid::new_v4(),
+                transform: data::Transform::default(),
+                expect: data::PlacementExpectation {
+                    current_scene: Uuid::new_v4(),
+                    active_profile: Uuid::new_v4(),
+                    video: data::VideoConfig {
+                        width: 1920,
+                        height: 1080,
+                        fps_num: 60,
+                        fps_den: 1,
+                    },
+                    transform: data::Transform::default(),
+                    crop: data::Crop::default(),
+                    bounds: data::Bounds::default(),
+                    locked: false,
+                    source_dimensions: None,
+                },
+            }],
+        };
+        let err = command_from_wire(conditional).expect_err("conditional in transaction");
+        assert_eq!(err.kind, ErrorKind::InvalidRequest);
     }
 
     #[test]

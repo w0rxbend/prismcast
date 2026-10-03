@@ -123,6 +123,8 @@ pub fn dirty_class(command: &Command) -> DirtyClass {
         | Command::RemoveSceneItem { .. }
         | Command::DuplicateSceneItem { .. }
         | Command::SetSceneItemTransform { .. }
+        // A committed conditional edit is an ordinary scene-item mutation.
+        | Command::SetSceneItemTransformIf { .. }
         | Command::SetSceneItemCrop { .. }
         | Command::SetSceneItemVisible { .. }
         | Command::SetSceneItemLocked { .. }

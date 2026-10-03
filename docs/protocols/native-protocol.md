@@ -139,7 +139,7 @@ required scope; failures are `forbidden` errors (code 800), not disconnects.
   "message":"output is not running","field":"output_id","details":{"state":"stopped"}}}}}
 ```
 
-**Request kinds.** All 52 `prismcast_core::Command` variants are representable, with identical
+**Request kinds.** All 53 `prismcast_core::Command` variants are representable, with identical
 snake_case tags (including `undo` and `redo`) and identical field semantics with wire types
 (UUIDs instead of typed-ID newtypes, `prismcast_protocol::data` structs instead of domain
 structs). The mirror is test-enforced (`tests/command_coverage.rs`); adding a core command
@@ -178,9 +178,30 @@ observations have `dimensions: null` even when `status: active`; video Active
 observations contain negotiated pixel dimensions. Target serials and native
 grants are never exposed or persisted. See [PipeWire audio verification](../testing/pipewire-audio.md).
 
+`set_scene_item_transform_if` is the atomic conditional placement edit
+(ADR-0026). Its payload is `scene_id`, `item_id`, the new `transform`, and an
+`expect` object — the typed placement context the edit was computed from:
+`current_scene`, `active_profile`, the active profile's `video` configuration,
+the item's `transform`/`crop`/`bounds`/`locked` preimages, and the item
+source's runtime `source_dimensions` (`null` expects no active dimensions).
+Every value is obtainable from the `get_snapshot` snapshot — no extra query or
+runtime grant is needed. The server applies the edit only if the expectation
+still matches authoritative state (including the capture runtime dimensions)
+at dispatch time; on success it behaves exactly like
+`set_scene_item_transform` — same `item_updated` event, same history entry,
+same response. Any expectation mismatch is rejected with `state_conflict` 500
+whose `field` names the diverging member (e.g. `expect.transform`,
+`expect.current_scene`); a rejection changes nothing — no events, no history,
+no snapshot change. A missing scene or item keeps the ordinary `not_found`
+600 semantics. The request requires `control_scenes` and is top-level only:
+as a `transaction` member it is rejected with `invalid_request` before any
+member executes. Clients that detect the conflict should re-read the snapshot
+and recompute the edit from the newer basis.
+
 `transaction` members must be command kinds (queries are rejected); nesting `transaction` inside
 `transaction` is rejected. `undo` and `redo` are also forbidden transaction
-members; structural rejection occurs before any member executes, including a
+members, as are conditional placement edits (`set_scene_item_transform_if`);
+structural rejection occurs before any member executes, including a
 nested transaction containing history commands. It maps to `Command::Transaction` — atomic, all-or-nothing
 (PLAN §59).
 
@@ -195,14 +216,15 @@ typed structure (RES-007 weakness 6):
 | 2xx | request-shape | `generic_error` 200, `missing_request_type` 201, `unknown_request_type` 202, `invalid_batch` 203, `not_ready` 204 |
 | 3xx | missing data | `missing_field` 300 |
 | 4xx | invalid values | `invalid_field` 400, `invalid_field_type` 401, `field_out_of_range` 402 |
-| 5xx | state conflicts | `state_conflict` 500 (illegal output lifecycle transition, delete-policy rejection, studio-mode precondition) |
+| 5xx | state conflicts | `state_conflict` 500 (illegal output lifecycle transition, delete-policy rejection, studio-mode precondition, stale conditional placement edit — `field` names the diverging expectation member) |
 | 6xx | resources | `not_found` 600, `already_exists` 601 |
 | 7xx | action failures | `processing_failed` 700 |
 | 8xx | authorization | `forbidden` 800 |
 | 9xx | overload | `rate_limited` 900, `invalid_subscription` 901 |
 
 Mapping from core errors (`prismcast_core::Error`) at the boundary: `NotFound` → 600,
-`InvalidInput` → 400, `Unauthorized` → 800, `Protocol` → 200, `Media`/`Io`/`Persistence` → 700.
+`InvalidInput` → 400, `Unauthorized` → 800, `Protocol` → 200, `Conflict` → 500 (with `field`
+extracted from the placement-check message, e.g. `expect.transform`), `Media`/`Io`/`Persistence` → 700.
 
 ## 6. Batches
 
@@ -320,5 +342,6 @@ closing.
 
 - PLAN.md §21 (IPC), §22 (WebSocket API), §23 (remote web UI: snapshot + events), §24 (auth),
   §59 (transaction groups), §63 (golden tests), §75 (protocol ≠ domain structs).
-- ADR-0006 (Unix IPC framing/versioning), ADR-0007 (OutputGraph), ADR-0010 (native vs adapter).
+- ADR-0006 (Unix IPC framing/versioning), ADR-0007 (OutputGraph), ADR-0010 (native vs adapter),
+  ADR-0026 (conditional scene placement edits).
 - RES-007: `docs/research/obs-websocket-protocol.md` (interaction shape, weaknesses, conclusions).
