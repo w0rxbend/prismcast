@@ -22,7 +22,7 @@ acceptance:
 - Deterministic race tests prove stale GTK and native edits cannot clobber newer changes; unrelated metadata publications and no-op behavior follow the documented contract
 - Existing ordinary Commands remain supported for deliberate unconditional control; destructive undo and grouping remain separate tasks
 validation: [just ci, just deny, deterministic owner race tests, real native socket conflict test, separate GTK placement regression]
-status: ready
+status: done
 notes:
 - Continue direct-main swarm with disjoint ownership and coordinator-only commits and pushes
 - Closes the snapshot-read to dispatch race recorded in UI-002 and the current open questions

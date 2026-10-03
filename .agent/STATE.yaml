@@ -1,8 +1,8 @@
 schema_version: 1
 project_phase: phase-4-scene-editor
-head_commit: 2f327b5
-current_objective: Scope CORE-007 atomic conditional scene placement edits; preserve
-  direct-main swarm ownership preference
+head_commit: 8fc0d74
+current_objective: CORE-007 validated on main; select the next task from the
+  backlog (remaining open questions below)
 completed:
 - RESUME-001
 - SKILL-001
@@ -54,10 +54,10 @@ completed:
 - AUDIO-001
 - CAPTURE-004
 - CORE-006
+- CORE-007
 in_progress: []
 blocked: []
-next_candidates:
-- CORE-007
+next_candidates: []
 decisions:
 - ADR-0001
 - ADR-0002
@@ -84,10 +84,11 @@ decisions:
 - ADR-0023
 - ADR-0024
 - ADR-0025
+- ADR-0026
 verification:
   cargo_fmt: pass
   cargo_clippy: pass
-  cargo_test: pass_692_tests_20_environment_tests_ignored
+  cargo_test: pass_716_tests_20_environment_tests_ignored
   cargo_deny: pass
   portal_capture: live_window_three_frame_probe_pass
   shared_capture_preview: picker_granted_wrong_window_thrice_then_no_selection; raw
@@ -115,10 +116,16 @@ verification:
   history_native_protocol: real_unix_and_websocket_scoped_replay_events_snapshots_and_denial_pass
   history_cli: real_binary_unix_human_json_empty_permission_usage_pass
   history_gtk: wayland_cairo_fatal_criticals_buttons_shortcut_signals_text_focus_group_metadata_rejection_join_pass
+  conditional_placement_core: preimage_matrix_transaction_inverse_noop_unrelated_commit_pass
+  conditional_placement_app: deterministic_race_dims_guard_unconditional_replay_pass
+  conditional_placement_native: real_unix_and_websocket_success_conflict_permission_transaction_pass
+  conditional_placement_gtk: wayland_cairo_fatal_criticals_gesture_buttons_conditional_variant_pass
 last_agent:
-  model: codex
-  session: core-006-direct-main-swarm
+  model: kimi
+  session: core-007-direct-main-swarm
 open_questions:
+- Conditional crop/bounds edit variants can reuse PlacementExpectation if a
+  controller needs them; only transform edits are conditional today (ADR-0026)
 - Wire history availability query and canonical/native begin/end grouping remain follow-ups;
   local immutable metadata drives GTK availability
 - PipeWire audio physical microphone, desktop policies and sandbox/Flatpak permissions
@@ -144,8 +151,6 @@ open_questions:
 - Destructive Add/Remove undo and persisted history are not implemented
 - Z-order boundary overflow and missing neighbor update events need coordinated core
   fixes
-- Atomic expected-version editing command needed to close snapshot-read to dispatch
-  race (UI-002)
 - Negotiated dimensions now support portal capture; other source kinds need their
   own runtime contracts
 - gst-plugins-rs vendoring: isobmff/wpe2/gopbuffer not distro-packaged (RES-003)

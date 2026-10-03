@@ -1,99 +1,76 @@
 # Current state
 
-CORE-006 is implemented and validated on main (2f327b5): canonical Undo/Redo
-Commands and GTK/native/CLI controllers. The next task is CORE-007.
-Continue directly on main under the user's standing preference. All 41 auxiliary
-worktree histories were already reconciled; preserve their existing local edits.
-Assign disjoint files to parallel agents; only the coordinator commits and pushes.
+CORE-007 is implemented and validated on main (8fc0d74): atomic conditional
+scene placement edits per ADR-0026, closing the UI-002 snapshot-read to
+dispatch race. Continue directly on main under the user's standing
+preference. All 41 auxiliary worktree histories were already reconciled;
+preserve their existing local edits. Assign disjoint files to parallel
+agents; only the coordinator commits and pushes.
 
-## Canonical history contract (ADR-0025)
+## Conditional placement edit contract (ADR-0026)
 
-- Command::Undo/Redo and matching native requests are parameterless. The actor
-  intercepts them in ordinary permission-aware dispatch; compatibility handle
-  helpers delegate to that path. Special Undo/Redo actor messages were removed.
-- Pure AppState owns no history and rejects these operations, including any
-  occurrence inside a nested atomic Transaction before authoritative mutation.
-- The initial gate requires any mutation scope or Admin, then every actual
-  inverse/forward operation is recursively authorized. required_permission
-  returns conservative Admin for history because one static scope cannot
-  describe an actor-owned entry. Use Permissions::check and actor dispatch.
-- History is one global chronological timeline, with unchanged entry/byte/node/
-  label/nesting budgets and controller group ownership (ADR-0015). An open
-  gesture group blocks Undo/Redo for everyone. Failed permissions, structure,
-  preflight or application preserve state, history, revision and observations.
-- Successful replay returns label undo/redo, emits ordinary Core Events, publishes
-  the resulting snapshot, clears stale meters and notifies persistence using
-  the actual replay action. Mixed collection/profile changes persist correctly.
-- AppSnapshot.history() exposes bounded optional undo/redo labels and group_open;
-  can_undo/can_redo are advisory presentation checks. Successful group begin/end
-  publishes a new immutable snapshot at the same state/runtime revision, without
-  clearing meters or invalidating capture. Watch consumers must not suppress
-  metadata refresh just because the revision is unchanged.
-- Capture authorization never enters history. Replayed source settings/enabled
-  changes invalidate transient capture through normal commit logic. Restoring
-  advisory settings or enabling a source cannot restore grants or reopen it;
-  explicit authorization is required. Authorization preserves existing redo.
-- Native protocol version 1 remains additive: 52 mirrored Core Commands and 65
-  advertised request kinds. Undo/Redo return existing ResponseData::Empty with
-  request_type echo, or structured errors (permission forbidden 800, empty/open
-  group invalid_field 400, forbidden transaction structure invalid_request 100).
-  No history labels/stacks/availability/grants enter wire snapshots. A wire
-  history query and native group APIs remain follow-ups.
-- CLI undo/redo uses existing IPC/WS selection/auth; human output identifies
-  the applied operation, JSON prints the empty mutation data. Success exits 0,
-  transport error exits 1, request/usage rejection exits 2. No payload argument.
-- GTK header buttons and win.undo/win.redo actions send Core Commands. Bubble
-  Ctrl+Z/Ctrl+Shift+Z guards Editable/TextView ancestors, including readonly or
-  empty editors and GtkText delegates. Tooltips show labels; empty history,
-  groups and shutdown disable actions. Rejection refreshes availability and
-  shows the existing command-error toast. GTK owns no separate history stack.
+- `Command::SetSceneItemTransformIf { scene_id, item_id, transform, expect }`
+  carries a flat `PlacementExpectation`: item transform/crop/bounds/locked,
+  current_scene, active_profile + video config, and
+  `source_dimensions: Option<SourceDimensions>`. Controllers obtain every
+  value from the wire/local snapshot; no grants are exposed.
+- The actor compares `source_dimensions` against its capture runtime before
+  inverse preparation; domain `apply` enforces the state preimage
+  (`check_placement_expectation`) in the same serialized turn before any
+  mutation. Mismatch is `Error::Conflict("stale placement edit:
+  expect.<field> mismatch")` and changes nothing: no state, events,
+  revision, snapshot, history, meters, capture invalidation or persistence.
+  Missing scene/item stays `NotFound`.
+- Conditional commands are top-level only: rejected as transaction members
+  by the domain and by wire mapping. History records the unconditional
+  `SetSceneItemTransform` inverse, so Undo/Redo never replay a stale
+  expectation (runtime dims can change without clearing redo — covered by
+  test).
+- Unrelated commits do not invalidate a pending conditional edit — the
+  deliberate advantage of entity preimage over global revision.
+- Native protocol v1 additive: `set_scene_item_transform_if` is the 66th
+  advertised request; Conflict -> state_conflict 500 with `field`; obs-ws
+  unchanged (Conflict -> 604). GTK gesture finish() and numeric/action
+  controls submit the conditional command; rejections use the existing
+  command-error toast. Unconditional commands remain for deliberate control.
 
 ## Verification
 
-See docs/testing/core-history.md, docs/testing/undo-history.md and
-research/core-006-history-controllers.md. Final just ci passed 692 tests, zero failed and 20 environment-dependent ignored;
-formatting and workspace all-target Clippy are clean. just deny passed separately
-with existing warnings. No dependencies changed. STATE.yaml and JOURNAL.md record
-the evidence.
-
-Five app history tests cover mixed scopes on both replays, wrapper/canonical
-behavior, open/foreign groups, capacity/no-ops, repeated failed atomic replay,
-snapshot identity, same-revision active capture/meters and both capture families'
-consent invalidation. Pure domain test rejects direct/nested history application.
-Real persistence regression flushes and reads collection/profile files after a
-mixed transaction, Undo and Redo; a new actor with identical final working state
-starts with empty history (no complete disk-to-AppState bootstrap is claimed).
-
-Three native integration tests each exercise actual Unix and loopback WebSocket
-transports: scoped success with consecutive normal Events and matching snapshots,
-read-only/wrong/mixed scopes on Undo and Redo, empty/open groups and forbidden
-atomic members. CLI subprocess tests exercise the real binary/socket, human/JSON
-results, rejection/usage exits and preserved history. Existing auth/TLS/OBS paths
-remain unchanged.
-
-Two GTK tests passed in separate real Wayland/Cairo/fatal-critical processes:
+See docs/testing/conditional-placement-edits.md. Final just ci passed 716
+tests, zero failed, 20 environment-dependent ignored; fmt, workspace
+all-target Clippy and just deny clean. No dependencies changed. Deterministic
+owner race tests (app), preimage matrix (core), real Unix + loopback
+WebSocket conflict tests (remote, tests/conditional_placement.rs) and two
+headless actor-backed GTK race tests all pass. The ignored real-display GTK
+placement regression passed separately:
 
 ```sh
-GDK_BACKEND=wayland GSK_RENDERER=cairo G_DEBUG=fatal-criticals cargo test -p prismcast-ui native_window_history_actions_share_controller_history_and_refresh_groups -- --ignored --nocapture --test-threads=1
-GDK_BACKEND=wayland GSK_RENDERER=cairo G_DEBUG=fatal-criticals cargo test -p prismcast-ui text_editors_keep_history_shortcuts_even_readonly_or_empty -- --ignored --nocapture --test-threads=1
+GDK_BACKEND=wayland GSK_RENDERER=cairo G_DEBUG=fatal-criticals cargo test -p prismcast-ui production_preview_gesture_signals_commit_once_and_cancel_stale_edits -- --ignored --nocapture --test-threads=1
 ```
 
-These exercise production header clicks, key-controller signals with actual Core
-state assertions, second-controller edits, same-revision group refresh, visible
-rejection toast, corrected availability and joined shutdown. They do not inject
-physical compositor keyboard events. No new dependencies were added.
+## Next work candidates (no task file is marked ready)
 
-## Exact next task
+Pick from the open questions in STATE.yaml and PLAN.md; create/scoped task
+files as needed. Notable follow-ups: conditional crop/bounds variants can
+reuse PlacementExpectation; destructive Add/Remove undo and persisted
+history; wire history availability query and native group APIs; z-order
+boundary overflow and missing neighbor events; scene-nesting cycle check;
+the CAPTURE-002 live window preview coordinated-selection retry (below).
 
-Read .agent/tasks/CORE-007.yaml: atomic conditional scene placement edits. This
-closes the UI-002 snapshot-read to dispatch race. Choose and document bounded
-preconditions in an ADR before implementation, comparing revisions with entity
-preimages. A delayed GTK or native edit must not overwrite a newer transform,
-crop, lock, removal or relevant scene/source/runtime context. Preserve normal
-Events, bounded undo and explicit capture consent; replay must not reintroduce
-stale admission conditions. Destructive undo, groups and persisted history remain
-separate tasks. Z-order overflow/missing neighbor events and scene nesting cycle
-checks also remain unresolved domain follow-ups.
+## Canonical history contract (ADR-0025, unchanged)
+
+Command::Undo/Redo remain parameterless canonical commands in ordinary
+permission-aware dispatch; pure AppState owns no history and rejects them,
+including nested in Transactions. History is one bounded global timeline
+with controller group ownership; an open group blocks Undo/Redo for
+everyone. Successful replay emits ordinary events, publishes the snapshot,
+clears stale meters and notifies persistence. AppSnapshot.history() is
+advisory presentation metadata. Capture authorization never enters history;
+replayed settings/enabled changes invalidate transient capture without
+restoring grants. Native undo/redo return ResponseData::Empty; no history
+payloads cross the wire. CLI undo/redo exit codes: 0 success, 1 transport,
+2 request/usage. GTK header buttons and win.undo/win.redo send Core
+Commands; bubble Ctrl+Z/Ctrl+Shift+Z guards Editable/TextView ancestors.
 
 ## Capture/audio context and remaining platform evidence
 

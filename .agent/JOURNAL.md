@@ -948,3 +948,47 @@ native gesture grouping remain separate work. Capture platform limitations
 from CAPTURE-004 remain unchanged; no overall product completion is claimed.
 Next ready task CORE-007 closes the UI-002 snapshot-read to dispatch race with
 atomic conditional placement edits. STATE/HANDOFF/BACKLOG and task status updated.
+
+## 2026-10-03 — CORE-007 atomic conditional scene placement edits (8fc0d74)
+
+ADR-0026 (fa72bca) chose a typed entity-preimage expectation over global
+revision or per-entity version counters: Command::SetSceneItemTransformIf
+carries the exact PlacementExpectation basis (item transform/crop/bounds/
+locked, current scene, active profile + video config, negotiated source
+dimensions) an edit was computed from. The actor compares source_dimensions
+against its owned capture runtime before inverse preparation; the domain
+apply enforces the state preimage in the same serialized turn before any
+mutation. Mismatch is the new Error::Conflict and changes nothing — no state,
+events, revision bump, snapshot, history, meter clear, capture invalidation
+or persistence notification. Missing scene/item keeps not_found semantics.
+Conditional commands are top-level only (rejected as transaction members in
+domain and wire). History records the unconditional SetSceneItemTransform
+inverse, so Undo/Redo replay never re-checks a stale expectation; a runtime
+dims change between undo and redo proves redo succeeds unconditionally.
+
+Native protocol v1 stays additive: set_scene_item_transform_if is the 66th
+advertised request; Conflict maps to state_conflict 500 with field naming
+the mismatched expectation member; transaction membership is invalid_request;
+the obs-websocket adapter is unchanged (Conflict there maps to 604). GTK
+gesture finish() and numeric/action controls submit the conditional command
+with their originally captured context; rejections surface through the
+existing command-error toast. Unrelated commits (renames, other items, audio)
+do not invalidate a pending conditional edit — the key preimage advantage
+over a global revision check.
+
+Direct-main swarm: core, app, protocol+remote, and UI agents owned disjoint
+crates; coordinator reviewed, integrated, committed and pushed. just ci PASS:
+716 tests, zero failed, 20 environment-dependent ignored; fmt and workspace
+all-target Clippy clean; just deny PASS. Deterministic owner race tests cover
+stale transform/crop/lock/removal/scene/profile/dims conflicts, unrelated
+commit success, no-op and permission paths. Real Unix AND loopback WebSocket
+integration tests prove snapshot-derived success, 500+field conflict with the
+newer value surviving, 800 permission and transaction rejection. The ignored
+real-display GTK placement regression passed separately under Wayland/Cairo/
+fatal-criticals with --test-threads=1. Evidence: docs/testing/conditional-
+placement-edits.md, preview-editor.md, native-protocol.md.
+
+Conditional crop/bounds variants (the expectation type is reusable),
+destructive undo, grouping and persisted history remain separate work. The
+UI-002 snapshot-read to dispatch race is closed; z-order overflow/missing
+neighbor events and scene-nesting cycle checks remain open domain follow-ups.
